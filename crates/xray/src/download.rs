@@ -327,12 +327,20 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> Result<(), DownloadError> {
     };
 
     std::fs::write(&tmp, bytes).map_err(fail)?;
-    // Windows will not rename onto an existing file; the old one may also be a
-    // running engine, in which case removal fails and the update must wait.
-    if path.exists() {
-        std::fs::remove_file(path).map_err(fail)?;
+
+    // Straight over the top. There used to be a `remove_file` here, on the
+    // premise that Windows will not rename onto an existing file — it will:
+    // `std::fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`. So
+    // the removal bought nothing and cost the guarantee this function exists
+    // for, by leaving a moment with no engine at all if the rename then failed.
+    //
+    // A running engine still cannot be replaced — the rename fails with a
+    // sharing violation, which is the right answer and leaves the old one
+    // working. Only the temporary needs clearing up in that case.
+    if let Err(source) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(fail(source));
     }
-    std::fs::rename(&tmp, path).map_err(fail)?;
     Ok(())
 }
 
