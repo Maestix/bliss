@@ -397,6 +397,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
     let (tone, outer, inner) = tones(frame.state);
     let on = frame.state.is_on();
     let span_seconds = frame.history.len() / 2;
+    let reason = frame.error.clone().unwrap_or_default();
 
     rsx! {
         div {
@@ -410,6 +411,24 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 }
             }
 
+            // The reason a start failed. The engine has always carried it in the
+            // frame and the window never read it, so a failure was a red ring
+            // saying "Ошибка" and nothing else — the explanation existed only in
+            // the log, which is one screen away and not where anyone looks first.
+            if !reason.is_empty() {
+                div {
+                    style: "flex:none;display:flex;align-items:flex-start;gap:9px;\
+                            padding:10px 13px;border-radius:var(--radius-md);\
+                            background-color:rgba(168,80,92,.10);\
+                            box-shadow:inset 0 0 0 1px rgba(168,80,92,.26)",
+                    span {
+                        style: "font-size:13.5px;line-height:1.45;color:#d9a2a9;\
+                                min-width:0;word-break:break-word",
+                        "{reason}"
+                    }
+                }
+            }
+
             div { style: "display:flex;gap:13px;align-items:stretch;flex:none",
                 div {
                     style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
@@ -420,7 +439,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                         style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
                                 place-items:center;border:1px solid {tone};cursor:default;\
                                 box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
-                        onclick: move |_| controller.send(Command::Toggle),
+                        onclick: move |_| controller.send(Command::Toggle { was_on: on }),
                         crate::icons::Power { size: 28, color: tone }
                     }
                     div { style: "display:flex;flex-direction:column;gap:4px;min-width:0",
@@ -445,7 +464,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                             tone: tone.to_owned(),
                             onclick: {
                                 let controller = controller.clone();
-                                move |_| controller.send(Command::Toggle)
+                                move |_| controller.send(Command::Toggle { was_on: on })
                             },
                         }
                         span { style: "font-size:13px;color:var(--color-neutral-600)",
@@ -575,10 +594,7 @@ fn TrafficTab(frame: Frame) -> Element {
 fn ServersTab(frame: Frame) -> Element {
     const COLUMNS: &str = "grid-template-columns:1.2fr 1.4fr 118px 78px;gap:12px";
     let controller = use_context::<Controller>();
-    let probing = frame
-        .servers
-        .iter()
-        .any(|s| matches!(s.ping, Ping::Probing));
+    let probing = sweeping(&frame);
 
     rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:7px",
@@ -648,6 +664,9 @@ fn ServersTab(frame: Frame) -> Element {
 fn ActionsTab(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
     let on = frame.state.is_on();
+    // The same guard the list's own button carries. Without it the two buttons
+    // for one command disagreed, and this one could start sweep after sweep.
+    let probing = sweeping(&frame);
 
     rsx! {
         div {
@@ -655,9 +674,9 @@ fn ActionsTab(frame: Frame) -> Element {
                     grid-template-columns:1fr 1fr;gap:9px;align-content:start;padding-top:2px",
 
             ActionCard {
-                title: "Проверить серверы",
+                title: if probing { "Проверяю серверы…" } else { "Проверить серверы" },
                 hint: "рукопожатие до каждого из профиля",
-                enabled: !frame.servers.is_empty(),
+                enabled: !probing && !frame.servers.is_empty(),
                 onclick: {
                     let controller = controller.clone();
                     move |_| controller.send(Command::PingAll)
@@ -768,6 +787,12 @@ fn current_mark(current: bool) -> &'static str {
     } else {
         ""
     }
+}
+
+/// Is a sweep under way? Both buttons that start one ask this, so they cannot
+/// disagree about whether it is available.
+fn sweeping(frame: &Frame) -> bool {
+    frame.servers.iter().any(|s| s.ping == Ping::Probing)
 }
 
 fn ping_text(ping: Ping) -> String {
