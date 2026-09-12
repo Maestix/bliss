@@ -35,6 +35,49 @@ pub struct Inbound {
     pub socks: u16,
     #[serde(default = "Inbound::default_http")]
     pub http: u16,
+    /// What bliss does with the machine's own proxy settings.
+    #[serde(default)]
+    pub system_proxy: ProxyMode,
+}
+
+/// What to do with the machine-wide proxy settings, the three choices every
+/// client in this ecosystem offers.
+///
+/// The default is [`ProxyMode::Unchanged`], and deliberately so: writing to
+/// `HKCU\...\Internet Settings` changes how every program on the machine
+/// reaches the network, and a proxy client has no business doing that until it
+/// is asked. It is also the mode that cannot strand anyone — see
+/// `bliss_core::sysproxy` for what the other two have to clean up after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProxyMode {
+    /// Touch nothing.
+    #[default]
+    Unchanged,
+    /// Point the machine at bliss for as long as bliss is serving.
+    Set,
+    /// Turn the machine's proxy off and leave it off.
+    Clear,
+}
+
+impl ProxyMode {
+    /// The label the window shows. Kept here rather than in the UI because the
+    /// tray menu in 1.8 needs the same three words.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unchanged => "Не изменять",
+            Self::Set => "Установить системный прокси",
+            Self::Clear => "Очистить системный прокси",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Set => "set",
+            Self::Clear => "clear",
+        }
+    }
 }
 
 impl Inbound {
@@ -57,6 +100,7 @@ impl Default for Inbound {
             listen: Self::default_listen(),
             socks: Self::default_socks(),
             http: Self::default_http(),
+            system_proxy: ProxyMode::default(),
         }
     }
 }
