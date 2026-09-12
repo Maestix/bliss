@@ -14,6 +14,21 @@ listen = "127.0.0.1"
 socks = 10808
 http = 10809
 
+# What bliss does with the machine's own proxy settings. Three choices:
+#
+#   "unchanged"  leave Windows alone; you point programs at the ports above
+#                yourself. The default, because this is the only one that
+#                cannot affect anything outside bliss.
+#   "set"        point all of Windows at bliss while the tunnel is up, and put
+#                the old settings back on the way out.
+#   "clear"      turn the Windows proxy off, for when something else left it on.
+#
+# Changeable from the window at any time — this line is only the starting
+# choice. With "set", the settings are written when the tunnel comes up and
+# never before: a proxy aimed at a port nothing is listening on would look
+# exactly like a broken internet connection.
+system_proxy = "unchanged"
+
 [engine]
 # Left unset, bliss uses the engine it downloads itself (`bliss engine install`).
 # Point it at an xray.exe you already have if you would rather:

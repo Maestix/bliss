@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bliss_core::{EngineInfo, Inbound, SocksOutbound, Tracker};
-use bliss_proto::{Flow, Profile, Security, ServerConfig};
+use bliss_proto::{Flow, Profile, ProxyMode, Security, ServerConfig};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -100,6 +100,12 @@ pub struct Frame {
     pub fingerprint: String,
     /// Every server in the profile, in the order it is written there.
     pub servers: Vec<ServerRow>,
+    /// What bliss is set to do with the machine's proxy settings.
+    pub proxy_mode: ProxyMode,
+    /// Whether those settings currently point at us. Distinct from the mode:
+    /// "set" with the tunnel down deliberately writes nothing, because a proxy
+    /// aimed at a port nobody is listening on takes the machine offline.
+    pub proxy_applied: bool,
     /// Bytes per second over the last tick.
     pub up_rate: u64,
     pub down_rate: u64,
@@ -135,6 +141,8 @@ pub enum Command {
     Select(usize),
     /// Measure every server's handshake time.
     PingAll,
+    /// Change what bliss does with the machine's proxy settings.
+    Proxy(ProxyMode),
     /// Show one of bliss's own files to the user.
     Reveal(Reveal),
 }
@@ -231,6 +239,7 @@ fn initial_frame(setup: &Setup) -> Frame {
             setup.profile.inbound.socks, setup.profile.inbound.http
         ),
         history: vec![0; 40],
+        proxy_mode: setup.profile.inbound.system_proxy,
         servers: setup
             .servers
             .iter()
@@ -310,6 +319,8 @@ async fn drive(
     // 12N sockets — which is exactly what two clicks on the button produced.
     let probes = Arc::new(Sweep::new());
 
+    let mut proxy = setup.profile.inbound.system_proxy;
+
     // One sweep at the start, so the list arrives with numbers in it rather
     // than with a column of dashes waiting for someone to discover the button.
     ping_all(&setup.servers, &frames, &probes);
@@ -317,6 +328,7 @@ async fn drive(
     if setup.autostart {
         running = start(&setup, selected, &tracker, &frames).await;
     }
+    apply_proxy(proxy, &setup, running.is_some(), &frames);
 
     loop {
         tokio::select! {
@@ -326,9 +338,13 @@ async fn drive(
                     Command::Start => {
                         if running.is_none() {
                             running = start(&setup, selected, &tracker, &frames).await;
+                            apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
-                    Command::Stop => stop_now(&mut running, &frames).await,
+                    Command::Stop => {
+                        stop_now(&mut running, &frames).await;
+                        apply_proxy(proxy, &setup, false, &frames);
+                    }
                     Command::Toggle { was_on } => {
                         // Read against what the user saw, not against what has
                         // become true since. A click on a switch that showed
@@ -336,8 +352,10 @@ async fn drive(
                         // has finished — or failed — while it queued.
                         if was_on {
                             stop_now(&mut running, &frames).await;
+                            apply_proxy(proxy, &setup, false, &frames);
                         } else if running.is_none() {
                             running = start(&setup, selected, &tracker, &frames).await;
+                            apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
                     Command::Restart => {
@@ -345,6 +363,7 @@ async fn drive(
                             parts.stop().await;
                         }
                         running = start(&setup, selected, &tracker, &frames).await;
+                        apply_proxy(proxy, &setup, running.is_some(), &frames);
                     }
                     // Switching server means rebuilding the engine: its config
                     // names exactly one, so there is nothing to reload. The old
@@ -382,9 +401,14 @@ async fn drive(
                             if resume {
                                 running = start(&setup, selected, &tracker, &frames).await;
                             }
+                            apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
                     Command::PingAll => ping_all(&setup.servers, &frames, &probes),
+                    Command::Proxy(mode) => {
+                        proxy = mode;
+                        apply_proxy(proxy, &setup, running.is_some(), &frames);
+                    }
                     Command::Reveal(what) => reveal(match what {
                         Reveal::Profile => &setup.profile_path,
                         Reveal::WorkDir => &setup.work_dir,
@@ -404,6 +428,9 @@ async fn drive(
                         parts.stop().await;
                     }
                     running = fail(&frames, &format!("движок неожиданно завершился ({status})"));
+                    // The machine must not be left pointed at a port that has
+                    // just stopped listening.
+                    apply_proxy(proxy, &setup, false, &frames);
                 }
                 publish(&frames, &tracker, &mut last, running.as_ref());
             }
@@ -422,6 +449,45 @@ async fn drive(
 
     if let Some(parts) = running.take() {
         parts.stop().await;
+    }
+    // Belt: the window also restores on its way out, and the startup check is
+    // the braces. This covers the ordinary case of the channel closing.
+    let _ = bliss_core::sysproxy::restore(&setup.work_dir);
+}
+
+/// Point the machine's proxy settings at us, or put them back.
+///
+/// `serving` is what makes this safe: mode `Set` with nothing listening writes
+/// nothing at all. A proxy aimed at a dead port is indistinguishable, from the
+/// user's chair, from the internet being broken — so the mode is remembered
+/// and takes effect when the tunnel comes up.
+fn apply_proxy(mode: ProxyMode, setup: &Setup, serving: bool, frames: &watch::Sender<Frame>) {
+    let addr = serving.then(|| {
+        let inbound = &setup.profile.inbound;
+        // A proxy value has to name an address a client can dial. If we are
+        // listening on every interface, the one to tell the machine about is
+        // loopback.
+        let ip = if inbound.listen.is_unspecified() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            inbound.listen
+        };
+        SocketAddr::new(ip, inbound.http)
+    });
+
+    match bliss_core::sysproxy::apply(mode, &setup.work_dir, addr) {
+        Ok(applied) => frames.send_modify(|f| {
+            f.proxy_mode = mode;
+            f.proxy_applied = applied;
+        }),
+        Err(e) => {
+            tracing::error!("system proxy: {e}");
+            frames.send_modify(|f| {
+                f.proxy_mode = mode;
+                f.proxy_applied = false;
+                f.error = Some(format!("не удалось изменить системный прокси: {e}"));
+            });
+        }
     }
 }
 

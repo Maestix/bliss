@@ -14,6 +14,7 @@ mod target;
 mod tracker;
 
 pub mod http;
+pub mod sysproxy;
 
 pub use inbound::{Bound, Inbound, serve};
 pub use outbound::{BoxedStream, EngineInfo, Outbound, SocksOutbound};

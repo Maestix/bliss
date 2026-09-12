@@ -96,30 +96,37 @@ async fn handle(
     // anything the HTTP head reader buffered travels with the stream.
     let mut stream = BufReader::new(stream);
 
+    // The head a forwarded request has to replay upstream. Empty for SOCKS and
+    // for CONNECT, where the client's next byte is already payload.
+    let mut replay = Vec::new();
+
     let target = if socks {
         socks5::accept(&mut stream).await?
     } else {
         match http::accept(&mut stream).await {
-            Ok(target) => target,
-            Err(http::HttpError::Method(m)) => {
-                http::refuse(
-                    &mut stream,
-                    "501 Not Implemented",
-                    &format!("{m} is not served; bliss proxies CONNECT only"),
-                )
-                .await?;
+            Ok(http::Request::Connect(target)) => target,
+            Ok(http::Request::Forward { target, head }) => {
+                replay = head;
+                target
+            }
+            Err(e @ (http::HttpError::NotProxied(..) | http::HttpError::Scheme(_))) => {
+                // Nothing is wrong with the connection, so answer on it rather
+                // than dropping it: a browser shows this, a dropped socket
+                // shows a spinner.
+                http::refuse(&mut stream, "501 Not Implemented", &e.to_string()).await?;
                 return Ok(());
             }
             Err(e) => return Err(std::io::Error::other(e)),
         }
     };
 
-    dial_and_relay(stream, socks, target, peer, outbound, tracker).await
+    dial_and_relay(stream, socks, replay, target, peer, outbound, tracker).await
 }
 
 async fn dial_and_relay(
     mut client: BufReader<TcpStream>,
     socks: bool,
+    replay: Vec<u8>,
     target: Target,
     peer: SocketAddr,
     outbound: Arc<dyn Outbound>,
@@ -131,7 +138,7 @@ async fn dial_and_relay(
     let route = Route::Proxy;
     let rule = "default";
 
-    let upstream = match outbound.connect_tcp(&target).await {
+    let mut upstream = match outbound.connect_tcp(&target).await {
         Ok(stream) => stream,
         Err(e) => {
             tracing::info!("conn: {target} refused — {e}");
@@ -146,8 +153,17 @@ async fn dial_and_relay(
 
     if socks {
         socks5::reply(&mut client, 0).await?;
-    } else {
+    } else if replay.is_empty() {
+        // A tunnel: tell the client it is open and then get out of the way.
         http::established(&mut client).await?;
+    } else {
+        // A forwarded request: the client is not told anything, because
+        // everything it sees from here is the origin server's own answer. Its
+        // head goes upstream first, then the relay carries the body and the
+        // response.
+        use tokio::io::AsyncWriteExt;
+        upstream.write_all(&replay).await?;
+        upstream.flush().await?;
     }
 
     let process = crate::process::name_for_port(peer.port());

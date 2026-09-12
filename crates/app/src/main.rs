@@ -104,6 +104,22 @@ fn main() -> Result<()> {
             .trim_end()
     );
 
+    // Before anything else. A run that was killed rather than closed leaves the
+    // machine pointed at a port nobody is listening on, and from the user's
+    // chair that is "the internet stopped working" with nothing to go on. The
+    // snapshot on disk is the only part of that cleanup which survives being
+    // killed, so honouring it is the first thing bliss does.
+    if let Ok(dir) = work_dir() {
+        match bliss_core::sysproxy::recover(&dir) {
+            Ok(true) => tracing::warn!(
+                "a previous run left the system proxy set; put the old settings back"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::error!("could not undo a previous run's system proxy: {e}"),
+        }
+        guard_system_proxy(dir);
+    }
+
     match Cli::parse().command {
         // No subcommand is the product: the window. The CLI is for setting it
         // up and for looking under the hood.
@@ -138,9 +154,31 @@ async fn cli(command: Command) -> Result<()> {
 /// insists on the main thread — so the engine gets a runtime of its own.
 fn window() -> Result<()> {
     let setup = prepare(None, None, "warning")?;
+    let work_dir = setup.work_dir.clone();
     let controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
     ui::launch(controller);
+
+    // The engine thread is detached, so it may not get to run its own cleanup
+    // when the event loop ends and the process winds down. This is the ordinary
+    // close path and it happens here, on the thread that is definitely alive.
+    if let Err(e) = bliss_core::sysproxy::restore(&work_dir) {
+        tracing::error!("could not restore the system proxy on the way out: {e}");
+    }
     Ok(())
+}
+
+/// Put the machine's proxy settings back if we panic.
+///
+/// Not the safety net — a panic in a worker thread does not end the process,
+/// and a kill runs no hooks at all. The startup check in `main` is what this
+/// actually relies on; this just shortens the window in the one case where
+/// some of our code still gets to run.
+fn guard_system_proxy(work_dir: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = bliss_core::sysproxy::restore(&work_dir);
+        previous(info);
+    }));
 }
 
 /// Everything needed to run, gathered from the profile once.
@@ -307,6 +345,7 @@ async fn run(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> R
     );
     let described = describe(&setup.servers[setup.selected]);
     let bridge = setup.profile.engine.bridge_port;
+    let work_dir = setup.work_dir.clone();
 
     let mut controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
 
@@ -344,6 +383,9 @@ Ctrl-C to stop.
 
     tokio::signal::ctrl_c().await?;
     report(&controller.frame());
+    if let Err(e) = bliss_core::sysproxy::restore(&work_dir) {
+        tracing::error!("could not restore the system proxy on the way out: {e}");
+    }
     // The engine is a child in a Job Object, so it goes when we do.
     Ok(())
 }

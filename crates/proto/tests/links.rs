@@ -166,6 +166,28 @@ fn rejects_reality_without_a_public_key() {
     );
 }
 
+/// The file every new user is handed has to parse.
+///
+/// `Profile` denies unknown fields, so a key misspelled in the example — or a
+/// key documented there before it exists in the struct — is a hard failure on
+/// someone's very first run, at the moment they have least idea what is wrong.
+#[test]
+fn the_example_profile_is_a_valid_profile() {
+    const EXAMPLE: &str = include_str!("../../../bliss.example.toml");
+    let profile: bliss_proto::Profile =
+        toml::from_str(EXAMPLE).expect("the example profile must parse");
+
+    // And the defaults it documents have to be the defaults it gets.
+    assert_eq!(profile.inbound.socks, 10808);
+    assert_eq!(profile.inbound.http, 10809);
+    assert_eq!(profile.engine.bridge_port, 11080);
+    assert_eq!(
+        profile.inbound.system_proxy,
+        bliss_proto::ProxyMode::Unchanged,
+        "the one mode that cannot touch anything outside bliss"
+    );
+}
+
 #[test]
 fn short_id_may_be_absent_or_full_length() {
     assert!(ShortId::EMPTY.is_empty());

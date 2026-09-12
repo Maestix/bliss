@@ -14,6 +14,7 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::engine::{Command, Controller, Frame, Ping, Reveal, State, bytes, rate};
+use bliss_proto::ProxyMode;
 
 const NOCTURNE: &str = include_str!("../assets/nocturne.css");
 const APP_CSS: &str = include_str!("../assets/app.css");
@@ -713,15 +714,112 @@ fn ActionsTab(frame: Frame) -> Element {
                 },
                 icon: rsx! { crate::icons::Folder { size: 17, color: ACCENT } },
             }
-            // Dimmed rather than absent, for the same reason as the rail: the
-            // shape of the program is honest about what is not built yet.
-            ActionCard {
-                title: "Системный прокси",
-                hint: "пока включается в настройках Windows",
-                enabled: false,
-                onclick: move |_| {},
-                icon: rsx! { crate::icons::Shield { size: 17, color: "#595d6c" } },
+
+            SystemProxy { frame: frame.clone() }
+        }
+    }
+}
+
+/// The machine's proxy settings, as the three choices every client here offers.
+///
+/// Laid out as a group of three rather than a switch because the third one is
+/// not the opposite of the first: "leave it alone" and "turn it off" are
+/// different instructions, and a two-state control cannot say both.
+#[component]
+fn SystemProxy(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let chosen = frame.proxy_mode;
+
+    // What the machine is actually doing, which is not always what was asked
+    // for: "set" waits for the tunnel rather than writing a proxy that points
+    // at a port nobody is listening on.
+    let state = match (chosen, frame.proxy_applied) {
+        (ProxyMode::Set, true) => ("активен", ON.0),
+        (ProxyMode::Set, false) => ("применится при подключении", "var(--color-neutral-500)"),
+        (ProxyMode::Clear, _) => ("выключен", "var(--color-neutral-400)"),
+        (ProxyMode::Unchanged, _) => ("как было", "var(--color-neutral-500)"),
+    };
+
+    rsx! {
+        div {
+            style: "grid-column:1 / -1;display:flex;flex-direction:column;gap:8px;\
+                    padding:12px 13px;border-radius:var(--radius-md);\
+                    background-color:rgba(233,233,237,.03)",
+            div { style: "display:flex;align-items:center;gap:11px",
+                crate::icons::Shield { size: 17, color: ACCENT }
+                span { style: "font-size:14.5px", "Системный прокси" }
+                span {
+                    style: "margin-left:auto;font-size:12.5px;color:{state.1}",
+                    "{state.0}"
+                }
             }
+            div { style: "display:flex;flex-direction:column;gap:3px",
+                for mode in [ProxyMode::Unchanged, ProxyMode::Set, ProxyMode::Clear] {
+                    div {
+                        key: "{mode.key()}",
+                        class: if mode == chosen { "act choice on" } else { "act choice" },
+                        style: "display:flex;align-items:center;gap:9px;padding:6px 9px;\
+                                border-radius:var(--radius-sm);cursor:default;font-size:13.5px;\
+                                color:{choice_tint(mode == chosen)}",
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Proxy(mode))
+                        },
+                        // A filled dot rather than a tick: three options of
+                        // which exactly one holds, which is what a radio means.
+                        div {
+                            style: "width:13px;height:13px;flex:none;border-radius:50%;\
+                                    box-shadow:inset 0 0 0 1px {choice_ring(mode == chosen)};\
+                                    display:grid;place-items:center",
+                            if mode == chosen {
+                                div {
+                                    style: "width:6px;height:6px;border-radius:50%;\
+                                            background-color:var(--color-accent)",
+                                }
+                            }
+                        }
+                        "{mode.label()}"
+                    }
+                }
+            }
+            span {
+                style: "font-size:12px;line-height:1.45;color:var(--color-neutral-600)",
+                "{proxy_note(chosen)}"
+            }
+        }
+    }
+}
+
+fn choice_tint(chosen: bool) -> &'static str {
+    if chosen {
+        "var(--color-neutral-200)"
+    } else {
+        "var(--color-neutral-500)"
+    }
+}
+
+fn choice_ring(chosen: bool) -> &'static str {
+    if chosen {
+        "var(--color-accent)"
+    } else {
+        "rgba(233,233,237,.22)"
+    }
+}
+
+/// One line saying what the choice does to the machine, in plain terms.
+///
+/// Worth the space: this is the only control in bliss that changes how *other*
+/// programs reach the network, and the three words alone do not say that.
+fn proxy_note(mode: ProxyMode) -> &'static str {
+    match mode {
+        ProxyMode::Unchanged => "bliss не трогает настройки Windows. Прокси прописываете сами.",
+        ProxyMode::Set => {
+            "Весь трафик Windows идёт через bliss, пока туннель поднят. \
+                           При выходе настройки вернутся как были."
+        }
+        ProxyMode::Clear => {
+            "Прокси в Windows выключен — на случай, если его оставила \
+                             другая программа."
         }
     }
 }
