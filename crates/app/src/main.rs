@@ -414,7 +414,7 @@ where
     std::fs::create_dir_all(&dir).ok()?;
 
     let path = dir.join("bliss.log");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIMIT) {
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIMIT) && held_by_no_one_else(&path) {
         let _ = std::fs::remove_file(&path);
     }
     let file = std::fs::OpenOptions::new()
@@ -430,6 +430,31 @@ where
             // second, and it keeps this to one function with no new dependency.
             .with_writer(move || file.try_clone().expect("clone the log handle")),
     )
+}
+
+/// Is this log ours alone to trim?
+///
+/// Rust opens files with `FILE_SHARE_DELETE`, so deleting one another bliss is
+/// appending to succeeds — and that process goes on writing into a file nobody
+/// can find any more. Which destroys exactly the record the comment above
+/// promises to keep. Asking for the file with no sharing at all answers the
+/// question: the open fails if anyone else has it.
+///
+/// There is a hair of a race between this and the delete. Losing it costs one
+/// oversized log, which is where we started.
+#[cfg(windows)]
+fn held_by_no_one_else(path: &std::path::Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .is_ok()
+}
+
+#[cfg(not(windows))]
+fn held_by_no_one_else(_path: &std::path::Path) -> bool {
+    true
 }
 
 /// Put a startup failure where someone who double-clicked can read it.

@@ -30,12 +30,24 @@ where
         conn.add_down(n)
     });
 
-    // Whichever direction ends first ends the connection: for a CONNECT tunnel
-    // there is nothing useful left once one side is gone.
-    tokio::select! {
-        result = upstream => result,
-        result = downstream => result,
-    }
+    // Both directions run to the end; only a failure cuts the other one short.
+    //
+    // This used to be a `select!`, which returned the moment either direction
+    // finished and dropped the other wherever it was parked — possibly holding
+    // bytes it had already read. That made `pump`'s half-close meaningless: the
+    // FIN was followed microseconds later by a close, so the peer never got the
+    // chance the half-close exists to grant it. A client that sent its request
+    // and shut down its writing half received nothing at all.
+    //
+    // `try_join!` waits for both on the happy path and abandons the other on the
+    // first error, which is the right instinct in the one case where the
+    // connection really is beyond use.
+    //
+    // The cost is that a peer which half-closes and then never hears back holds
+    // the connection open until the far end closes. That is ordinary TCP and
+    // every proxy has it; the answer is an idle timeout, which bliss does not
+    // have yet.
+    tokio::try_join!(upstream, downstream).map(|_| ())
 }
 
 async fn pump<R, W>(
@@ -91,10 +103,61 @@ mod tests {
         client_peer.read_exact(&mut back).await.unwrap();
         assert_eq!(&back, b"a-longer-response");
 
+        // Both ends go, which is what a closed socket looks like. Dropping only
+        // the client used to be enough to end the relay — that was the bug in
+        // the test below this one, written into an assertion.
         drop(client_peer);
+        drop(server_peer);
         let _ = task.await;
 
         assert_eq!(conn.up(), 7, "client to server");
         assert_eq!(conn.down(), 17, "server to client");
+    }
+
+    /// A client that says its piece and half-closes must still get the answer.
+    ///
+    /// This is the shape of every request-then-listen protocol, and of
+    /// `nc -N` and friends through the SOCKS port. `pump` half-closes rather
+    /// than dropping precisely so the peer can keep sending; the tear-down has
+    /// to honour that or the courtesy is theatre.
+    #[tokio::test]
+    async fn a_half_close_does_not_cancel_the_other_direction() {
+        let (client, mut client_peer) = tokio::io::duplex(1024);
+        let (server, mut server_peer) = tokio::io::duplex(1024);
+
+        let tracker = Tracker::new();
+        let conn = tracker.open(Target::domain("x.example", 80), Route::Proxy, "test", None);
+        let task = tokio::spawn(relay(client, server, Arc::clone(&conn)));
+
+        // Say everything, then close only the sending half.
+        client_peer.write_all(b"request").await.unwrap();
+        client_peer.shutdown().await.unwrap();
+
+        let mut seen = [0u8; 7];
+        server_peer.read_exact(&mut seen).await.unwrap();
+        assert_eq!(&seen, b"request");
+
+        // The half-close has to arrive as an end of stream, not as a dead
+        // socket. Reading it here also pins the ordering: by the time the
+        // response is written, the upstream direction has certainly finished.
+        let mut nothing = [0u8; 1];
+        assert_eq!(
+            server_peer.read(&mut nothing).await.unwrap(),
+            0,
+            "half-close"
+        );
+
+        server_peer.write_all(b"the answer").await.unwrap();
+        drop(server_peer);
+
+        let mut answer = Vec::new();
+        client_peer.read_to_end(&mut answer).await.unwrap();
+        assert_eq!(
+            answer, b"the answer",
+            "the response outlives the half-close"
+        );
+
+        let _ = task.await;
+        assert_eq!(conn.down(), 10);
     }
 }

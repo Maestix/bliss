@@ -780,11 +780,10 @@ fn publish(
     let span_ms = now.duration_since(last.at).as_millis() as u64;
     let up_rate = per_second(up, last.up, span_ms);
     let down_rate = per_second(down, last.down, span_ms);
-    let mut connections = tracker.active();
-    connections.sort_by_key(|c| std::cmp::Reverse(c.id));
-    connections.extend(tracker.recent());
-
-    let active = tracker.active_count() as u64;
+    let connections = tracker.table();
+    // Counted from the rows themselves rather than asked for separately, so the
+    // number in the metrics card cannot disagree with the list beside it.
+    let active = connections.iter().filter(|c| c.closed_at.is_none()).count() as u64;
     let mut scale = last.scale.max(SCALE_FLOOR);
 
     frames.send_modify(|f| {

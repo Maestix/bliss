@@ -150,23 +150,29 @@ impl Tracker {
         recent.push_back(snapshot(&conn, Some(jiff::Timestamp::now())));
     }
 
-    pub fn active(&self) -> Vec<Snapshot> {
-        self.active
-            .read()
-            .expect("tracker lock")
-            .values()
-            .map(|c| snapshot(c, None))
-            .collect()
-    }
+    // `active()` and `recent()` used to be separate readers, and every caller
+    // wanted both. Composing them was the bug: two locks taken one after the
+    // other are two moments, and a connection can close in between. `table()`
+    // is the only way to read the rows now, so it cannot be reassembled wrongly.
 
-    pub fn recent(&self) -> Vec<Snapshot> {
-        self.recent
-            .read()
-            .expect("tracker lock")
-            .iter()
-            .rev()
-            .cloned()
-            .collect()
+    /// The whole table as the connections screen shows it: live first, newest
+    /// of each group first, then the recently closed.
+    ///
+    /// Taken under both locks at once, and that is the point. Reading `active`
+    /// and then `recent` as two calls left a gap: a connection that closed
+    /// between them appeared in both lists, so the same `id` arrived twice —
+    /// and the table keys its rows by `id`.
+    ///
+    /// Lock order is active then recent, the same order `close` acquires them
+    /// in, so the two can never wedge against each other.
+    pub fn table(&self) -> Vec<Snapshot> {
+        let active = self.active.read().expect("tracker lock");
+        let recent = self.recent.read().expect("tracker lock");
+
+        let mut rows: Vec<Snapshot> = active.values().map(|c| snapshot(c, None)).collect();
+        rows.sort_by_key(|c| std::cmp::Reverse(c.id));
+        rows.extend(recent.iter().rev().cloned());
+        rows
     }
 
     pub fn active_count(&self) -> usize {
@@ -227,11 +233,11 @@ mod tests {
     #[test]
     fn recent_connections_cannot_grow_without_bound() {
         let t = tracker_with(RECENT_CAP * 3);
-        assert_eq!(t.recent().len(), RECENT_CAP);
+        assert_eq!(t.table().len(), RECENT_CAP);
         assert_eq!(t.active_count(), 0);
         // Newest first, and the oldest are gone rather than merely hidden.
         assert_eq!(
-            t.recent()[0].target,
+            t.table()[0].target,
             format!("host{}.example:443", RECENT_CAP * 3 - 1)
         );
     }
@@ -252,5 +258,28 @@ mod tests {
         assert_eq!(t.totals().1, 4096);
         t.close(c.id);
         assert_eq!(t.totals().1, 4096);
+    }
+
+    /// The table has to be one consistent view. Taken as two reads, a
+    /// connection closing in between landed in the live list and in the recent
+    /// list, and the screen keys its rows by id.
+    #[test]
+    fn the_table_never_shows_one_connection_twice() {
+        let t = Tracker::new();
+        let a = t.open(Target::domain("a.example", 443), Route::Proxy, "r", None);
+        let b = t.open(Target::domain("b.example", 443), Route::Proxy, "r", None);
+        t.close(a.id);
+
+        let rows = t.table();
+        let mut ids: Vec<_> = rows.iter().map(|r| r.id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "every row is a different connection");
+
+        // And it is still the whole picture: one live, one closed.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().filter(|r| r.closed_at.is_none()).count(), 1);
+        assert_eq!(rows[0].id, b.id, "live first, newest first");
     }
 }
