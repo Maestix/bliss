@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bliss_core::{EngineInfo, Inbound, Router, Serving, SocksOutbound, Tracker};
-use bliss_proto::{Flow, Profile, ProxyMode, Security, ServerConfig};
+use bliss_proto::{Action, Flow, Profile, ProxyMode, Security, ServerConfig};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -73,6 +73,38 @@ pub struct ServerRow {
     pub current: bool,
 }
 
+/// One rule, as the routing screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleView {
+    /// Its place in the order, from 1. The order is the rule: first match wins,
+    /// so a screen that hid it would hide how the thing works.
+    pub position: usize,
+    pub name: String,
+    pub action: Action,
+    /// What it matches, in the words the profile used.
+    pub conditions: Vec<String>,
+}
+
+/// The rule table, for the screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoutingView {
+    pub fallback: Action,
+    pub rules: Vec<RuleView>,
+    /// Rules that cannot work, said out loud. See `Router::warnings`.
+    pub warnings: Vec<String>,
+    /// True when the profile has no `[routing]` section at all, which is what
+    /// lets the screen offer to write a starting set rather than explain TOML.
+    pub unconfigured: bool,
+}
+
+/// The answer to "what happens to this destination?"
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckResult {
+    pub target: String,
+    pub action: Action,
+    pub rule: String,
+}
+
 /// Everything the window shows, recomputed each tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
@@ -106,6 +138,10 @@ pub struct Frame {
     /// "set" with the tunnel down deliberately writes nothing, because a proxy
     /// aimed at a port nobody is listening on takes the machine offline.
     pub proxy_applied: bool,
+    /// The rule table as the routing screen shows it.
+    pub routing: RoutingView,
+    /// The last destination someone checked, and what the rules do with it.
+    pub check: Option<CheckResult>,
     /// Bytes per second over the last tick.
     pub up_rate: u64,
     pub down_rate: u64,
@@ -143,6 +179,12 @@ pub enum Command {
     PingAll,
     /// Change what bliss does with the machine's proxy settings.
     Proxy(ProxyMode),
+    /// Read the profile's rules again, without restarting the tunnel.
+    ReloadRules,
+    /// Ask the rules about one destination. The answer lands in the frame.
+    Check(String),
+    /// Append a starting set of rules to the profile.
+    SeedRules,
     /// Show one of bliss's own files to the user.
     Reveal(Reveal),
 }
@@ -321,12 +363,18 @@ async fn drive(
 
     let mut proxy = setup.profile.inbound.system_proxy;
 
+    // The rule table lives here rather than inside `start`, so it survives a
+    // stop and can be asked questions while the tunnel is down — which is when
+    // someone is most likely to be editing rules.
+    let mut rules = Rules::from_setup(&setup);
+    publish_routing(&frames, &rules);
+
     // One sweep at the start, so the list arrives with numbers in it rather
     // than with a column of dashes waiting for someone to discover the button.
     ping_all(&setup.servers, &frames, &probes);
 
     if setup.autostart {
-        running = start(&setup, selected, &tracker, &frames).await;
+        running = start(&setup, selected, &tracker, &rules.router, &frames).await;
     }
     apply_proxy(proxy, &setup, running.is_some(), &frames);
 
@@ -337,7 +385,7 @@ async fn drive(
                 match command {
                     Command::Start => {
                         if running.is_none() {
-                            running = start(&setup, selected, &tracker, &frames).await;
+                            running = start(&setup, selected, &tracker, &rules.router, &frames).await;
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
@@ -354,7 +402,7 @@ async fn drive(
                             stop_now(&mut running, &frames).await;
                             apply_proxy(proxy, &setup, false, &frames);
                         } else if running.is_none() {
-                            running = start(&setup, selected, &tracker, &frames).await;
+                            running = start(&setup, selected, &tracker, &rules.router, &frames).await;
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
@@ -362,7 +410,7 @@ async fn drive(
                         if let Some(parts) = running.take() {
                             parts.stop().await;
                         }
-                        running = start(&setup, selected, &tracker, &frames).await;
+                        running = start(&setup, selected, &tracker, &rules.router, &frames).await;
                         apply_proxy(proxy, &setup, running.is_some(), &frames);
                     }
                     // Switching server means rebuilding the engine: its config
@@ -399,12 +447,58 @@ async fn drive(
                                 }
                             });
                             if resume {
-                                running = start(&setup, selected, &tracker, &frames).await;
+                                running = start(&setup, selected, &tracker, &rules.router, &frames).await;
                             }
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
                     Command::PingAll => ping_all(&setup.servers, &frames, &probes),
+                    // Re-read from disk rather than from the Setup we were
+                    // handed: the whole point is to pick up an edit.
+                    Command::ReloadRules => {
+                        match Rules::reread(&setup) {
+                            Ok(fresh) => {
+                                rules = fresh;
+                                publish_routing(&frames, &rules);
+                                // The inbounds hold the old table, so the new
+                                // one only takes effect on a restart. Doing it
+                                // here means "reload" means what it says.
+                                if running.is_some() {
+                                    if let Some(parts) = running.take() {
+                                        parts.stop().await;
+                                    }
+                                    running =
+                                        start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                    apply_proxy(proxy, &setup, running.is_some(), &frames);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("routing: {e}");
+                                frames.send_modify(|f| {
+                                    f.error = Some(format!("не удалось перечитать правила: {e}"));
+                                });
+                            }
+                        }
+                    }
+                    Command::Check(text) => {
+                        let answer = check_target(&rules.router, &text);
+                        frames.send_modify(|f| f.check = answer);
+                    }
+                    Command::SeedRules => match seed_rules(&setup.profile_path) {
+                        Ok(()) => {
+                            tracing::info!("routing: starting rules written to the profile");
+                            if let Ok(fresh) = Rules::reread(&setup) {
+                                rules = fresh;
+                                publish_routing(&frames, &rules);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("routing: {e}");
+                            frames.send_modify(|f| {
+                                f.error = Some(format!("не удалось записать правила: {e}"));
+                            });
+                        }
+                    },
                     Command::Proxy(mode) => {
                         proxy = mode;
                         apply_proxy(proxy, &setup, running.is_some(), &frames);
@@ -508,6 +602,234 @@ impl Running {
     }
 }
 
+// --- routing ---------------------------------------------------------------
+
+/// The rules as written, next to the rules as compiled.
+///
+/// Both, because they answer different questions. The compiled table decides
+/// connections; the written config is what the screen shows — a compiled rule
+/// has lost the words the user typed, and those are exactly what makes a rule
+/// list readable.
+struct Rules {
+    config: bliss_proto::Routing,
+    router: Arc<Router>,
+    /// Whether the profile says anything about routing at all.
+    configured: bool,
+}
+
+impl Rules {
+    fn compile(config: bliss_proto::Routing, configured: bool, work_dir: &std::path::Path) -> Self {
+        let dir = config
+            .geo_dir
+            .clone()
+            .unwrap_or_else(|| work_dir.to_owned());
+        let router = Router::build(&config, &dir);
+        for warning in &router.warnings {
+            tracing::warn!("routing: {warning}");
+        }
+        if router.rule_count() > 0 {
+            tracing::info!(
+                "routing: {} rule(s), everything else {}",
+                router.rule_count(),
+                router.fallback()
+            );
+        }
+        Self {
+            config,
+            router: Arc::new(router),
+            configured,
+        }
+    }
+
+    fn from_setup(setup: &Setup) -> Self {
+        Self::compile(
+            setup.profile.routing.clone(),
+            has_routing_section(&setup.profile_path),
+            &setup.work_dir,
+        )
+    }
+
+    /// Read the profile again and recompile.
+    ///
+    /// From disk rather than from the `Setup` we were handed at startup: the
+    /// entire point of reloading is to pick up an edit made since.
+    fn reread(setup: &Setup) -> Result<Self, String> {
+        let text = std::fs::read_to_string(&setup.profile_path)
+            .map_err(|e| format!("{}: {e}", setup.profile_path.display()))?;
+        let profile: Profile =
+            toml::from_str(&text).map_err(|e| format!("{}: {e}", first_line(&e.to_string())))?;
+        Ok(Self::compile(
+            profile.routing,
+            text.lines().any(is_routing_header),
+            &setup.work_dir,
+        ))
+    }
+
+    fn view(&self) -> RoutingView {
+        RoutingView {
+            fallback: self.config.fallback,
+            rules: self
+                .config
+                .rules
+                .iter()
+                .enumerate()
+                .map(|(i, rule)| RuleView {
+                    position: i + 1,
+                    name: rule.display_name(),
+                    action: rule.action,
+                    conditions: describe_conditions(rule),
+                })
+                .collect(),
+            warnings: self.router.warnings.clone(),
+            unconfigured: !self.configured,
+        }
+    }
+}
+
+/// Does the profile have a `[routing]` section?
+///
+/// Read from the text rather than from the parsed profile, because serde fills
+/// a missing section in with defaults and the result is indistinguishable from
+/// an empty one someone wrote on purpose. The difference matters: it decides
+/// whether the screen offers to write a starting set or leaves the user's
+/// deliberate choices alone.
+fn has_routing_section(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().any(is_routing_header))
+        .unwrap_or(false)
+}
+
+fn is_routing_header(line: &str) -> bool {
+    let line = line.trim();
+    line == "[routing]" || line.starts_with("[[routing.")
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or_default().to_owned()
+}
+
+/// One line per condition, in the words the profile used.
+fn describe_conditions(rule: &bliss_proto::Rule) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut add = |label: &str, list: &[String]| {
+        if !list.is_empty() {
+            out.push(format!("{label}: {}", list.join(", ")));
+        }
+    };
+    add("домены", &rule.domain);
+    add("наборы", &rule.geosite);
+    add("адреса", &rule.ip);
+    add("страны", &rule.geoip);
+    add("порты", &rule.port);
+    add("программы", &rule.process);
+    out
+}
+
+fn publish_routing(frames: &watch::Sender<Frame>, rules: &Rules) {
+    let view = rules.view();
+    frames.send_modify(|f| f.routing = view);
+}
+
+/// Answer the screen's "what happens to this?" box.
+///
+/// Accepts what someone would type: a name, a name with a port, or a bare
+/// address. 443 is assumed only when there is no port to read.
+fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let target = if let Ok(ip) = text.parse::<std::net::IpAddr>() {
+        bliss_core::Target::Socket(SocketAddr::new(ip, 443))
+    } else {
+        bliss_core::Target::parse_authority(text)
+            .unwrap_or_else(|_| bliss_core::Target::domain(text, 443))
+    };
+
+    let decision = router.decide(&target, None);
+    Some(CheckResult {
+        target: target.to_string(),
+        action: match decision.route {
+            bliss_core::Route::Proxy => Action::Proxy,
+            bliss_core::Route::Direct => Action::Direct,
+            bliss_core::Route::Blocked => Action::Block,
+        },
+        rule: decision.rule,
+    })
+}
+
+/// The starting set of rules, appended to the profile.
+///
+/// Appended rather than serialised over the top, and that is the whole design:
+/// writing the profile back from a serde round-trip would delete every comment
+/// in it, including the ones that explain what the user is looking at. Adding
+/// text to the end keeps the file theirs.
+///
+/// Refuses if the profile already says anything about routing. Whatever is in
+/// there is a decision someone made, and appending a second `[routing]` would
+/// not even parse.
+fn seed_rules(path: &std::path::Path) -> Result<(), String> {
+    if has_routing_section(path) {
+        return Err("в профиле уже есть раздел [routing]".to_owned());
+    }
+    let existing = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+
+    let mut text = existing;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(STARTING_RULES);
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What a first set of rules should be, for someone who has not written any.
+///
+/// Three rules and a comment each, because a set nobody can read is one nobody
+/// will edit. No country-wide site list: those are matters of taste, and this
+/// is meant to be uncontroversial — advertising blocked, the local network not
+/// sent through a tunnel to come back again.
+const STARTING_RULES: &str = r#"
+# --- Маршрутизация ---------------------------------------------------------
+#
+# Правила читаются сверху вниз, срабатывает первое подошедшее.
+# Проверить, ничего не подключая: bliss route youtube.com
+#
+# Это стартовый набор, добавленный из окна. Правьте как угодно — и нажмите
+# «Перечитать» в разделе «Маршрутизация», чтобы изменения вступили в силу.
+
+[routing]
+# Куда идёт всё, что не подошло ни под одно правило.
+fallback = "proxy"
+
+[[routing.rule]]
+name = "Реклама и трекеры"
+action = "block"
+# Готовая категория из geosite.dat. Работает на всю систему, а не только
+# в браузере.
+geosite = ["category-ads-all"]
+
+[[routing.rule]]
+name = "Локальная сеть"
+action = "direct"
+# Домашний роутер, принтер, соседний компьютер: тащить их через туннель
+# на другой континент и обратно незачем.
+ip = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+# Дальше — примеры. Раскомментируйте то, что нужно.
+#
+# [[routing.rule]]
+# name = "Торренты напрямую"
+# action = "direct"
+# process = ["qbittorrent.exe", "utorrent.exe"]
+#
+# [[routing.rule]]
+# name = "Свои сайты напрямую"
+# action = "direct"
+# # Без префикса домен значит «он и всё, что под ним». Ещё есть
+# # full: — ровно это имя, и keyword: — текст где угодно в имени.
+# domain = ["gosuslugi.ru", "keyword:sberbank"]
+"#;
+
 /// Tear the tunnel down and say so, whether or not there was one.
 ///
 /// Called even when nothing is running: after a failed start there is no
@@ -529,6 +851,7 @@ async fn start(
     setup: &Setup,
     selected: usize,
     tracker: &Arc<Tracker>,
+    router: &Arc<Router>,
     frames: &watch::Sender<Frame>,
 ) -> Option<Running> {
     frames.send_modify(|f| {
@@ -555,29 +878,6 @@ async fn start(
         Ok(x) => x,
         Err(e) => return fail(frames, &e.to_string()),
     };
-
-    // Built here rather than once at startup so a profile edit takes effect on
-    // the next connect. Loading the geo categories the rules name costs a
-    // second at most, and only the categories they name.
-    let router = Arc::new(Router::build(
-        &setup.profile.routing,
-        setup
-            .profile
-            .routing
-            .geo_dir
-            .as_deref()
-            .unwrap_or(&setup.work_dir),
-    ));
-    for warning in &router.warnings {
-        tracing::warn!("routing: {warning}");
-    }
-    if router.rule_count() > 0 {
-        tracing::info!(
-            "routing: {} rule(s), everything else {}",
-            router.rule_count(),
-            router.fallback()
-        );
-    }
 
     let outbound = Arc::new(SocksOutbound::new(
         xray.socks_addr(),
@@ -621,7 +921,7 @@ async fn start(
     let serving = Arc::new(Serving {
         outbound: Arc::clone(&outbound),
         tracker: Arc::clone(tracker),
-        router,
+        router: Arc::clone(router),
     });
 
     let mut inbounds = Vec::new();
@@ -1063,6 +1363,77 @@ mod tests {
         assert!(!sweep.begin());
         sweep.end();
         assert!(sweep.begin(), "and it is available again afterwards");
+    }
+
+    /// The one button in bliss that writes to the user's own file, so the
+    /// result had better parse. If it did not, a click would leave a profile
+    /// the program refuses to start with.
+    #[test]
+    fn the_starting_rules_append_to_a_profile_and_still_parse() {
+        let dir = std::env::temp_dir().join("bliss-seed-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("bliss.toml");
+
+        // A profile with comments and a server in it, which is what a real one
+        // looks like by the time anyone presses the button.
+        let before = "# my profile\n\
+                      [inbound]\n\
+                      socks = 10808\n\
+                      http = 10809\n\n\
+                      [[server]]\n\
+                      # the one I use\n\
+                      link = \"vless://11111111-2222-3333-4444-555555555555@a.example:443\
+                      ?security=reality&pbk=xEJ0rW1fZ6nT8sKqVY2mBhLdGc5PuA7oIzNQ9tRvXwE&sni=b.example\"\n";
+        std::fs::write(&path, before).expect("write");
+
+        seed_rules(&path).expect("appending the starting rules");
+        let after = std::fs::read_to_string(&path).expect("read back");
+
+        // Nothing of theirs was lost — this is why it appends rather than
+        // serialising the profile back over itself.
+        assert!(after.starts_with(before), "the original must be untouched");
+        assert!(after.contains("# the one I use"), "comments survive");
+
+        let profile: Profile = toml::from_str(&after).expect("the result must be a valid profile");
+        assert_eq!(profile.routing.rules.len(), 2);
+        assert_eq!(profile.routing.fallback, Action::Proxy);
+        assert_eq!(profile.routing.rules[0].action, Action::Block);
+        assert_eq!(profile.routing.rules[0].geosite, ["category-ads-all"]);
+        assert_eq!(profile.routing.rules[1].action, Action::Direct);
+        assert_eq!(profile.servers.len(), 1, "the server is still there");
+
+        // And it refuses to do it twice, because two [routing] sections are not
+        // a profile at all.
+        assert!(seed_rules(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            after,
+            "a refused seed must not have written anything"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A missing section and an empty one look identical after serde fills the
+    /// defaults in, and they mean different things: one is "never decided", the
+    /// other is "decided to have none".
+    #[test]
+    fn a_written_routing_section_is_told_apart_from_an_absent_one() {
+        for (text, configured) in [
+            ("[inbound]\nsocks = 10808\n", false),
+            ("[routing]\nfallback = \"proxy\"\n", true),
+            ("[inbound]\nsocks = 1\n\n  [routing]  \n", true),
+            ("[[routing.rule]]\naction = \"block\"\n", true),
+            // Mentioned in prose is not the same as written.
+            ("# see [routing] below one day\n[inbound]\n", false),
+        ] {
+            let dir = std::env::temp_dir().join("bliss-seed-test");
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let path = dir.join("detect.toml");
+            std::fs::write(&path, text).expect("write");
+            assert_eq!(has_routing_section(&path), configured, "for {text:?}");
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     #[test]

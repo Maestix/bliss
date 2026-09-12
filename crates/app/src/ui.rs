@@ -56,6 +56,7 @@ pub fn launch(controller: Controller) {
 enum Screen {
     Connection,
     Traffic,
+    Routing,
 }
 
 impl Screen {
@@ -63,6 +64,7 @@ impl Screen {
         match self {
             Self::Connection => "connection",
             Self::Traffic => "traffic",
+            Self::Routing => "routing",
         }
     }
 }
@@ -147,6 +149,11 @@ fn App() -> Element {
                         Screen::Traffic => rsx! {
                             div { key: "{key}", class: "screen", style: SCREEN,
                                 Connections { frame: frame.clone() }
+                            }
+                        },
+                        Screen::Routing => rsx! {
+                            div { key: "{key}", class: "screen", style: SCREEN,
+                                Routing { frame: frame.clone() }
                             }
                         },
                     }
@@ -307,10 +314,13 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
             }
             NavItem {
                 label: "Маршрутизация",
-                active: false,
-                enabled: false,
-                onclick: move |_| {},
-                icon: rsx! { crate::icons::Split { size: 18, color: nav_tint(false, false) } },
+                count: frame.routing.rules.len(),
+                active: here == Screen::Routing,
+                enabled: true,
+                onclick: move |_| screen.set(Screen::Routing),
+                icon: rsx! {
+                    crate::icons::Split { size: 18, color: nav_tint(here == Screen::Routing, true) }
+                },
             }
             NavItem {
                 label: "Настройки",
@@ -1028,6 +1038,274 @@ fn Connections(frame: Frame) -> Element {
         }
 
             LogStrip {}
+    }
+}
+
+// --- screen: routing ------------------------------------------------------
+
+/// The rule table, and a box for asking it questions.
+///
+/// Read-only on purpose, for one reason worth stating: the rules live in the
+/// profile, the profile is full of comments explaining them, and writing it
+/// back from a serde round-trip would delete every one of those comments. So
+/// the screen shows, explains and tests; editing happens in the file, and
+/// «Перечитать» closes the loop without a restart.
+#[component]
+fn Routing(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let view = &frame.routing;
+    let query = use_signal(String::new);
+
+    rsx! {
+        div {
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:13px;\
+                    padding:18px 20px",
+
+            div { style: "display:flex;align-items:baseline;gap:10px",
+                h4 { style: "margin:0;font-size:21px", "Маршрутизация" }
+                span { style: "font-size:13.5px;color:var(--color-neutral-500)",
+                    "{plural(view.rules.len() as u64, \"правило\", \"правила\", \"правил\")} · \
+                     остальное {view.fallback.label()}"
+                }
+                span {
+                    style: "margin-left:auto;display:flex;gap:8px",
+                    Button {
+                        label: "Перечитать",
+                        enabled: true,
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::ReloadRules)
+                        },
+                        icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
+                    }
+                    Button {
+                        label: "Открыть профиль",
+                        enabled: true,
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Reveal(Reveal::Profile))
+                        },
+                        icon: rsx! { crate::icons::Document { size: 15, color: ACCENT } },
+                    }
+                }
+            }
+
+            // Nothing configured at all: offer the starting set rather than an
+            // empty list and a link to the documentation.
+            if view.unconfigured {
+                div {
+                    style: "flex:none;display:flex;align-items:center;gap:13px;padding:14px;\
+                            border-radius:var(--radius-md);background:var(--color-surface);\
+                            box-shadow:inset 0 0 0 1px rgba(145,132,217,.24)",
+                    div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
+                        span { style: "font-size:14.5px", "Правил пока нет" }
+                        span {
+                            style: "font-size:13px;line-height:1.45;color:var(--color-neutral-500)",
+                            "Сейчас всё идёт через прокси. Можно добавить стартовый набор: \
+                             реклама блокируется, локальная сеть идёт напрямую. \
+                             Он допишется в конец профиля с комментариями — ваши \
+                             настройки не пострадают."
+                        }
+                    }
+                    div { style: "margin-left:auto;flex:none",
+                        Button {
+                            label: "Добавить набор",
+                            enabled: true,
+                            onclick: {
+                                let controller = controller.clone();
+                                move |_| controller.send(Command::SeedRules)
+                            },
+                            icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                        }
+                    }
+                }
+            }
+
+            if !view.warnings.is_empty() {
+                div {
+                    style: "flex:none;display:flex;flex-direction:column;gap:5px;padding:11px 13px;\
+                            border-radius:var(--radius-md);\
+                            background-color:rgba(210,206,253,.07);\
+                            box-shadow:inset 0 0 0 1px rgba(210,206,253,.18)",
+                    span {
+                        style: "font-size:12px;letter-spacing:.09em;text-transform:uppercase;\
+                                color:var(--color-neutral-500)",
+                        "Правила, которые не сработают"
+                    }
+                    for (n, warning) in view.warnings.iter().enumerate() {
+                        span {
+                            key: "{n}",
+                            style: "font-size:13px;line-height:1.45;color:#d2cefd;\
+                                    word-break:break-word",
+                            "{warning}"
+                        }
+                    }
+                }
+            }
+
+            div { style: "flex:1;min-height:0;display:flex;gap:13px;align-items:stretch",
+                RuleList { view: view.clone() }
+                Checker {
+                    query,
+                    result: frame.check.clone(),
+                    onask: {
+                        let controller = controller.clone();
+                        move |text: String| controller.send(Command::Check(text))
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RuleList(view: crate::engine::RoutingView) -> Element {
+    rsx! {
+        div {
+            style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;padding:15px;\
+                    background:var(--color-surface);border-radius:var(--radius-md);\
+                    box-shadow:var(--shadow-sm)",
+            div { style: "display:flex;align-items:baseline;gap:10px",
+                span { style: "font:500 16px/1 var(--font-heading)", "Правила" }
+                span { style: "font-size:13px;color:var(--color-neutral-600)",
+                    "сверху вниз, срабатывает первое"
+                }
+            }
+
+            div {
+                style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
+                        display:flex;flex-direction:column;gap:5px",
+                if view.rules.is_empty() {
+                    span {
+                        style: "padding:14px 2px;font-size:14px;color:var(--color-neutral-600)",
+                        "Ни одного правила — значит решает только строка «остальное»."
+                    }
+                }
+                for rule in view.rules.iter() {
+                    div {
+                        key: "{rule.position}",
+                        style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;\
+                                border-radius:var(--radius-sm);\
+                                background-color:rgba(233,233,237,.03)",
+                        // The number is the rule: first match wins, so the
+                        // order is not decoration.
+                        span {
+                            style: "flex:none;width:18px;font-size:13px;text-align:right;\
+                                    color:var(--color-neutral-700);\
+                                    font-variant-numeric:tabular-nums",
+                            "{rule.position}"
+                        }
+                        div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
+                            span { style: "font-size:14px", "{elide(&rule.name, 46)}" }
+                            for (n, line) in rule.conditions.iter().enumerate() {
+                                span {
+                                    key: "{n}",
+                                    style: "font-size:12.5px;line-height:1.4;\
+                                            color:var(--color-neutral-600);word-break:break-word",
+                                    "{elide(line, 64)}"
+                                }
+                            }
+                        }
+                        div { style: "margin-left:auto;flex:none", ActionPill { action: rule.action } }
+                    }
+                }
+            }
+
+            div {
+                style: "display:flex;align-items:center;gap:9px;padding-top:2px;\
+                        border-top:1px solid var(--color-divider)",
+                span {
+                    style: "padding-top:8px;font-size:13.5px;color:var(--color-neutral-500)",
+                    "Всё остальное"
+                }
+                div { style: "margin-left:auto;padding-top:8px",
+                    ActionPill { action: view.fallback }
+                }
+            }
+        }
+    }
+}
+
+/// "What happens to this?" — the same question `bliss route` answers, in the
+/// window, and without connecting to anything.
+#[component]
+fn Checker(
+    query: Signal<String>,
+    result: Option<crate::engine::CheckResult>,
+    onask: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div {
+            style: "width:288px;flex:none;display:flex;flex-direction:column;gap:11px;\
+                    padding:15px;background:var(--color-surface);\
+                    border-radius:var(--radius-md);box-shadow:var(--shadow-sm)",
+            span { style: "font:500 16px/1 var(--font-heading)", "Проверить адрес" }
+            span {
+                style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
+                "Имя сайта, или адрес, или host:port. Никуда не подключается — \
+                 только прогоняет по правилам."
+            }
+
+            input {
+                class: "field",
+                r#type: "text",
+                value: "{query}",
+                placeholder: "youtube.com",
+                autocomplete: "off",
+                spellcheck: "false",
+                style: "padding:8px 10px;border-radius:var(--radius-sm);border:none;\
+                        background-color:#12131d;color:var(--color-text);font-size:14px;\
+                        font-family:ui-monospace,Consolas,monospace;\
+                        box-shadow:inset 0 0 0 1px rgba(233,233,237,.10)",
+                // The text lives here rather than in the frame: a controlled
+                // input fed from a value that is republished twice a second
+                // fights whoever is typing into it.
+                oninput: move |e| {
+                    let text = e.value();
+                    query.set(text.clone());
+                    onask.call(text);
+                },
+            }
+
+            if let Some(answer) = result {
+                div {
+                    style: "display:flex;flex-direction:column;gap:7px;padding:11px;\
+                            border-radius:var(--radius-sm);background-color:rgba(233,233,237,.03)",
+                    span {
+                        style: "font-size:13px;color:var(--color-neutral-400);\
+                                font-family:ui-monospace,Consolas,monospace;word-break:break-all",
+                        "{answer.target}"
+                    }
+                    div { style: "display:flex;align-items:center;gap:9px",
+                        ActionPill { action: answer.action }
+                        span {
+                            style: "font-size:12.5px;color:var(--color-neutral-500);min-width:0",
+                            "{elide(&answer.rule, 24)}"
+                        }
+                    }
+                }
+            } else {
+                span { style: "font-size:13px;color:var(--color-neutral-700)", "—" }
+            }
+        }
+    }
+}
+
+/// The action, as a coloured word. Three actions, three colours, used
+/// everywhere the answer appears so the colour alone carries it.
+#[component]
+fn ActionPill(action: bliss_proto::Action) -> Element {
+    let (text, border) = match action {
+        bliss_proto::Action::Proxy => ("rgba(145,132,217,.14)", ACCENT),
+        bliss_proto::Action::Direct => ("rgba(90,168,127,.14)", ON.0),
+        bliss_proto::Action::Block => ("rgba(168,80,92,.14)", OFF.0),
+    };
+    rsx! {
+        span {
+            style: "padding:3px 9px;border-radius:11px;font-size:12.5px;white-space:nowrap;\
+                    background-color:{text};color:{border}",
+            "{action.label()}"
+        }
     }
 }
 
