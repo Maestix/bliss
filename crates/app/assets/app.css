@@ -48,14 +48,6 @@ body { font-size: 16px; user-select: none; cursor: default; }
    property that varies by state therefore never goes away: the accent bar and
    the tint stayed on every rail item that had ever been clicked, and on the
    previously selected server. Classes are diffed like any other attribute. */
-/* Corner rounding for the elements whose inline style changes between renders.
-   It cannot live in that style: `border-radius: var(--radius-md)` is a
-   shorthand carrying a variable, and the renderer's save-and-restore of inline
-   properties destroys it on every rewrite — the rounding alternated between 8px
-   and 0px, which looked like the corners flickering from round to square. */
-.btn, .choice { border-radius: var(--radius-sm); }
-.card { border-radius: var(--radius-md); }
-
 .nav-item { color: var(--color-neutral-300); }
 .nav-item.disabled { color: var(--color-neutral-700); }
 .nav-item.active {

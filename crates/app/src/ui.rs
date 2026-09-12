@@ -14,19 +14,31 @@
 //! simply write the `style` attribute: it records the properties the node
 //! already has inline, writes the new string, and then puts back every property
 //! the new string did not mention (`dioxus-interpreter-js`,
-//! `setAttributeInner`, case `"style"`). Two consequences, and they only bite a
-//! style string that actually changes between renders — a constant one is never
-//! rewritten:
+//! `setAttributeInner`, case `"style"`). Two consequences:
 //!
 //! 1. **A property that varies by state must never simply disappear** from the
 //!    string, or it is restored and sticks forever. State belongs in a class.
 //!    This is why the rail kept its accent bar on every item ever clicked.
-//! 2. **No `var()` inside a shorthand.** `border-radius: var(--radius-md)` is
-//!    stored as a pending substitution, so the longhands read back empty, and
-//!    the restore loop writes those empties over the shorthand — destroying it.
-//!    Applied repeatedly it alternates 8px, 0px, 8px, which is the rounding
-//!    that flickered between round and square on the rail. Use longhands
-//!    (`font-family` not `font:`), a literal, or a class.
+//! 2. **No `var()` inside a shorthand whose longhands cannot resolve.** Such a
+//!    value is a pending substitution, the longhands read back empty, and the
+//!    restore loop writes those empties over the shorthand — destroying it.
+//!    Applied repeatedly it alternates: this is the rounding that flickered
+//!    between round and square on the rail.
+//!
+//! Which properties that second rule covers was measured rather than guessed,
+//! by applying each one four times through a replica of the renderer's own
+//! function. Unstable: `border-radius`, `background`, `border-right` and its
+//! siblings. Stable: `background-color`, `box-shadow`, `color`, `font-family`
+//! — and, unexpectedly, the `font:` shorthand itself, so splitting that one up
+//! fixed nothing and is kept only for being clearer.
+//!
+//! Both of these only bite a style string that actually changes between
+//! renders; a constant one is never rewritten. That is not something to lean
+//! on, though — a later edit that interpolates one value into a previously
+//! constant string would bring the bug back with no warning. So none of the
+//! inline styles here carry an unstable shorthand, whether they change or not,
+//! and `radius_literals_match_the_design_tokens` holds the mirrored numbers to
+//! the tokens they came from.
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
@@ -36,6 +48,11 @@ use bliss_proto::ProxyMode;
 
 const NOCTURNE: &str = include_str!("../assets/nocturne.css");
 const APP_CSS: &str = include_str!("../assets/app.css");
+
+/// This file, so a test can check the styles in it rather than trust a rule to
+/// be remembered. See `radius_literals_match_the_design_tokens`.
+#[cfg(test)]
+const SOURCE: &str = include_str!("ui.rs");
 
 /// The wrapper every screen sits in, so the fade-in has something to animate.
 const SCREEN: &str = "flex:1;min-height:0;display:flex;flex-direction:column";
@@ -150,7 +167,7 @@ fn App() -> Element {
         // sidebar beginning underneath it.
         div {
             style: "width:100vw;height:100vh;display:flex;flex-direction:column;\
-                    background:var(--color-bg);overflow:hidden;color:var(--color-text)",
+                    background-color:var(--color-bg);overflow:hidden;color:var(--color-text)",
             TitleBar { engine: frame.engine.clone() }
             div { style: "flex:1;min-height:0;display:flex",
                 Sidebar { screen, tab, frame: frame.clone() }
@@ -282,7 +299,7 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
     rsx! {
         div {
             style: "width:210px;flex:none;display:flex;flex-direction:column;gap:2px;\
-                    padding:12px 10px;border-right:1px solid var(--color-divider)",
+                    padding:12px 10px;border-right-width:1px;border-right-style:solid;border-right-color:var(--color-divider)",
 
             NavItem {
                 label: "Подключение",
@@ -350,7 +367,7 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
 
             div {
                 style: "margin-top:auto;padding:12px;display:flex;flex-direction:column;gap:5px;\
-                        border-radius:var(--radius-md);background:var(--color-surface)",
+                        border-radius:8px;background-color:var(--color-surface)",
                 span {
                     style: "font-size:12px;letter-spacing:.1em;text-transform:uppercase;\
                             color:var(--color-neutral-500)",
@@ -394,7 +411,7 @@ fn NavItem(
         div {
             class: "{class}",
             style: "display:flex;align-items:center;gap:10px;padding:9px 10px;\
-                    border-radius:var(--radius-md);font-size:15px;cursor:default;{decoration}",
+                    border-radius:8px;font-size:15px;cursor:default;{decoration}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
@@ -447,7 +464,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
             if !reason.is_empty() {
                 div {
                     style: "flex:none;display:flex;align-items:flex-start;gap:9px;\
-                            padding:10px 13px;border-radius:var(--radius-md);\
+                            padding:10px 13px;border-radius:8px;\
                             background-color:rgba(168,80,92,.10);\
                             box-shadow:inset 0 0 0 1px rgba(168,80,92,.26)",
                     span {
@@ -461,8 +478,8 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
             div { style: "display:flex;gap:13px;align-items:stretch;flex:none",
                 div {
                     style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
-                            padding:18px;background:var(--color-surface);\
-                            border-radius:var(--radius-md);box-shadow:var(--shadow-sm)",
+                            padding:18px;background-color:var(--color-surface);\
+                            border-radius:8px;box-shadow:var(--shadow-sm)",
                     div {
                         class: "ring",
                         style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
@@ -507,8 +524,8 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
 
                 div {
                     style: "width:232px;flex:none;display:flex;flex-direction:column;gap:10px;\
-                            padding:14px;background:var(--color-surface);\
-                            border-radius:var(--radius-md);box-shadow:var(--shadow-sm)",
+                            padding:14px;background-color:var(--color-surface);\
+                            border-radius:8px;box-shadow:var(--shadow-sm)",
                     StatRow {
                         label: "Задержка",
                         value: match frame.latency_ms {
@@ -525,8 +542,8 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
 
             div {
                 style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:11px;\
-                        padding:15px;background:var(--color-surface);\
-                        border-radius:var(--radius-md);box-shadow:var(--shadow-sm)",
+                        padding:15px;background-color:var(--color-surface);\
+                        border-radius:8px;box-shadow:var(--shadow-sm)",
 
                 TabBar {
                     tab,
@@ -580,7 +597,7 @@ fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
                 div {
                     key: "{one.key()}",
                     class: if tab() == one { "tab active" } else { "tab" },
-                    style: "padding:5px 12px;border-radius:var(--radius-sm);cursor:default;\
+                    style: "padding:5px 12px;border-radius:4px;cursor:default;\
                             font:500 14.5px/1.35 var(--font-heading)",
                     onclick: move |_| tab.set(one),
                     "{one.label()}"
@@ -634,7 +651,7 @@ fn ServersTab(frame: Frame) -> Element {
                 style: "display:grid;{COLUMNS};padding:0 10px 6px;font-size:12px;\
                         letter-spacing:.09em;text-transform:uppercase;\
                         color:var(--color-neutral-500);\
-                        border-bottom:1px solid var(--color-divider)",
+                        border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--color-divider)",
                 span { "Имя" }
                 span { "Адрес" }
                 span { "Защита" }
@@ -656,7 +673,7 @@ fn ServersTab(frame: Frame) -> Element {
                         // is restored by the renderer, so the previous server
                         // would keep its marker after a switch.
                         style: "display:grid;{COLUMNS};align-items:center;padding:8px 10px;\
-                                border-radius:var(--radius-sm);cursor:default",
+                                border-radius:4px;cursor:default",
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::Select(index))
@@ -778,7 +795,7 @@ fn SystemProxy(frame: Frame) -> Element {
     rsx! {
         div {
             style: "grid-column:1 / -1;display:flex;flex-direction:column;gap:8px;\
-                    padding:12px 13px;border-radius:var(--radius-md);\
+                    padding:12px 13px;border-radius:8px;\
                     background-color:rgba(233,233,237,.03)",
             div { style: "display:flex;align-items:center;gap:11px",
                 crate::icons::Shield { size: 17, color: ACCENT }
@@ -793,7 +810,7 @@ fn SystemProxy(frame: Frame) -> Element {
                     div {
                         key: "{mode.key()}",
                         class: if mode == chosen { "act choice on" } else { "act choice" },
-                        style: "display:flex;align-items:center;gap:9px;padding:6px 9px;\
+                        style: "display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:4px;\
                                 cursor:default;font-size:13.5px;\
                                 color:{choice_tint(mode == chosen)}",
                         onclick: {
@@ -874,8 +891,8 @@ fn ActionCard(
     };
     rsx! {
         div {
-            class: if enabled { "act card" } else { "act card disabled" },
-            style: "display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:default;\
+            class: if enabled { "act" } else { "act disabled" },
+            style: "display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:default;border-radius:8px;\
                     background-color:rgba(233,233,237,.03);{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
@@ -902,8 +919,8 @@ fn Button(
     };
     rsx! {
         div {
-            class: if enabled { "act btn" } else { "act btn disabled" },
-            style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;\
+            class: if enabled { "act" } else { "act disabled" },
+            style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:4px;\
                     cursor:default;font-size:14px;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
@@ -1033,7 +1050,7 @@ fn Connections(frame: Frame) -> Element {
             div {
                 style: "display:grid;{COLUMNS};padding:0 8px 7px;font-size:12px;\
                         letter-spacing:.09em;text-transform:uppercase;\
-                        color:var(--color-neutral-500);border-bottom:1px solid var(--color-divider)",
+                        color:var(--color-neutral-500);border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--color-divider)",
                 span { "Хост" }
                 span { "Процесс" }
                 span { "Маршрут" }
@@ -1148,7 +1165,7 @@ fn Routing(frame: Frame) -> Element {
             if view.unconfigured {
                 div {
                     style: "flex:none;display:flex;align-items:center;gap:13px;padding:14px;\
-                            border-radius:var(--radius-md);background:var(--color-surface);\
+                            border-radius:8px;background-color:var(--color-surface);\
                             box-shadow:inset 0 0 0 1px rgba(145,132,217,.24)",
                     div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
                         span { style: "font-size:14.5px", "Правил пока нет" }
@@ -1177,7 +1194,7 @@ fn Routing(frame: Frame) -> Element {
             if !view.warnings.is_empty() {
                 div {
                     style: "flex:none;display:flex;flex-direction:column;gap:5px;padding:11px 13px;\
-                            border-radius:var(--radius-md);\
+                            border-radius:8px;\
                             background-color:rgba(210,206,253,.07);\
                             box-shadow:inset 0 0 0 1px rgba(210,206,253,.18)",
                     span {
@@ -1216,7 +1233,7 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
     rsx! {
         div {
             style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;padding:15px;\
-                    background:var(--color-surface);border-radius:var(--radius-md);\
+                    background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             div { style: "display:flex;align-items:baseline;gap:10px",
                 span { style: "font:500 16px/1 var(--font-heading)", "Правила" }
@@ -1238,7 +1255,7 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                     div {
                         key: "{rule.position}",
                         style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;\
-                                border-radius:var(--radius-sm);\
+                                border-radius:4px;\
                                 background-color:rgba(233,233,237,.03)",
                         // The number is the rule: first match wins, so the
                         // order is not decoration.
@@ -1266,7 +1283,7 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
 
             div {
                 style: "display:flex;align-items:center;gap:9px;padding-top:2px;\
-                        border-top:1px solid var(--color-divider)",
+                        border-top-width:1px;border-top-style:solid;border-top-color:var(--color-divider)",
                 span {
                     style: "padding-top:8px;font-size:13.5px;color:var(--color-neutral-500)",
                     "Всё остальное"
@@ -1290,8 +1307,8 @@ fn Checker(
     rsx! {
         div {
             style: "width:288px;flex:none;display:flex;flex-direction:column;gap:11px;\
-                    padding:15px;background:var(--color-surface);\
-                    border-radius:var(--radius-md);box-shadow:var(--shadow-sm)",
+                    padding:15px;background-color:var(--color-surface);\
+                    border-radius:8px;box-shadow:var(--shadow-sm)",
             span { style: "font:500 16px/1 var(--font-heading)", "Проверить адрес" }
             span {
                 style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
@@ -1306,7 +1323,7 @@ fn Checker(
                 placeholder: "youtube.com",
                 autocomplete: "off",
                 spellcheck: "false",
-                style: "padding:8px 10px;border-radius:var(--radius-sm);border:none;\
+                style: "padding:8px 10px;border-radius:4px;border:none;\
                         background-color:#12131d;color:var(--color-text);font-size:14px;\
                         font-family:ui-monospace,Consolas,monospace;\
                         box-shadow:inset 0 0 0 1px rgba(233,233,237,.10)",
@@ -1323,7 +1340,7 @@ fn Checker(
             if let Some(answer) = result {
                 div {
                     style: "display:flex;flex-direction:column;gap:7px;padding:11px;\
-                            border-radius:var(--radius-sm);background-color:rgba(233,233,237,.03)",
+                            border-radius:4px;background-color:rgba(233,233,237,.03)",
                     span {
                         style: "font-size:13px;color:var(--color-neutral-400);\
                                 font-family:ui-monospace,Consolas,monospace;word-break:break-all",
@@ -1418,6 +1435,47 @@ fn bar_colour(value: u64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The inline radii are literals because the token form does not survive
+    /// being rewritten (see the note at the top of this file), which means the
+    /// numbers are written down twice. This is the thing that keeps the second
+    /// copy honest: change a token and this fails rather than the window
+    /// quietly drifting away from the design system.
+    #[test]
+    fn radius_literals_match_the_design_tokens() {
+        for (token, literal) in [("--radius-sm", "4px"), ("--radius-md", "8px")] {
+            let declaration = format!("{token}: {literal};");
+            assert!(
+                NOCTURNE.contains(&declaration),
+                "nocturne no longer says {declaration:?} — the inline radii in this file \
+                 still use {literal} and have to be updated with it"
+            );
+        }
+
+        // And the form that does not survive must not creep back in. Scanned
+        // between the imports and this module, so neither the doc comment that
+        // names the bad form nor this test's own list of it counts as a hit.
+        let code = SOURCE
+            .split_once("use dioxus::prelude::*;")
+            .expect("the imports are at the top")
+            .1
+            .split_once("mod tests {")
+            .expect("the tests are at the bottom")
+            .0;
+        for unstable in [
+            "border-radius:var(",
+            "background:var(",
+            "border-right:1px solid var(",
+            "border-bottom:1px solid var(",
+            "border-top:1px solid var(",
+        ] {
+            assert!(
+                !code.contains(unstable),
+                "{unstable:?} is a shorthand carrying a variable: the renderer destroys it \
+                 when the style is rewritten"
+            );
+        }
+    }
 
     #[test]
     fn russian_plurals_agree() {
@@ -1532,7 +1590,7 @@ fn LogStrip() -> Element {
             }
             div {
                 style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
-                        background:#12131d;border-radius:var(--radius-sm);padding:9px 12px;\
+                        background-color:#12131d;border-radius:4px;padding:9px 12px;\
                         display:flex;flex-direction:column;gap:4px;\
                         font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.5",
                 if lines.is_empty() {
