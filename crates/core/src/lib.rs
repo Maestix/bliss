@@ -13,12 +13,15 @@ mod socks5;
 mod target;
 mod tracker;
 
+pub mod geo;
 pub mod http;
+pub mod routing;
 pub mod sysproxy;
 
-pub use inbound::{Bound, Inbound, serve};
+pub use inbound::{Bound, Inbound, Serving, serve};
 pub use outbound::{BoxedStream, EngineInfo, Outbound, SocksOutbound};
 pub use process::name_for_port;
 pub use relay::relay;
+pub use routing::{Decision, Router};
 pub use target::{Target, TargetError};
 pub use tracker::{Connection, ConnectionId, Route, Snapshot, Tracker};
