@@ -14,6 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::http;
 use crate::outbound::Outbound;
 use crate::relay::relay;
+use crate::routing::Router;
 use crate::socks5;
 use crate::target::Target;
 use crate::tracker::{Route, Tracker};
@@ -47,12 +48,20 @@ impl Inbound {
     }
 }
 
+/// Everything a connection needs that is the same for all of them.
+///
+/// One struct because it travels together everywhere: the dialer, the table
+/// that records what happened, and the rules that decide. Passing them
+/// separately grew the signatures past the point where the order of the
+/// arguments was the only thing telling them apart.
+pub struct Serving {
+    pub outbound: Arc<dyn Outbound>,
+    pub tracker: Arc<Tracker>,
+    pub router: Arc<Router>,
+}
+
 /// Accept connections until the future is dropped.
-pub async fn serve(
-    bound: Bound,
-    outbound: Arc<dyn Outbound>,
-    tracker: Arc<Tracker>,
-) -> std::io::Result<()> {
+pub async fn serve(bound: Bound, serving: Arc<Serving>) -> std::io::Result<()> {
     let Bound { listener, inbound } = bound;
     tracing::info!("{} listening on {}", inbound.tag, inbound.addr);
 
@@ -67,22 +76,16 @@ pub async fn serve(
             }
         };
 
-        let outbound = Arc::clone(&outbound);
-        let tracker = Arc::clone(&tracker);
+        let serving = Arc::clone(&serving);
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, peer, outbound, tracker).await {
+            if let Err(e) = handle(stream, peer, serving).await {
                 tracing::debug!("conn: {peer} — {e}");
             }
         });
     }
 }
 
-async fn handle(
-    stream: TcpStream,
-    peer: SocketAddr,
-    outbound: Arc<dyn Outbound>,
-    tracker: Arc<Tracker>,
-) -> std::io::Result<()> {
+async fn handle(stream: TcpStream, peer: SocketAddr, serving: Arc<Serving>) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
 
     let mut first = [0u8; 1];
@@ -120,7 +123,7 @@ async fn handle(
         }
     };
 
-    dial_and_relay(stream, socks, replay, target, peer, outbound, tracker).await
+    dial_and_relay(stream, socks, replay, target, peer, serving).await
 }
 
 async fn dial_and_relay(
@@ -129,16 +132,47 @@ async fn dial_and_relay(
     replay: Vec<u8>,
     target: Target,
     peer: SocketAddr,
-    outbound: Arc<dyn Outbound>,
-    tracker: Arc<Tracker>,
+    serving: Arc<Serving>,
 ) -> std::io::Result<()> {
-    // Routing lands in 1.5. Until then everything is proxied, and the rule is
-    // named honestly rather than left blank — the UI promises to always say
-    // which rule chose the route.
-    let route = Route::Proxy;
-    let rule = "default";
+    let Serving {
+        outbound,
+        tracker,
+        router,
+    } = &*serving;
+    // The process is looked up before the decision rather than after, because a
+    // rule may be about the program rather than the destination.
+    let process = crate::process::name_for_port(peer.port());
+    let decision = router.decide(&target, process.as_deref());
 
-    let mut upstream = match outbound.connect_tcp(&target).await {
+    // Blocked is answered, not dropped. A refusal a program can see becomes an
+    // error page or a failed request; a silently dropped connection becomes a
+    // spinner, and then a support question.
+    if decision.route == Route::Blocked {
+        tracing::debug!("conn: {target} blocked by {}", decision.rule);
+        if socks {
+            // 2 is "connection not allowed by ruleset", which is exactly this.
+            socks5::reply(&mut client, 2).await?;
+        } else {
+            http::refuse(
+                &mut client,
+                "403 Forbidden",
+                &format!("заблокировано правилом «{}»", decision.rule),
+            )
+            .await?;
+        }
+        // Recorded so the connections screen can show what was refused and why:
+        // a block nobody can see is indistinguishable from a bug.
+        let conn = tracker.open(target, decision.route, decision.rule, process);
+        tracker.close(conn.id);
+        return Ok(());
+    }
+
+    let dialled = match decision.route {
+        Route::Direct => dial_direct(&target).await,
+        // Blocked returned above; Proxy is the only one left.
+        _ => outbound.connect_tcp(&target).await,
+    };
+    let mut upstream = match dialled {
         Ok(stream) => stream,
         Err(e) => {
             tracing::info!("conn: {target} refused — {e}");
@@ -166,16 +200,48 @@ async fn dial_and_relay(
         upstream.flush().await?;
     }
 
-    let process = crate::process::name_for_port(peer.port());
-    let conn = tracker.open(target, route, rule, process);
+    let route = decision.route;
+    let conn = tracker.open(target, route, decision.rule, process);
     let id = conn.id;
     tracing::debug!(
-        "conn #{id} {} via {route} ({})",
+        "conn #{id} {} via {route} ({}) — {}",
         conn.target,
-        conn.process.as_deref().unwrap_or("?")
+        conn.process.as_deref().unwrap_or("?"),
+        conn.rule
     );
 
     let result = relay(client, upstream, Arc::clone(&conn)).await;
     tracker.close(id);
     result
+}
+
+/// Dial without the tunnel.
+///
+/// The name is resolved here, on this machine, which is the one place bliss
+/// does that — and it is consistent rather than careless: a connection routed
+/// direct is going out over the local network anyway, so looking its name up
+/// locally reveals nothing the connection itself does not. For a proxied
+/// connection the name travels inside the tunnel and is resolved at the far
+/// end, which is why `Target` keeps names unresolved everywhere else.
+async fn dial_direct(target: &Target) -> std::io::Result<crate::outbound::BoxedStream> {
+    let dial = async {
+        let stream = match target {
+            Target::Socket(addr) => TcpStream::connect(addr).await?,
+            Target::Domain { host, port } => TcpStream::connect((host.as_str(), *port)).await?,
+        };
+        stream.set_nodelay(true)?;
+        Ok::<_, std::io::Error>(stream)
+    };
+
+    match tokio::time::timeout(crate::outbound::DIAL_TIMEOUT, dial).await {
+        Ok(Ok(stream)) => Ok(Box::new(stream) as crate::outbound::BoxedStream),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "{target} did not answer directly within {:?}",
+                crate::outbound::DIAL_TIMEOUT
+            ),
+        )),
+    }
 }

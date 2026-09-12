@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bliss_core::{EngineInfo, Inbound, SocksOutbound, Tracker};
+use bliss_core::{EngineInfo, Inbound, Router, Serving, SocksOutbound, Tracker};
 use bliss_proto::{Flow, Profile, ProxyMode, Security, ServerConfig};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -556,6 +556,29 @@ async fn start(
         Err(e) => return fail(frames, &e.to_string()),
     };
 
+    // Built here rather than once at startup so a profile edit takes effect on
+    // the next connect. Loading the geo categories the rules name costs a
+    // second at most, and only the categories they name.
+    let router = Arc::new(Router::build(
+        &setup.profile.routing,
+        setup
+            .profile
+            .routing
+            .geo_dir
+            .as_deref()
+            .unwrap_or(&setup.work_dir),
+    ));
+    for warning in &router.warnings {
+        tracing::warn!("routing: {warning}");
+    }
+    if router.rule_count() > 0 {
+        tracing::info!(
+            "routing: {} rule(s), everything else {}",
+            router.rule_count(),
+            router.fallback()
+        );
+    }
+
     let outbound = Arc::new(SocksOutbound::new(
         xray.socks_addr(),
         EngineInfo {
@@ -595,12 +618,17 @@ async fn start(
         }
     }
 
+    let serving = Arc::new(Serving {
+        outbound: Arc::clone(&outbound),
+        tracker: Arc::clone(tracker),
+        router,
+    });
+
     let mut inbounds = Vec::new();
     for listener in bound {
-        let outbound = Arc::clone(&outbound);
-        let tracker = Arc::clone(tracker);
+        let serving = Arc::clone(&serving);
         inbounds.push(tokio::spawn(async move {
-            if let Err(e) = bliss_core::serve(listener, outbound, tracker).await {
+            if let Err(e) = bliss_core::serve(listener, serving).await {
                 tracing::error!("inbound stopped: {e}");
             }
         }));

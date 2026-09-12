@@ -44,7 +44,7 @@ pub trait Outbound: Send + Sync {
 /// REALITY handshake gets no answer. Measured against a real server that
 /// accepted roughly one connection in four, an unbounded wait is the difference
 /// between a page that loads a second late and one that never loads.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(6);
+pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Total attempts, including the first.
 const DIAL_ATTEMPTS: usize = 3;

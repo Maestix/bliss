@@ -47,6 +47,18 @@ enum Command {
         #[command(subcommand)]
         what: EngineCmd,
     },
+    /// Ask which rule decides a destination, and what it decides.
+    ///
+    /// The routing screen's "check a domain", before there is a screen. Answers
+    /// without connecting to anything.
+    Route {
+        /// A name or an address: `example.com`, `youtube.com:443`, `1.2.3.4`.
+        target: String,
+        /// Pretend the connection came from this program, for process rules.
+        #[arg(long, value_name = "NAME")]
+        process: Option<String>,
+        path: Option<PathBuf>,
+    },
     /// Start the engine and serve traffic.
     Run {
         #[arg(value_name = "PROFILE")]
@@ -140,6 +152,11 @@ async fn cli(command: Command) -> Result<()> {
         }
         Command::Check { path, .. } => check_profile(path),
         Command::Engine { what } => engine_cmd(what).await,
+        Command::Route {
+            target,
+            process,
+            path,
+        } => explain_route(path, &target, process.as_deref()),
         Command::Run {
             path,
             server,
@@ -225,6 +242,60 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
         servers,
         selected,
     })
+}
+
+// --- routing --------------------------------------------------------------
+
+/// Say which rule claims a destination, and what it does with it.
+///
+/// The whole point of recording a rule name on every connection is that "why
+/// did this go direct?" has an answer; this is that question asked ahead of
+/// time, so a rule can be checked before it is trusted with real traffic.
+fn explain_route(path: Option<PathBuf>, target: &str, process: Option<&str>) -> Result<()> {
+    let (profile, _) = load_profile(path)?;
+    let dir = profile.routing.geo_dir.clone().unwrap_or(work_dir()?);
+
+    let router = bliss_core::Router::build(&profile.routing, &dir);
+    for warning in &router.warnings {
+        println!("  ! {warning}");
+    }
+    if !router.warnings.is_empty() {
+        println!();
+    }
+
+    // Accepted in the three shapes someone would type: `example.com`,
+    // `example.com:8080`, and a bare address. A port is assumed only when there
+    // is none to read, and it is 443 because that is what nearly everything is.
+    let parsed = if let Ok(ip) = target.parse::<std::net::IpAddr>() {
+        bliss_core::Target::Socket(SocketAddr::new(ip, 443))
+    } else if target.contains(':') && !target.starts_with('[') {
+        bliss_core::Target::parse_authority(target)
+            .wrap_err_with(|| format!("cannot read {target:?} as a destination"))?
+    } else {
+        bliss_core::Target::parse_authority(target)
+            .unwrap_or_else(|_| bliss_core::Target::domain(target, 443))
+    };
+
+    let decision = router.decide(&parsed, process);
+    println!("{parsed}");
+    if let Some(process) = process {
+        println!("  как будто из {process}");
+    }
+    println!(
+        "  {} — правило «{}»",
+        match decision.route {
+            bliss_core::Route::Proxy => "через прокси",
+            bliss_core::Route::Direct => "напрямую, мимо туннеля",
+            bliss_core::Route::Blocked => "заблокировано",
+        },
+        decision.rule
+    );
+
+    if router.rule_count() == 0 {
+        println!();
+        println!("В профиле нет правил, поэтому решает только [routing] fallback.");
+    }
+    Ok(())
 }
 
 // --- engine ---------------------------------------------------------------

@@ -20,6 +20,8 @@ pub struct Profile {
     pub engine: Engine,
     #[serde(default)]
     pub inbound: Inbound,
+    #[serde(default)]
+    pub routing: crate::Routing,
     #[serde(default, rename = "server")]
     pub servers: Vec<ServerEntry>,
 }
