@@ -120,7 +120,15 @@ pub enum Command {
     Start,
     #[allow(dead_code, reason = "the tray menu lands in 1.8")]
     Stop,
-    Toggle,
+    /// The switch was clicked, carrying what the window was showing at the time.
+    ///
+    /// The state travels with the click because the engine may be busy starting
+    /// when it arrives, and starting is not interruptible: the command waits in
+    /// the queue until the start finishes, by which point the state it would
+    /// have been read against is gone. Deciding from `running.is_none()` at
+    /// that moment turned "cancel this" into "start another one", and a second
+    /// impatient click into a third attempt.
+    Toggle { was_on: bool },
     /// Tear the tunnel down and bring it back on the same server.
     Restart,
     /// Use the server at this index from now on, restarting if the tunnel is up.
@@ -284,14 +292,27 @@ async fn drive(
     let mut running: Option<Running> = None;
     let mut selected = setup.selected;
     let mut ticker = tokio::time::interval(TICK);
-    let mut last = Meter::default();
+    let mut last = Meter::new();
     // Probing on every tick would put a connection a second through the tunnel
     // just to draw one number.
     let mut probe = tokio::time::interval(Duration::from_secs(8));
 
+    // Starting the engine blocks this loop for as long as it takes — up to ten
+    // seconds if the engine comes up but never listens. The default behaviour
+    // for a missed tick is Burst: every tick the block swallowed then fires
+    // back to back, which flushed the chart's forty slots with zeros in one
+    // frame. Delay simply resumes the beat.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // One permit set for the whole program, not one per sweep: a fresh
+    // semaphore per call means the cap is per sweep, and N sweeps in flight is
+    // 12N sockets — which is exactly what two clicks on the button produced.
+    let probes = Arc::new(Sweep::new());
+
     // One sweep at the start, so the list arrives with numbers in it rather
     // than with a column of dashes waiting for someone to discover the button.
-    ping_all(&setup.servers, &frames);
+    ping_all(&setup.servers, &frames, &probes);
 
     if setup.autostart {
         running = start(&setup, selected, &tracker, &frames).await;
@@ -302,24 +323,21 @@ async fn drive(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 match command {
-                    Command::Start | Command::Stop | Command::Toggle => {
-                        let want_on = match command {
-                            Command::Start => true,
-                            Command::Stop => false,
-                            _ => running.is_none(),
-                        };
-                        if want_on && running.is_none() {
+                    Command::Start => {
+                        if running.is_none() {
                             running = start(&setup, selected, &tracker, &frames).await;
-                        } else if !want_on && running.is_some() {
-                            if let Some(parts) = running.take() {
-                                parts.stop().await;
-                            }
-                            frames.send_modify(|f| {
-                                f.state = State::Stopped;
-                                f.error = None;
-                                f.uptime = String::new();
-                                f.latency_ms = None;
-                            });
+                        }
+                    }
+                    Command::Stop => stop_now(&mut running, &frames).await,
+                    Command::Toggle { was_on } => {
+                        // Read against what the user saw, not against what has
+                        // become true since. A click on a switch that showed
+                        // "on" means off even if the start it was interrupting
+                        // has finished — or failed — while it queued.
+                        if was_on {
+                            stop_now(&mut running, &frames).await;
+                        } else if running.is_none() {
+                            running = start(&setup, selected, &tracker, &frames).await;
                         }
                     }
                     Command::Restart => {
@@ -335,7 +353,12 @@ async fn drive(
                     // reason that has nothing to do with the server.
                     Command::Select(index) => {
                         if index != selected && index < setup.servers.len() {
-                            let was_on = running.is_some();
+                            // A failed start counts as wanting to be connected.
+                            // Picking a different server is the obvious thing
+                            // to try after one fails, and it used to do nothing
+                            // at all except quietly turn the error into "off".
+                            let resume = running.is_some()
+                                || frames.borrow().state == State::Failed;
                             if let Some(parts) = running.take() {
                                 parts.stop().await;
                             }
@@ -351,16 +374,17 @@ async fn drive(
                                 // server we just left.
                                 f.latency_ms = None;
                                 f.error = None;
-                                if !was_on {
+                                if !resume {
                                     f.state = State::Stopped;
+                                    f.uptime = String::new();
                                 }
                             });
-                            if was_on {
+                            if resume {
                                 running = start(&setup, selected, &tracker, &frames).await;
                             }
                         }
                     }
-                    Command::PingAll => ping_all(&setup.servers, &frames),
+                    Command::PingAll => ping_all(&setup.servers, &frames, &probes),
                     Command::Reveal(what) => reveal(match what {
                         Reveal::Profile => &setup.profile_path,
                         Reveal::WorkDir => &setup.work_dir,
@@ -368,6 +392,19 @@ async fn drive(
                 }
             }
             _ = ticker.tick() => {
+                // The heartbeat is also the supervision. Nothing watched the
+                // engine before this: an xray that died mid-session left a
+                // green ring over a bridge that refused every connection, and
+                // the only clue was that the internet had stopped working.
+                if let Some(status) = running.as_mut().and_then(|r| r.xray.exited()) {
+                    if let Some(parts) = running.take() {
+                        // Takes the inbounds down with it. A listener still
+                        // accepting over a dead engine turns every request into
+                        // a hang instead of a refusal.
+                        parts.stop().await;
+                    }
+                    running = fail(&frames, &format!("движок неожиданно завершился ({status})"));
+                }
                 publish(&frames, &tracker, &mut last, running.as_ref());
             }
             _ = probe.tick() => {
@@ -405,6 +442,23 @@ impl Running {
     }
 }
 
+/// Tear the tunnel down and say so, whether or not there was one.
+///
+/// Called even when nothing is running: after a failed start there is no
+/// `Running` to take, but the window is still showing an error the user has
+/// just asked to be rid of.
+async fn stop_now(running: &mut Option<Running>, frames: &watch::Sender<Frame>) {
+    if let Some(parts) = running.take() {
+        parts.stop().await;
+    }
+    frames.send_modify(|f| {
+        f.state = State::Stopped;
+        f.error = None;
+        f.uptime = String::new();
+        f.latency_ms = None;
+    });
+}
+
 async fn start(
     setup: &Setup,
     selected: usize,
@@ -414,6 +468,12 @@ async fn start(
     frames.send_modify(|f| {
         f.state = State::Starting;
         f.error = None;
+        // Both belong to the session that just ended. The uptime in particular
+        // is published from here through the whole start — the loop is blocked,
+        // so `publish` cannot correct it — and it read as time already spent
+        // online on a server that had not connected yet.
+        f.uptime = String::new();
+        f.latency_ms = None;
     });
 
     let server = setup.server(selected);
@@ -517,11 +577,50 @@ const PING_TIMEOUT: Duration = Duration::from_secs(4);
 /// thing a firewall takes an interest in.
 const PING_CONCURRENCY: usize = 12;
 
+/// The program's one sweep: a permit set and a flag saying whether a sweep is
+/// already under way.
+///
+/// Both used to be per call. The permit set being per call made the cap
+/// per sweep rather than absolute, and nothing stopped a second sweep starting,
+/// so a button pressed N times opened `12 * N` sockets at once and let an older
+/// probe land on top of a newer one.
+struct Sweep {
+    permits: tokio::sync::Semaphore,
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl Sweep {
+    fn new() -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(PING_CONCURRENCY),
+            running: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Claim the right to sweep, or report that someone else holds it.
+    fn begin(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn end(&self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Measure every server and write the results into the frame as they land.
 ///
 /// Returns immediately: results arrive one at a time over the following
 /// seconds, which is also how they should appear on screen.
-fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>) {
+fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>, sweep: &Arc<Sweep>) {
+    if !sweep.begin() {
+        tracing::debug!("a server sweep is already running");
+        return;
+    }
+
     let targets: Vec<(usize, String, u16)> = servers
         .iter()
         .enumerate()
@@ -535,14 +634,14 @@ fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>) {
     });
 
     let frames = frames.clone();
-    let limit = Arc::new(tokio::sync::Semaphore::new(PING_CONCURRENCY));
+    let sweep = Arc::clone(sweep);
     tokio::spawn(async move {
         let mut probes = Vec::with_capacity(targets.len());
         for (index, host, port) in targets {
-            let limit = Arc::clone(&limit);
+            let sweep = Arc::clone(&sweep);
             let frames = frames.clone();
             probes.push(tokio::spawn(async move {
-                let _permit = limit.acquire_owned().await;
+                let _permit = sweep.permits.acquire().await;
                 let measured = tcp_ping(&host, port).await;
                 frames.send_modify(|f| {
                     if let Some(row) = f.servers.get_mut(index) {
@@ -557,6 +656,7 @@ fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>) {
         for probe in probes {
             let _ = probe.await;
         }
+        sweep.end();
     });
 }
 
@@ -605,12 +705,31 @@ fn reveal(path: &std::path::Path) {
     tracing::warn!("cannot open {} on this platform", path.display());
 }
 
-#[derive(Default)]
 struct Meter {
     up: u64,
     down: u64,
     /// The chart's current full-scale value. See `snap_scale`.
     scale: u64,
+    /// When these counters were read.
+    ///
+    /// Rates used to be computed by dividing by the tick interval, on the
+    /// assumption that a tick is when the last one was taken. Starting the
+    /// engine blocks the loop for seconds, so the first reading afterwards
+    /// covered all of that time and was still divided by 500 ms — a twenty-fold
+    /// overstatement, which then set the chart's scale and flattened every real
+    /// bar after it.
+    at: Instant,
+}
+
+impl Meter {
+    fn new() -> Self {
+        Self {
+            up: 0,
+            down: 0,
+            scale: 0,
+            at: Instant::now(),
+        }
+    }
 }
 
 /// The chart never means less than this. Without a floor, a few hundred bytes
@@ -637,6 +756,17 @@ fn snap_scale(peak: u64) -> u64 {
     bucket
 }
 
+/// Bytes per second, over however long it has actually been.
+///
+/// The span is a parameter rather than the tick constant because the loop that
+/// calls this is not always ticking: starting the engine blocks it for as long
+/// as the engine takes to come up, and dividing that whole stretch of traffic
+/// by half a second drew a spike that had never happened — which then set the
+/// chart's scale and squashed everything real that followed.
+fn per_second(now: u64, before: u64, span_ms: u64) -> u64 {
+    now.saturating_sub(before) * 1000 / span_ms.max(1)
+}
+
 fn publish(
     frames: &watch::Sender<Frame>,
     tracker: &Tracker,
@@ -644,10 +774,12 @@ fn publish(
     running: Option<&Running>,
 ) {
     let (up, down, opened) = tracker.totals();
-    let per_second =
-        |now: u64, before: u64| now.saturating_sub(before) * 1000 / TICK.as_millis().max(1) as u64;
-    let up_rate = per_second(up, last.up);
-    let down_rate = per_second(down, last.down);
+    let now = Instant::now();
+    // Real elapsed time, not the nominal tick: they are the same while the loop
+    // is idle and wildly different across a start.
+    let span_ms = now.duration_since(last.at).as_millis() as u64;
+    let up_rate = per_second(up, last.up, span_ms);
+    let down_rate = per_second(down, last.down, span_ms);
     let mut connections = tracker.active();
     connections.sort_by_key(|c| std::cmp::Reverse(c.id));
     connections.extend(tracker.recent());
@@ -677,7 +809,12 @@ fn publish(
 
     // Written back after the closure has run, so the smoothing carries into the
     // next tick instead of being recomputed from nothing every time.
-    *last = Meter { up, down, scale };
+    *last = Meter {
+        up,
+        down,
+        scale,
+        at: now,
+    };
 }
 
 fn hms(elapsed: Duration) -> String {
@@ -798,6 +935,41 @@ mod tests {
         assert_eq!(snap_scale(SCALE_FLOOR * 3), SCALE_FLOOR * 4);
         // Nothing real reaches this, but a loop that multiplies must terminate.
         assert!(snap_scale(u64::MAX) > 0);
+    }
+
+    /// The rate has to be per second of real time, not per nominal tick.
+    ///
+    /// Starting the engine blocks the loop that publishes these, so the first
+    /// reading afterwards spans seconds. Dividing it by the tick reported a
+    /// burst of traffic that never happened, at whatever multiple the stall
+    /// happened to be.
+    #[test]
+    fn a_rate_is_measured_against_the_time_that_actually_passed() {
+        // A quiet tick: 32 KB in half a second is 64 KB/s.
+        assert_eq!(per_second(32_768, 0, 500), 65_536);
+
+        // The same 32 KB, but the loop was stuck in a start for twelve seconds.
+        // The old code divided by 500 regardless and drew 64 KB/s.
+        assert_eq!(per_second(32_768, 0, 12_500), 2_621);
+
+        // Counters only ever climb, but a restart must not be able to produce a
+        // negative delta if one ever did.
+        assert_eq!(per_second(5, 10, 500), 0);
+        // A span of zero is possible between two publishes in the same
+        // millisecond and must not divide by zero.
+        assert_eq!(per_second(1_000, 0, 0), 1_000_000);
+    }
+
+    /// Two sweeps at once was how one button could open twelve sockets per
+    /// click instead of twelve in total.
+    #[test]
+    fn only_one_server_sweep_runs_at_a_time() {
+        let sweep = Sweep::new();
+        assert!(sweep.begin(), "the first caller gets it");
+        assert!(!sweep.begin(), "the second is turned away");
+        assert!(!sweep.begin());
+        sweep.end();
+        assert!(sweep.begin(), "and it is available again afterwards");
     }
 
     #[test]

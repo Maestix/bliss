@@ -405,7 +405,15 @@ where
 {
     const LIMIT: u64 = 2 * 1024 * 1024;
 
-    let path = work_dir().ok()?.join("bliss.log");
+    // The directory has to exist before a file can be opened in it. On a first
+    // run it does not: nothing has written there yet, and the first thing that
+    // would is the engine installer. So the log silently failed to open on
+    // exactly the run most likely to need it — and `report_to_user` then handed
+    // the user the path of a file that was never created.
+    let dir = work_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+
+    let path = dir.join("bliss.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIMIT) {
         let _ = std::fs::remove_file(&path);
     }

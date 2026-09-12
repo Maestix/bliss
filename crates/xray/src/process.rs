@@ -42,6 +42,15 @@ pub enum XrayError {
     #[error("xray exited immediately ({status}) — see the log above for its reason")]
     ExitedEarly { status: std::process::ExitStatus },
 
+    /// Checked before spawning rather than discovered afterwards. If something
+    /// already holds the bridge port, xray cannot bind it and exits — and the
+    /// readiness probe would then connect to the squatter and call it success.
+    #[error(
+        "127.0.0.1:{port} is already taken — another client, or an engine left \
+         behind by a previous bliss. Close it, or set engine.bridge_port in the profile."
+    )]
+    BridgePortTaken { port: u16 },
+
     #[error("xray did not start listening on 127.0.0.1:{port} within {secs}s")]
     NotListening { port: u16, secs: u64 },
 }
@@ -70,6 +79,11 @@ impl Xray {
         if !exe.is_file() {
             return Err(XrayError::NotFound(exe.to_path_buf()));
         }
+
+        // Before anything else: is the port we are about to hand xray actually
+        // free? If it is not, xray fails to bind and exits, and every later
+        // check in this function would pass against whatever is squatting there.
+        claim_bridge_port(port)?;
 
         let config_path = work_dir.join("xray.json");
         std::fs::create_dir_all(work_dir)
@@ -131,7 +145,7 @@ impl Xray {
             forward(err, "xray!");
         }
 
-        let xray = Self {
+        let mut xray = Self {
             child,
             port,
             config_path,
@@ -141,15 +155,32 @@ impl Xray {
         Ok(xray)
     }
 
-    /// Poll the port rather than sleeping: a connection that is accepted is
-    /// proof the inbound is up, and a child that died is noticed at once
-    /// instead of after the timeout.
-    async fn await_listening(&self, timeout: Duration) -> Result<(), XrayError> {
+    /// Wait until the engine is genuinely serving, or say why it is not.
+    ///
+    /// Three things have to hold, and the earlier version checked only the
+    /// weakest of them. Being able to open a TCP connection to the bridge port
+    /// says nothing about *whose* port it is: if xray failed to bind and exited,
+    /// the connection lands in whatever else is listening and the caller is told
+    /// the engine is up. So:
+    ///
+    /// 1. the port was free before the spawn (`claim_bridge_port`, above);
+    /// 2. the child is still alive — polled every round, which is what makes
+    ///    `ExitedEarly` reachable rather than decorative;
+    /// 3. whatever answers speaks SOCKS5 and offers no-auth, which is the
+    ///    cheapest proof that it is the inbound we asked for and not a stray
+    ///    program that merely accepts connections.
+    async fn await_listening(&mut self, timeout: Duration) -> Result<(), XrayError> {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port);
         let deadline = tokio::time::Instant::now() + timeout;
 
         while tokio::time::Instant::now() < deadline {
-            if TcpStream::connect(addr).await.is_ok() {
+            // A child that died has nothing to say about the port, and waiting
+            // the rest of the timeout for it would hide the reason. Its own
+            // output is already in the log, with the real explanation in it.
+            if let Some(status) = self.exited() {
+                return Err(XrayError::ExitedEarly { status });
+            }
+            if speaks_socks5(addr).await {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -158,6 +189,16 @@ impl Xray {
             port: self.port,
             secs: timeout.as_secs(),
         })
+    }
+
+    /// Has the engine exited? Non-blocking, so a caller with a heartbeat can ask
+    /// on every beat.
+    ///
+    /// Nothing used to ask at all: `wait` existed and no code path called it, so
+    /// an engine that died mid-session left the window showing a live tunnel
+    /// while every connection failed at the bridge.
+    pub fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
     }
 
     /// Where bliss dials to reach this xray.
@@ -169,15 +210,64 @@ impl Xray {
         &self.config_path
     }
 
-    /// Resolves if xray exits on its own, which always means something is wrong.
-    pub async fn wait(&mut self) -> Result<std::process::ExitStatus, std::io::Error> {
-        self.child.wait().await
-    }
+    // There was a `wait()` here that resolved when xray exited on its own. It
+    // was never called from anywhere, so the supervision it implied did not
+    // exist. `exited()` replaces it because the engine loop already has a
+    // heartbeat and only needs to ask, not to await.
 
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
         self.child.start_kill()?;
         self.child.wait().await.map(|_| ())
     }
+}
+
+/// Check that the bridge port is free, by taking it and letting it go.
+///
+/// The listener is dropped immediately, which leaves a window before xray binds
+/// it. That window is not closable — only the child can hold its own socket —
+/// but it turns the common failures (a previous engine still running, another
+/// client on the same port, a second bliss) from "silently proxies through
+/// someone else" into a message naming the port.
+fn claim_bridge_port(port: u16) -> Result<(), XrayError> {
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    match std::net::TcpListener::bind(addr) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            Err(XrayError::BridgePortTaken { port })
+        }
+        // Anything else — a permission problem, an exhausted stack — is not
+        // ours to interpret, and xray will report it better than a guess would.
+        Err(_) => Ok(()),
+    }
+}
+
+/// Does whatever is listening there answer a SOCKS5 greeting?
+///
+/// Sends the same three bytes the dialer does and expects `05 00` back. A
+/// program that is not a SOCKS5 proxy will not, which is the difference between
+/// "the port is occupied" and "the engine is up".
+async fn speaks_socks5(addr: SocketAddr) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let handshake = async {
+        let mut stream = TcpStream::connect(addr).await.ok()?;
+        // version 5, one method offered, method 0 = no authentication.
+        stream.write_all(&[5, 1, 0]).await.ok()?;
+        let mut answer = [0u8; 2];
+        stream.read_exact(&mut answer).await.ok()?;
+        Some(answer == [5, 0])
+    };
+
+    // A squatter that accepts and then says nothing must not hold the whole
+    // readiness budget on one attempt.
+    tokio::time::timeout(Duration::from_secs(1), handshake)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 fn forward<R>(reader: R, target: &'static str)
@@ -286,5 +376,74 @@ mod forward_tests {
     fn passes_through_anything_it_does_not_recognise() {
         let (level, text) = split_engine_line("plain line with no stamp");
         assert_eq!((level, text), ("Info", "plain line with no stamp"));
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+
+    use super::*;
+
+    fn free_port() -> u16 {
+        // Port 0 asks the OS for one nobody is using; the listener is dropped
+        // so the test gets a port that is free right now.
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("bind a loopback port")
+            .local_addr()
+            .expect("the listener has an address")
+            .port()
+    }
+
+    /// The check that makes the readiness probe mean something. Without it a
+    /// squatter on the bridge port answered for the engine that failed to bind.
+    #[test]
+    fn an_occupied_bridge_port_is_refused_before_the_engine_is_started() {
+        let port = free_port();
+        assert!(claim_bridge_port(port).is_ok(), "nothing is holding it");
+
+        let squatter = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).expect("take the port");
+        assert!(matches!(
+            claim_bridge_port(port),
+            Err(XrayError::BridgePortTaken { .. })
+        ));
+
+        // And it is available again once the other program lets go, rather than
+        // being remembered as taken.
+        drop(squatter);
+        assert!(claim_bridge_port(port).is_ok());
+    }
+
+    /// "Something accepted the connection" is not "the engine is up". A SOCKS5
+    /// greeting is the cheapest thing that tells them apart.
+    #[tokio::test]
+    async fn readiness_needs_a_socks5_answer_not_just_an_open_port() {
+        async fn listening_with(answer: &'static [u8]) -> SocketAddr {
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("address");
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut greeting = [0u8; 3];
+                    if stream.read_exact(&mut greeting).await.is_ok() && !answer.is_empty() {
+                        let _ = stream.write_all(answer).await;
+                    }
+                    // Held open deliberately: a peer that accepts and then says
+                    // nothing is the case the timeout exists for.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            });
+            addr
+        }
+
+        assert!(speaks_socks5(listening_with(&[5, 0]).await).await);
+        // Accepts, answers something else — an HTTP server, say.
+        assert!(!speaks_socks5(listening_with(b"HT").await).await);
+        // A SOCKS5 proxy that refuses every method is not one we can use.
+        assert!(!speaks_socks5(listening_with(&[5, 0xFF]).await).await);
+        // Accepts and stays silent; must fail on the timeout rather than hang.
+        assert!(!speaks_socks5(listening_with(&[]).await).await);
     }
 }
