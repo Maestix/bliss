@@ -47,6 +47,32 @@ impl State {
     }
 }
 
+/// What a server's response column is showing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ping {
+    /// Never measured.
+    #[default]
+    Unknown,
+    /// A probe is in flight.
+    Probing,
+    /// TCP handshake, in milliseconds.
+    Ok(u32),
+    /// Refused, or nothing inside the timeout.
+    Down,
+}
+
+/// One row of the server list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerRow {
+    pub tag: String,
+    pub addr: String,
+    /// How it hides: `reality · vision`, `tls`, `plain`.
+    pub kind: String,
+    pub ping: Ping,
+    /// True for the one the engine is set to use.
+    pub current: bool,
+}
+
 /// Everything the window shows, recomputed each tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
@@ -72,8 +98,8 @@ pub struct Frame {
     pub latency_ms: Option<u64>,
     /// Which browser the ClientHello is dressed as, straight from the link.
     pub fingerprint: String,
-    /// How many servers the profile holds, for the nav counter.
-    pub servers: usize,
+    /// Every server in the profile, in the order it is written there.
+    pub servers: Vec<ServerRow>,
     /// Bytes per second over the last tick.
     pub up_rate: u64,
     pub down_rate: u64,
@@ -95,6 +121,22 @@ pub enum Command {
     #[allow(dead_code, reason = "the tray menu lands in 1.8")]
     Stop,
     Toggle,
+    /// Tear the tunnel down and bring it back on the same server.
+    Restart,
+    /// Use the server at this index from now on, restarting if the tunnel is up.
+    Select(usize),
+    /// Measure every server's handshake time.
+    PingAll,
+    /// Show one of bliss's own files to the user.
+    Reveal(Reveal),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Reveal {
+    /// The TOML the user edits.
+    Profile,
+    /// Where the log, the engine and its generated config live.
+    WorkDir,
 }
 
 /// The window's handle on the engine.
@@ -121,11 +163,26 @@ impl Controller {
 
 pub struct Setup {
     pub profile: Profile,
-    pub server: ServerConfig,
+    /// Every server that parsed, in profile order. Never empty: `prepare` in
+    /// main refuses to build a Setup without at least one, because everything
+    /// below indexes into this.
+    pub servers: Vec<ServerConfig>,
+    /// Which of them to use. An index rather than a clone, so switching is a
+    /// number and the list stays the single copy of the truth.
+    pub selected: usize,
     pub exe: PathBuf,
     pub work_dir: PathBuf,
+    /// The profile on disk, so the window can offer to open it.
+    pub profile_path: PathBuf,
     pub engine_log: bliss_xray::LogLevel,
     pub autostart: bool,
+}
+
+impl Setup {
+    fn server(&self, index: usize) -> &ServerConfig {
+        debug_assert!(index < self.servers.len(), "selection is bounds-checked");
+        &self.servers[index.min(self.servers.len() - 1)]
+    }
 }
 
 /// Put the engine on its own runtime thread and hand back a handle.
@@ -159,33 +216,61 @@ pub fn spawn(setup: Setup) -> std::io::Result<Controller> {
 }
 
 fn initial_frame(setup: &Setup) -> Frame {
-    let server = &setup.server;
-    let (sni, flow) = match &server.security {
-        Security::Reality(r) => (r.sni.clone(), "reality · vision".to_owned()),
-        Security::Tls(t) => (t.sni.clone().unwrap_or_default(), "tls".to_owned()),
-        Security::None => (String::new(), "plain".to_owned()),
-    };
-    Frame {
+    let mut frame = Frame {
         state: State::Stopped,
-        server_tag: server.tag.clone(),
-        server_addr: format!("{}:{}", server.address, server.port),
-        sni,
-        flow: match server.flow {
-            Flow::XtlsRprxVision => flow,
-            Flow::None => flow.replace(" · vision", ""),
-        },
         listen: format!(
             "socks {} · http {}",
             setup.profile.inbound.socks, setup.profile.inbound.http
         ),
         history: vec![0; 40],
-        fingerprint: match &server.security {
-            Security::Reality(r) => r.fingerprint.to_string(),
-            Security::Tls(tls) => tls.fingerprint.to_string(),
-            Security::None => "-".to_owned(),
-        },
-        servers: setup.profile.servers.len(),
+        servers: setup
+            .servers
+            .iter()
+            .enumerate()
+            .map(|(i, server)| ServerRow {
+                tag: server.tag.clone(),
+                addr: format!("{}:{}", server.address, server.port),
+                kind: how_it_hides(server),
+                ping: Ping::Unknown,
+                current: i == setup.selected,
+            })
+            .collect(),
         ..Frame::default()
+    };
+    describe_selection(&mut frame, setup.server(setup.selected));
+    frame
+}
+
+/// The fields that describe whichever server is in use.
+///
+/// Its own function because switching servers has to rewrite exactly these and
+/// nothing else — leaving one behind is how a window ends up showing the old
+/// server's SNI next to the new server's address.
+fn describe_selection(frame: &mut Frame, server: &ServerConfig) {
+    frame.server_tag = server.tag.clone();
+    frame.server_addr = format!("{}:{}", server.address, server.port);
+    frame.sni = match &server.security {
+        Security::Reality(r) => r.sni.clone(),
+        Security::Tls(t) => t.sni.clone().unwrap_or_default(),
+        Security::None => String::new(),
+    };
+    frame.flow = how_it_hides(server);
+    frame.fingerprint = match &server.security {
+        Security::Reality(r) => r.fingerprint.to_string(),
+        Security::Tls(tls) => tls.fingerprint.to_string(),
+        Security::None => "-".to_owned(),
+    };
+}
+
+fn how_it_hides(server: &ServerConfig) -> String {
+    let security = match &server.security {
+        Security::Reality(_) => "reality",
+        Security::Tls(_) => "tls",
+        Security::None => "plain",
+    };
+    match server.flow {
+        Flow::XtlsRprxVision => format!("{security} · vision"),
+        Flow::None => security.to_owned(),
     }
 }
 
@@ -197,36 +282,89 @@ async fn drive(
 ) {
     let tracker = Arc::new(Tracker::new());
     let mut running: Option<Running> = None;
+    let mut selected = setup.selected;
     let mut ticker = tokio::time::interval(TICK);
     let mut last = Meter::default();
     // Probing on every tick would put a connection a second through the tunnel
     // just to draw one number.
     let mut probe = tokio::time::interval(Duration::from_secs(8));
 
+    // One sweep at the start, so the list arrives with numbers in it rather
+    // than with a column of dashes waiting for someone to discover the button.
+    ping_all(&setup.servers, &frames);
+
     if setup.autostart {
-        running = start(&setup, &tracker, &frames).await;
+        running = start(&setup, selected, &tracker, &frames).await;
     }
 
     loop {
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                let want_on = match command {
-                    Command::Start => true,
-                    Command::Stop => false,
-                    Command::Toggle => running.is_none(),
-                };
-                if want_on && running.is_none() {
-                    running = start(&setup, &tracker, &frames).await;
-                } else if !want_on && running.is_some() {
-                    if let Some(parts) = running.take() {
-                        parts.stop().await;
+                match command {
+                    Command::Start | Command::Stop | Command::Toggle => {
+                        let want_on = match command {
+                            Command::Start => true,
+                            Command::Stop => false,
+                            _ => running.is_none(),
+                        };
+                        if want_on && running.is_none() {
+                            running = start(&setup, selected, &tracker, &frames).await;
+                        } else if !want_on && running.is_some() {
+                            if let Some(parts) = running.take() {
+                                parts.stop().await;
+                            }
+                            frames.send_modify(|f| {
+                                f.state = State::Stopped;
+                                f.error = None;
+                                f.uptime = String::new();
+                                f.latency_ms = None;
+                            });
+                        }
                     }
-                    frames.send_modify(|f| {
-                        f.state = State::Stopped;
-                        f.error = None;
-                        f.uptime = String::new();
-                    });
+                    Command::Restart => {
+                        if let Some(parts) = running.take() {
+                            parts.stop().await;
+                        }
+                        running = start(&setup, selected, &tracker, &frames).await;
+                    }
+                    // Switching server means rebuilding the engine: its config
+                    // names exactly one, so there is nothing to reload. The old
+                    // process must be gone before the new one starts, or the
+                    // second one finds the bridge port taken and fails for a
+                    // reason that has nothing to do with the server.
+                    Command::Select(index) => {
+                        if index != selected && index < setup.servers.len() {
+                            let was_on = running.is_some();
+                            if let Some(parts) = running.take() {
+                                parts.stop().await;
+                            }
+                            selected = index;
+                            let server = setup.server(selected);
+                            tracing::info!("server is now {}", server.tag);
+                            frames.send_modify(|f| {
+                                describe_selection(f, server);
+                                for (i, row) in f.servers.iter_mut().enumerate() {
+                                    row.current = i == index;
+                                }
+                                // The figure on screen was measured through the
+                                // server we just left.
+                                f.latency_ms = None;
+                                f.error = None;
+                                if !was_on {
+                                    f.state = State::Stopped;
+                                }
+                            });
+                            if was_on {
+                                running = start(&setup, selected, &tracker, &frames).await;
+                            }
+                        }
+                    }
+                    Command::PingAll => ping_all(&setup.servers, &frames),
+                    Command::Reveal(what) => reveal(match what {
+                        Reveal::Profile => &setup.profile_path,
+                        Reveal::WorkDir => &setup.work_dir,
+                    }),
                 }
             }
             _ = ticker.tick() => {
@@ -269,6 +407,7 @@ impl Running {
 
 async fn start(
     setup: &Setup,
+    selected: usize,
     tracker: &Arc<Tracker>,
     frames: &watch::Sender<Frame>,
 ) -> Option<Running> {
@@ -277,14 +416,15 @@ async fn start(
         f.error = None;
     });
 
-    let needs = bliss_xray::minimum_xray_version(&setup.server).map(|(major, _)| major);
+    let server = setup.server(selected);
+    let needs = bliss_xray::minimum_xray_version(server).map(|(major, _)| major);
     let version = match bliss_xray::check_version(&setup.exe, needs).await {
         Ok(v) => v,
         Err(e) => return fail(frames, &e.to_string()),
     };
 
     let port = setup.profile.engine.bridge_port;
-    let config = bliss_xray::build(&setup.server, port, setup.engine_log);
+    let config = bliss_xray::build(server, port, setup.engine_log);
     let xray = match bliss_xray::Xray::spawn(&setup.exe, &config, &setup.work_dir, port).await {
         Ok(x) => x,
         Err(e) => return fail(frames, &e.to_string()),
@@ -363,6 +503,106 @@ fn fail(frames: &watch::Sender<Frame>, message: &str) -> Option<Running> {
         f.error = Some(message.to_owned());
     });
     None
+}
+
+// --- probing the server list ----------------------------------------------
+
+/// How long a probe waits before calling a server unreachable. Short on
+/// purpose: this runs against a whole list, and a dead entry should not hold
+/// the sweep up for the live ones behind it.
+const PING_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Probes in flight at once. A subscription can hold a few hundred servers,
+/// and opening that many sockets in one breath is both rude and the kind of
+/// thing a firewall takes an interest in.
+const PING_CONCURRENCY: usize = 12;
+
+/// Measure every server and write the results into the frame as they land.
+///
+/// Returns immediately: results arrive one at a time over the following
+/// seconds, which is also how they should appear on screen.
+fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>) {
+    let targets: Vec<(usize, String, u16)> = servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i, s.address.to_string(), s.port))
+        .collect();
+
+    frames.send_modify(|f| {
+        for row in f.servers.iter_mut() {
+            row.ping = Ping::Probing;
+        }
+    });
+
+    let frames = frames.clone();
+    let limit = Arc::new(tokio::sync::Semaphore::new(PING_CONCURRENCY));
+    tokio::spawn(async move {
+        let mut probes = Vec::with_capacity(targets.len());
+        for (index, host, port) in targets {
+            let limit = Arc::clone(&limit);
+            let frames = frames.clone();
+            probes.push(tokio::spawn(async move {
+                let _permit = limit.acquire_owned().await;
+                let measured = tcp_ping(&host, port).await;
+                frames.send_modify(|f| {
+                    if let Some(row) = f.servers.get_mut(index) {
+                        row.ping = match measured {
+                            Some(ms) => Ping::Ok(ms),
+                            None => Ping::Down,
+                        };
+                    }
+                });
+            }));
+        }
+        for probe in probes {
+            let _ = probe.await;
+        }
+    });
+}
+
+/// Time to complete a TCP handshake with a server's edge.
+///
+/// Not a round trip through the tunnel. Nothing is negotiated here — no TLS,
+/// no REALITY — so a server can answer this and still refuse to carry a byte.
+/// It is what every client in this ecosystem calls a server's ping, and it is
+/// cheap enough to run across a whole subscription, but the column is labelled
+/// for what it measures rather than for what one would like it to mean.
+///
+/// DNS is resolved before the clock starts: a cold lookup can cost more than
+/// the connection that follows it, and it says nothing about the server.
+async fn tcp_ping(host: &str, port: u16) -> Option<u32> {
+    let addr = tokio::time::timeout(PING_TIMEOUT, tokio::net::lookup_host((host, port)))
+        .await
+        .ok()?
+        .ok()?
+        .next()?;
+
+    let started = Instant::now();
+    tokio::time::timeout(PING_TIMEOUT, tokio::net::TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+    Some(started.elapsed().as_millis() as u32)
+}
+
+/// Open one of bliss's own files or folders the way a double click would.
+///
+/// Through `explorer.exe` rather than `ShellExecuteW`: it performs the same
+/// default action, needs no unsafe block and no COM on this thread, and is the
+/// one program certain to be present. A missing association shows Windows' own
+/// "open with" picker, which is the correct answer to a `.toml` nobody has
+/// claimed yet.
+#[cfg(windows)]
+fn reveal(path: &std::path::Path) {
+    tracing::info!("opening {}", path.display());
+    if let Err(e) = std::process::Command::new("explorer.exe").arg(path).spawn() {
+        tracing::warn!("could not open {}: {e}", path.display());
+    }
+}
+
+#[cfg(not(windows))]
+fn reveal(path: &std::path::Path) {
+    tracing::warn!("cannot open {} on this platform", path.display());
 }
 
 #[derive(Default)]

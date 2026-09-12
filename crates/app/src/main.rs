@@ -151,37 +151,41 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
         tracing::warn!("server #{} in the profile is unusable - {err}", i + 1);
     }
 
-    let server = match &want {
+    // An index, not a copy: the window can switch between all of them, so the
+    // list has to travel intact and the choice is just a number into it.
+    let selected = match &want {
         Some(tag) => servers
             .iter()
-            .find(|s| &s.tag == tag)
+            .position(|s| &s.tag == tag)
             .ok_or_else(|| eyre!("no server tagged {tag:?} in {}", path.display()))?,
-        None => servers.first().ok_or_else(|| {
+        None if servers.is_empty() => {
             // "No server" and "the server did not parse" are different
             // problems with different fixes, and telling the user the wrong
             // one sends them looking in the wrong place.
             match failed.first() {
-                Some((i, why)) => eyre!(
+                Some((i, why)) => bail!(
                     "server #{} in {} could not be read: {why}",
                     i + 1,
                     path.display()
                 ),
-                None => eyre!(
+                None => bail!(
                     "no server in {}. Paste a vless:// link into it — the [[server]] block at the bottom of the file shows where.",
                     path.display()
                 ),
             }
-        })?,
-    }
-    .clone();
+        }
+        None => 0,
+    };
 
     Ok(engine::Setup {
         exe: resolve_engine(&profile)?,
         work_dir: work_dir()?,
         engine_log: parse_log_level(engine_log)?,
         autostart: true,
+        profile_path: path,
         profile,
-        server,
+        servers,
+        selected,
     })
 }
 
@@ -301,7 +305,7 @@ async fn run(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> R
         "{}:{}",
         setup.profile.inbound.listen, setup.profile.inbound.socks
     );
-    let described = describe(&setup.server);
+    let described = describe(&setup.servers[setup.selected]);
     let bridge = setup.profile.engine.bridge_port;
 
     let mut controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;

@@ -37,6 +37,16 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .nav-item:not(.active):not(.disabled):hover { background-color: rgba(233, 233, 237, .06); }
 
 .row:hover { background-color: rgba(233, 233, 237, .045); }
+
+/* Tabs inside a card, and the clickable things the tabs contain. Same rule as
+   the rail: hover is scoped away from whatever is already marked, or the two
+   tints stack and the pointer has nowhere to move to clear it. */
+.tab, .act, .srv { transition: background-color .14s ease, color .14s ease; }
+.tab { color: var(--color-neutral-500); }
+.tab:not(.active):hover { background-color: rgba(233, 233, 237, .06); color: #e9e9ed; }
+.tab.active { color: var(--color-accent); background-color: rgba(145, 132, 217, .12); }
+.act:not(.disabled):hover { background-color: rgba(233, 233, 237, .07); }
+.srv:not(.current):hover { background-color: rgba(233, 233, 237, .05); }
 .wbtn:hover { background-color: rgba(233, 233, 237, .07); color: #e9e9ed; }
 .wbtn-close:hover { background-color: #8c3b44; color: #fff; }
 .ring:hover { border-color: #b5abfc; }
