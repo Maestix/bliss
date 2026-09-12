@@ -13,7 +13,7 @@
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
-use crate::engine::{Command, Controller, Frame, State, bytes, rate};
+use crate::engine::{Command, Controller, Frame, Ping, Reveal, State, bytes, rate};
 
 const NOCTURNE: &str = include_str!("../assets/nocturne.css");
 const APP_CSS: &str = include_str!("../assets/app.css");
@@ -66,11 +66,42 @@ impl Screen {
     }
 }
 
+/// The lower card on the connection screen holds three things, not one.
+///
+/// Tabs rather than three more sidebar destinations: all three are about the
+/// server you are connected to right now, so they belong next to it. It also
+/// fills a card that was a chart and a lot of nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Traffic,
+    Servers,
+    Actions,
+}
+
+impl Tab {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Traffic => "traffic",
+            Self::Servers => "servers",
+            Self::Actions => "actions",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Traffic => "Трафик",
+            Self::Servers => "Серверы",
+            Self::Actions => "Действия",
+        }
+    }
+}
+
 #[component]
 fn App() -> Element {
     let controller = use_context::<Controller>();
     let mut frame = use_signal(|| controller.frame());
     let screen = use_signal(|| Screen::Connection);
+    let tab = use_signal(|| Tab::Traffic);
 
     // The engine pushes; we never poll. A watch notification needs no timer, so
     // this works regardless of which executor is under the renderer.
@@ -101,7 +132,7 @@ fn App() -> Element {
                     background:var(--color-bg);overflow:hidden;color:var(--color-text)",
             TitleBar { engine: frame.engine.clone() }
             div { style: "flex:1;min-height:0;display:flex",
-                Sidebar { screen, frame: frame.clone() }
+                Sidebar { screen, tab, frame: frame.clone() }
                 // The key changes with the screen, which forces a fresh node
                 // and lets the fade-in replay instead of being skipped.
                 {
@@ -109,7 +140,7 @@ fn App() -> Element {
                     match screen() {
                         Screen::Connection => rsx! {
                             div { key: "{key}", class: "screen", style: SCREEN,
-                                Connection { frame: frame.clone() }
+                                Connection { frame: frame.clone(), tab }
                             }
                         },
                         Screen::Traffic => rsx! {
@@ -213,8 +244,15 @@ fn WindowButton(kind: &'static str, onclick: EventHandler<MouseEvent>) -> Elemen
 /// Direction 1a's navigation: labels, not just icons. Six destinations is past
 /// the point where an icon rail stays guessable.
 #[component]
-fn Sidebar(screen: Signal<Screen>, frame: Frame) -> Element {
+fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Element {
     let here = screen();
+    // Servers live in a tab of the connection screen rather than in a screen of
+    // their own, so the rail points at the tab. Which means "Подключение" is
+    // only the current place while that tab is not the one showing — otherwise
+    // two rail items would light up for one view.
+    let on_connection = here == Screen::Connection;
+    let at_servers = on_connection && tab() == Tab::Servers;
+
     rsx! {
         div {
             style: "width:210px;flex:none;display:flex;flex-direction:column;gap:2px;\
@@ -222,11 +260,16 @@ fn Sidebar(screen: Signal<Screen>, frame: Frame) -> Element {
 
             NavItem {
                 label: "Подключение",
-                active: here == Screen::Connection,
+                active: on_connection && !at_servers,
                 enabled: true,
-                onclick: move |_| screen.set(Screen::Connection),
+                onclick: move |_| {
+                    screen.set(Screen::Connection);
+                    if tab() == Tab::Servers {
+                        tab.set(Tab::Traffic);
+                    }
+                },
                 icon: rsx! {
-                    crate::icons::Power { size: 18, color: nav_tint(here == Screen::Connection, true) }
+                    crate::icons::Power { size: 18, color: nav_tint(on_connection && !at_servers, true) }
                 },
             }
             NavItem {
@@ -238,18 +281,21 @@ fn Sidebar(screen: Signal<Screen>, frame: Frame) -> Element {
                     crate::icons::Terminal { size: 18, color: nav_tint(here == Screen::Traffic, true) }
                 },
             }
+            NavItem {
+                label: "Серверы",
+                count: frame.servers.len(),
+                active: at_servers,
+                enabled: true,
+                onclick: move |_| {
+                    screen.set(Screen::Connection);
+                    tab.set(Tab::Servers);
+                },
+                icon: rsx! { crate::icons::Globe { size: 18, color: nav_tint(at_servers, true) } },
+            }
 
             // The reference's other destinations exist in the design but not yet
             // in the program. Shown so the shape is right, dimmed and inert so
             // nothing claims to work that does not.
-            NavItem {
-                label: "Серверы",
-                count: frame.servers,
-                active: false,
-                enabled: false,
-                onclick: move |_| {},
-                icon: rsx! { crate::icons::Globe { size: 18, color: nav_tint(false, false) } },
-            }
             NavItem {
                 label: "Подписки",
                 count: 0,
@@ -346,7 +392,7 @@ fn nav_tint(active: bool, enabled: bool) -> &'static str {
 // --- screen: connection ---------------------------------------------------
 
 #[component]
-fn Connection(frame: Frame) -> Element {
+fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
     let controller = use_context::<Controller>();
     let (tone, outer, inner) = tones(frame.state);
     let on = frame.state.is_on();
@@ -430,37 +476,320 @@ fn Connection(frame: Frame) -> Element {
                 style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:11px;\
                         padding:15px;background:var(--color-surface);\
                         border-radius:var(--radius-md);box-shadow:var(--shadow-sm)",
-                div { style: "display:flex;align-items:baseline;gap:12px",
-                    span { style: "font:500 16px/1 var(--font-heading)", "Трафик" }
-                    span { style: "font-size:13.5px;color:var(--color-neutral-500)",
-                        "последние {span_seconds} с"
-                    }
-                    div {
-                        style: "margin-left:auto;display:flex;gap:16px;font-size:13.5px;\
-                                font-variant-numeric:tabular-nums",
-                        span { style: "color:var(--color-accent-300)", "↓ {rate(frame.down_rate)}" }
-                        span { style: "color:var(--color-neutral-400)", "↑ {rate(frame.up_rate)}" }
-                    }
+
+                TabBar {
+                    tab,
+                    meta: match tab() {
+                        Tab::Traffic => rsx! {
+                            div {
+                                style: "display:flex;align-items:baseline;gap:16px;font-size:13.5px;\
+                                        font-variant-numeric:tabular-nums",
+                                span { style: "color:var(--color-neutral-600)",
+                                    "последние {span_seconds} с"
+                                }
+                                span { style: "color:var(--color-accent-300)", "↓ {rate(frame.down_rate)}" }
+                                span { style: "color:var(--color-neutral-400)", "↑ {rate(frame.up_rate)}" }
+                            }
+                        },
+                        // Says what the number is before anyone reads it as a
+                        // promise the tunnel will be this fast.
+                        Tab::Servers => rsx! {
+                            span { style: "font-size:13px;color:var(--color-neutral-600)",
+                                "отклик — TCP-рукопожатие до сервера, мимо туннеля"
+                            }
+                        },
+                        Tab::Actions => rsx! {},
+                    },
                 }
-                div { style: "flex:1;min-height:0;display:flex;align-items:flex-end;gap:3px",
-                    for value in frame.history.iter().copied() {
-                        div {
-                            class: "bar",
-                            style: "flex:1;border-radius:1px 1px 0 0;\
-                                    height:{bar_height(value, frame.scale)}%;\
-                                    background-color:{bar_colour(value)}",
-                        }
-                    }
-                }
+
+                // Keyed so switching tabs replays the fade rather than swapping
+                // the contents in place.
                 div {
-                    style: "display:flex;justify-content:space-between;font-size:12px;\
-                            color:var(--color-neutral-600);font-variant-numeric:tabular-nums",
-                    span { "−{span_seconds} с" }
-                    span { "−{span_seconds / 2} с" }
-                    span { "сейчас" }
+                    key: "{tab().key()}",
+                    class: "screen",
+                    style: "flex:1;min-height:0;display:flex;flex-direction:column",
+                    match tab() {
+                        Tab::Traffic => rsx! { TrafficTab { frame: frame.clone() } },
+                        Tab::Servers => rsx! { ServersTab { frame: frame.clone() } },
+                        Tab::Actions => rsx! { ActionsTab { frame: frame.clone() } },
+                    }
                 }
             }
         }
+    }
+}
+
+// --- the tabbed card ------------------------------------------------------
+
+#[component]
+fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
+    rsx! {
+        div { style: "display:flex;align-items:center;gap:6px",
+            for one in [Tab::Traffic, Tab::Servers, Tab::Actions] {
+                div {
+                    key: "{one.key()}",
+                    class: if tab() == one { "tab active" } else { "tab" },
+                    style: "padding:5px 12px;border-radius:var(--radius-sm);cursor:default;\
+                            font:500 14.5px/1.35 var(--font-heading)",
+                    onclick: move |_| tab.set(one),
+                    "{one.label()}"
+                }
+            }
+            div { style: "margin-left:auto", {meta} }
+        }
+    }
+}
+
+#[component]
+fn TrafficTab(frame: Frame) -> Element {
+    let span_seconds = frame.history.len() / 2;
+    rsx! {
+        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:9px",
+            div { style: "flex:1;min-height:0;display:flex;align-items:flex-end;gap:3px",
+                for value in frame.history.iter().copied() {
+                    div {
+                        class: "bar",
+                        style: "flex:1;border-radius:1px 1px 0 0;\
+                                height:{bar_height(value, frame.scale)}%;\
+                                background-color:{bar_colour(value)}",
+                    }
+                }
+            }
+            div {
+                style: "display:flex;justify-content:space-between;font-size:12px;\
+                        color:var(--color-neutral-600);font-variant-numeric:tabular-nums",
+                span { "−{span_seconds} с" }
+                span { "−{span_seconds / 2} с" }
+                span { "сейчас" }
+            }
+        }
+    }
+}
+
+/// Every server in the profile, with the one in use marked and the rest a
+/// click away.
+///
+/// Switching restarts the engine, because its config names one server and
+/// there is nothing to reload — so the row does not pretend to be instant.
+#[component]
+fn ServersTab(frame: Frame) -> Element {
+    const COLUMNS: &str = "grid-template-columns:1.2fr 1.4fr 118px 78px;gap:12px";
+    let controller = use_context::<Controller>();
+    let probing = frame
+        .servers
+        .iter()
+        .any(|s| matches!(s.ping, Ping::Probing));
+
+    rsx! {
+        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:7px",
+            div {
+                style: "display:grid;{COLUMNS};padding:0 10px 6px;font-size:12px;\
+                        letter-spacing:.09em;text-transform:uppercase;\
+                        color:var(--color-neutral-500);\
+                        border-bottom:1px solid var(--color-divider)",
+                span { "Имя" }
+                span { "Адрес" }
+                span { "Защита" }
+                span { style: "text-align:right", "Отклик" }
+            }
+
+            div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
+                if frame.servers.is_empty() {
+                    div { style: "padding:22px 10px;font-size:14.5px;color:var(--color-neutral-600)",
+                        "В профиле нет серверов. Вставьте vless://-ссылку — «Действия» откроют нужный файл."
+                    }
+                }
+                for (index, server) in frame.servers.iter().enumerate() {
+                    div {
+                        key: "{index}",
+                        class: if server.current { "srv current" } else { "srv" },
+                        style: "display:grid;{COLUMNS};align-items:center;padding:8px 10px;\
+                                border-radius:var(--radius-sm);cursor:default;{current_mark(server.current)}",
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Select(index))
+                        },
+                        span { style: "font-size:14.5px", "{elide(&server.tag, 22)}" }
+                        span {
+                            style: "font-size:13.5px;color:var(--color-neutral-400);\
+                                    font-family:ui-monospace,Consolas,monospace",
+                            "{elide(&server.addr, 26)}"
+                        }
+                        span { style: "font-size:13px;color:var(--color-neutral-500)", "{server.kind}" }
+                        span {
+                            style: "text-align:right;font-size:13.5px;\
+                                    font-variant-numeric:tabular-nums;color:{ping_tone(server.ping)}",
+                            "{ping_text(server.ping)}"
+                        }
+                    }
+                }
+            }
+
+            div { style: "display:flex;align-items:center;gap:10px;padding-top:2px",
+                Button {
+                    label: if probing { "Проверяю…" } else { "Проверить все" },
+                    enabled: !probing && !frame.servers.is_empty(),
+                    onclick: {
+                        let controller = controller.clone();
+                        move |_| controller.send(Command::PingAll)
+                    },
+                    icon: rsx! { crate::icons::Pulse { size: 15, color: ACCENT } },
+                }
+                span { style: "font-size:13px;color:var(--color-neutral-600)",
+                    "переключение перезапускает движок"
+                }
+            }
+        }
+    }
+}
+
+/// The things one actually does with a client, none of which had a home.
+#[component]
+fn ActionsTab(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let on = frame.state.is_on();
+
+    rsx! {
+        div {
+            style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;display:grid;\
+                    grid-template-columns:1fr 1fr;gap:9px;align-content:start;padding-top:2px",
+
+            ActionCard {
+                title: "Проверить серверы",
+                hint: "рукопожатие до каждого из профиля",
+                enabled: !frame.servers.is_empty(),
+                onclick: {
+                    let controller = controller.clone();
+                    move |_| controller.send(Command::PingAll)
+                },
+                icon: rsx! { crate::icons::Pulse { size: 17, color: ACCENT } },
+            }
+            ActionCard {
+                title: "Перезапустить туннель",
+                hint: if on { "поднять заново на том же сервере" } else { "туннель выключен" },
+                enabled: on,
+                onclick: {
+                    let controller = controller.clone();
+                    move |_| controller.send(Command::Restart)
+                },
+                icon: rsx! { crate::icons::Refresh { size: 17, color: ACCENT } },
+            }
+            ActionCard {
+                title: "Открыть профиль",
+                hint: "bliss.toml — сюда вставляются ссылки",
+                enabled: true,
+                onclick: {
+                    let controller = controller.clone();
+                    move |_| controller.send(Command::Reveal(Reveal::Profile))
+                },
+                icon: rsx! { crate::icons::Document { size: 17, color: ACCENT } },
+            }
+            ActionCard {
+                title: "Папка bliss",
+                hint: "журнал, движок, конфиг движка",
+                enabled: true,
+                onclick: {
+                    let controller = controller.clone();
+                    move |_| controller.send(Command::Reveal(Reveal::WorkDir))
+                },
+                icon: rsx! { crate::icons::Folder { size: 17, color: ACCENT } },
+            }
+            // Dimmed rather than absent, for the same reason as the rail: the
+            // shape of the program is honest about what is not built yet.
+            ActionCard {
+                title: "Системный прокси",
+                hint: "пока включается в настройках Windows",
+                enabled: false,
+                onclick: move |_| {},
+                icon: rsx! { crate::icons::Shield { size: 17, color: "#595d6c" } },
+            }
+        }
+    }
+}
+
+#[component]
+fn ActionCard(
+    icon: Element,
+    title: String,
+    hint: String,
+    enabled: bool,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    let tone = if enabled {
+        "color:var(--color-neutral-200)"
+    } else {
+        "color:var(--color-neutral-700)"
+    };
+    rsx! {
+        div {
+            class: if enabled { "act" } else { "act disabled" },
+            style: "display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:default;\
+                    border-radius:var(--radius-md);background:rgba(233,233,237,.03);{tone}",
+            onclick: move |e| if enabled { onclick.call(e) },
+            {icon}
+            div { style: "display:flex;flex-direction:column;gap:2px;min-width:0",
+                span { style: "font-size:14.5px", "{title}" }
+                span { style: "font-size:12.5px;color:var(--color-neutral-600)", "{hint}" }
+            }
+        }
+    }
+}
+
+/// A small button with an icon, for the one or two places a card needs one.
+#[component]
+fn Button(
+    icon: Element,
+    label: String,
+    enabled: bool,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    let tone = if enabled {
+        "color:var(--color-neutral-200);box-shadow:inset 0 0 0 1px rgba(145,132,217,.35)"
+    } else {
+        "color:var(--color-neutral-700);box-shadow:inset 0 0 0 1px rgba(233,233,237,.07)"
+    };
+    rsx! {
+        div {
+            class: if enabled { "act" } else { "act disabled" },
+            style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;\
+                    border-radius:var(--radius-sm);cursor:default;font-size:14px;{tone}",
+            onclick: move |e| if enabled { onclick.call(e) },
+            {icon}
+            "{label}"
+        }
+    }
+}
+
+/// The accent bar on the server in use. Same device as the rail, so "this is
+/// where you are" looks the same wherever it appears.
+fn current_mark(current: bool) -> &'static str {
+    if current {
+        "box-shadow:inset 2px 0 0 var(--color-accent);background-color:rgba(145,132,217,.10)"
+    } else {
+        ""
+    }
+}
+
+fn ping_text(ping: Ping) -> String {
+    use Ping;
+    match ping {
+        Ping::Unknown => "—".to_owned(),
+        Ping::Probing => "…".to_owned(),
+        Ping::Ok(ms) => format!("{ms} мс"),
+        Ping::Down => "нет".to_owned(),
+    }
+}
+
+/// Three bands, not a gradient: the eye reads "fine / usable / slow" and a
+/// per-millisecond colour would only invite comparing numbers that move.
+fn ping_tone(ping: Ping) -> &'static str {
+    use Ping;
+    match ping {
+        Ping::Ok(ms) if ms < 120 => ON.0,
+        Ping::Ok(ms) if ms < 300 => "var(--color-accent-300)",
+        Ping::Ok(_) => "var(--color-neutral-400)",
+        Ping::Down => OFF.0,
+        Ping::Unknown | Ping::Probing => "var(--color-neutral-600)",
     }
 }
 
@@ -666,6 +995,28 @@ mod tests {
         assert_eq!(bar_height(1, 1_000_000), 16);
         assert!(bar_height(1, 1_000_000) > bar_height(0, 1_000_000));
         assert_eq!(bar_height(500, 1_000), 50);
+    }
+
+    /// Bands, not a gradient — and the distinctions that have to survive
+    /// someone tuning the thresholds later.
+    #[test]
+    fn a_ping_reads_the_same_way_at_a_glance_every_time() {
+        // Inside a band the colour does not move; crossing one, it does.
+        assert_eq!(ping_tone(Ping::Ok(0)), ping_tone(Ping::Ok(119)));
+        assert_ne!(ping_tone(Ping::Ok(119)), ping_tone(Ping::Ok(120)));
+        assert_ne!(ping_tone(Ping::Ok(299)), ping_tone(Ping::Ok(300)));
+
+        // However slow, a server that answered is not a server that did not.
+        for ms in [0, 119, 120, 299, 300, 4_000] {
+            assert_ne!(ping_tone(Ping::Ok(ms)), ping_tone(Ping::Down));
+        }
+
+        // And "not measured" is a third thing again: reading it as failure
+        // would condemn every server in the list for the second before the
+        // first sweep lands.
+        assert_ne!(ping_tone(Ping::Unknown), ping_tone(Ping::Down));
+        assert_ne!(ping_text(Ping::Unknown), ping_text(Ping::Down));
+        assert_eq!(ping_text(Ping::Ok(42)), "42 мс");
     }
 }
 
