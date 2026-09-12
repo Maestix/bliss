@@ -19,7 +19,7 @@ use tracing_subscriber::layer::Context;
 
 /// Lines kept for the log pane. A few hundred is more than anyone scrolls and
 /// small enough that the whole buffer is a rounding error in memory.
-const CAPACITY: usize = 400;
+pub const CAPACITY: usize = 400;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {

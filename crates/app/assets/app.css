@@ -41,7 +41,39 @@ body { font-size: 16px; user-select: none; cursor: default; }
    like a highlight that got stuck. */
 .nav-item:not(.active):not(.disabled):hover { background-color: rgba(233, 233, 237, .06); }
 
+/* The rail's and the server list's state lives here rather than in an inline
+   style, and that is not a matter of taste. Dioxus writes a new `style`
+   attribute and then restores every property the new string did not mention
+   (dioxus-interpreter-js, `setAttributeInner`, case "style"). An inline
+   property that varies by state therefore never goes away: the accent bar and
+   the tint stayed on every rail item that had ever been clicked, and on the
+   previously selected server. Classes are diffed like any other attribute. */
+/* Corner rounding for the elements whose inline style changes between renders.
+   It cannot live in that style: `border-radius: var(--radius-md)` is a
+   shorthand carrying a variable, and the renderer's save-and-restore of inline
+   properties destroys it on every rewrite — the rounding alternated between 8px
+   and 0px, which looked like the corners flickering from round to square. */
+.btn, .choice { border-radius: var(--radius-sm); }
+.card { border-radius: var(--radius-md); }
+
+.nav-item { color: var(--color-neutral-300); }
+.nav-item.disabled { color: var(--color-neutral-700); }
+.nav-item.active {
+  color: var(--color-accent);
+  background-color: rgba(145, 132, 217, .10);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+.srv.current {
+  background-color: rgba(145, 132, 217, .10);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
 .row:hover { background-color: rgba(233, 233, 237, .045); }
+
+/* Both are click-to-copy, so both have to look clickable. Nothing else in the
+   log moves, which makes a faint tint enough of a hint. */
+.logline { transition: background-color .12s ease; }
+.logline:hover { background-color: rgba(233, 233, 237, .07); }
 
 /* Tabs inside a card, and the clickable things the tabs contain. Same rule as
    the rail: hover is scoped away from whatever is already marked, or the two

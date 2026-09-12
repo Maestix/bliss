@@ -35,4 +35,10 @@ tracing-subscriber.workspace = true
 windows = { workspace = true, features = [
     "Win32_System_Console",
     "Win32_UI_WindowsAndMessaging",
+    # Copying a log line out. Through the Win32 clipboard rather than
+    # navigator.clipboard, which wants a secure context this window does not
+    # have — it is served from a custom protocol.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
 ] }

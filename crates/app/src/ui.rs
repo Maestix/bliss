@@ -9,6 +9,24 @@
 //! `docs/spike-1.0-renderer.md`): no `color-mix`, no `text-overflow`, and long
 //! text trimmed in code. Today that costs nothing and it keeps the Blitz door
 //! open.
+//!
+//! **Two rules about inline styles, both paid for in bugs.** Dioxus does not
+//! simply write the `style` attribute: it records the properties the node
+//! already has inline, writes the new string, and then puts back every property
+//! the new string did not mention (`dioxus-interpreter-js`,
+//! `setAttributeInner`, case `"style"`). Two consequences, and they only bite a
+//! style string that actually changes between renders — a constant one is never
+//! rewritten:
+//!
+//! 1. **A property that varies by state must never simply disappear** from the
+//!    string, or it is restored and sticks forever. State belongs in a class.
+//!    This is why the rail kept its accent bar on every item ever clicked.
+//! 2. **No `var()` inside a shorthand.** `border-radius: var(--radius-md)` is
+//!    stored as a pending substitution, so the longhands read back empty, and
+//!    the restore loop writes those empties over the shorthand — destroying it.
+//!    Applied repeatedly it alternates 8px, 0px, 8px, which is the rounding
+//!    that flickered between round and square on the rail. Use longhands
+//!    (`font-family` not `font:`), a literal, or a class.
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
@@ -455,7 +473,10 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                     }
                     div { style: "display:flex;flex-direction:column;gap:4px;min-width:0",
                         span {
-                            style: "font:500 25px/1.1 var(--font-heading);color:{tone}",
+                            // Longhands, not the `font:` shorthand: see the
+                            // note at the top of this file.
+                            style: "font-weight:500;font-size:25px;line-height:1.1;\
+                                    font-family:var(--font-heading);color:{tone}",
                             "{frame.state.label()}"
                         }
                         span { style: "font-size:14px;color:var(--color-neutral-400)",
@@ -630,8 +651,12 @@ fn ServersTab(frame: Frame) -> Element {
                     div {
                         key: "{index}",
                         class: if server.current { "srv current" } else { "srv" },
+                        // Marked by class, not by inline style: see the note in
+                        // NavItem. A property that vanishes from a style string
+                        // is restored by the renderer, so the previous server
+                        // would keep its marker after a switch.
                         style: "display:grid;{COLUMNS};align-items:center;padding:8px 10px;\
-                                border-radius:var(--radius-sm);cursor:default;{current_mark(server.current)}",
+                                border-radius:var(--radius-sm);cursor:default",
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::Select(index))
@@ -769,7 +794,7 @@ fn SystemProxy(frame: Frame) -> Element {
                         key: "{mode.key()}",
                         class: if mode == chosen { "act choice on" } else { "act choice" },
                         style: "display:flex;align-items:center;gap:9px;padding:6px 9px;\
-                                border-radius:var(--radius-sm);cursor:default;font-size:13.5px;\
+                                cursor:default;font-size:13.5px;\
                                 color:{choice_tint(mode == chosen)}",
                         onclick: {
                             let controller = controller.clone();
@@ -849,9 +874,9 @@ fn ActionCard(
     };
     rsx! {
         div {
-            class: if enabled { "act" } else { "act disabled" },
+            class: if enabled { "act card" } else { "act card disabled" },
             style: "display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:default;\
-                    border-radius:var(--radius-md);background:rgba(233,233,237,.03);{tone}",
+                    background-color:rgba(233,233,237,.03);{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             div { style: "display:flex;flex-direction:column;gap:2px;min-width:0",
@@ -877,23 +902,13 @@ fn Button(
     };
     rsx! {
         div {
-            class: if enabled { "act" } else { "act disabled" },
+            class: if enabled { "act btn" } else { "act btn disabled" },
             style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;\
-                    border-radius:var(--radius-sm);cursor:default;font-size:14px;{tone}",
+                    cursor:default;font-size:14px;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
         }
-    }
-}
-
-/// The accent bar on the server in use. Same device as the rail, so "this is
-/// where you are" looks the same wherever it appears.
-fn current_mark(current: bool) -> &'static str {
-    if current {
-        "box-shadow:inset 2px 0 0 var(--color-accent);background-color:rgba(145,132,217,.10)"
-    } else {
-        ""
     }
 }
 
@@ -971,6 +986,10 @@ fn tones(state: State) -> (&'static str, &'static str, &'static str) {
 fn Connections(frame: Frame) -> Element {
     const COLUMNS: &str = "grid-template-columns:1.6fr 1fr 78px 92px 92px;gap:10px";
 
+    // Same click-to-copy as the log below it, and the same note.
+    let mut copied = use_signal(String::new);
+    let note = copied();
+
     rsx! {
         div {
             style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
@@ -984,6 +1003,30 @@ fn Connections(frame: Frame) -> Element {
                     style: "margin-left:auto;font-size:13.5px;color:var(--color-neutral-500);\
                             font-variant-numeric:tabular-nums",
                     "↓ {rate(frame.down_rate)}   ↑ {rate(frame.up_rate)}"
+                }
+                Button {
+                    label: "Скопировать таблицу",
+                    enabled: !frame.connections.is_empty(),
+                    onclick: {
+                        let rows = frame.connections.clone();
+                        move |_| {
+                            let text =
+                                rows.iter().map(row_as_text).collect::<Vec<_>>().join("\n");
+                            copied.set(if crate::clipboard::copy(&text) {
+                                format!("скопировано {}", crate::clipboard::lines(rows.len()))
+                            } else {
+                                "буфер обмена занят другой программой".to_owned()
+                            });
+                        }
+                    },
+                    icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
+                }
+            }
+
+            if !note.is_empty() {
+                span {
+                    style: "flex:none;font-size:12.5px;color:var(--color-neutral-600)",
+                    "{note}"
                 }
             }
 
@@ -1010,7 +1053,17 @@ fn Connections(frame: Frame) -> Element {
                         key: "{row.id}",
                         class: "row",
                         style: "display:grid;{COLUMNS};align-items:center;padding:7px 8px;\
-                                border-bottom:1px solid rgba(233,233,237,.05)",
+                                cursor:default;border-bottom:1px solid rgba(233,233,237,.05)",
+                        onclick: {
+                            let text = row_as_text(row);
+                            move |_| {
+                                copied.set(if crate::clipboard::copy(&text) {
+                                    format!("скопировано: {}", elide(&text, 44))
+                                } else {
+                                    "буфер обмена занят другой программой".to_owned()
+                                });
+                            }
+                        },
                         span {
                             style: "font-size:14px;font-family:ui-monospace,Consolas,monospace",
                             "{elide(&row.target, 40)}"
@@ -1437,6 +1490,12 @@ fn LogStrip() -> Element {
     const SHOWN: usize = 200;
 
     let lines = crate::logs::history(SHOWN);
+    // What the last copy did. Stays until the next one rather than fading on a
+    // timer: a confirmation that disappears while you are still looking at it
+    // leaves you unsure whether you saw it.
+    let mut copied = use_signal(String::new);
+    let note = copied();
+
     rsx! {
         div {
             style: "flex:1;min-height:150px;display:flex;flex-direction:column;gap:9px",
@@ -1445,7 +1504,30 @@ fn LogStrip() -> Element {
                 span { class: "tag tag-accent", style: "font-size:11px;padding:2px 8px", "live" }
                 span {
                     style: "margin-left:auto;font-size:12.5px;color:var(--color-neutral-600)",
-                    "новые сверху"
+                    if note.is_empty() { "строка копируется кликом" } else { "{note}" }
+                }
+                Button {
+                    label: "Скопировать всё",
+                    enabled: !lines.is_empty(),
+                    onclick: move |_| {
+                        // Oldest first, the other way round from the screen. A
+                        // log is read downwards through time once it has been
+                        // pasted somewhere, and the note says which way it went
+                        // so the order is not a surprise.
+                        let all = crate::logs::history(crate::logs::CAPACITY);
+                        let text = all
+                            .iter()
+                            .rev()
+                            .map(as_text)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        copied.set(if crate::clipboard::copy(&text) {
+                            format!("скопировано {} — сверху старые", crate::clipboard::lines(all.len()))
+                        } else {
+                            "буфер обмена занят другой программой".to_owned()
+                        });
+                    },
+                    icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
                 }
             }
             div {
@@ -1456,8 +1538,22 @@ fn LogStrip() -> Element {
                 if lines.is_empty() {
                     span { style: "color:var(--color-neutral-700)", "пока тихо" }
                 }
-                for line in lines.iter() {
-                    div { style: "display:flex;gap:10px;align-items:baseline",
+                for (n, line) in lines.iter().enumerate() {
+                    div {
+                        key: "{n}",
+                        class: "logline",
+                        style: "display:flex;gap:10px;align-items:baseline;cursor:default;\
+                                border-radius:3px;margin:0 -4px;padding:0 4px",
+                        onclick: {
+                            let text = as_text(line);
+                            move |_| {
+                                copied.set(if crate::clipboard::copy(&text) {
+                                    format!("скопировано: {}", elide(&text, 40))
+                                } else {
+                                    "буфер обмена занят другой программой".to_owned()
+                                });
+                            }
+                        },
                         span {
                             style: "color:var(--color-neutral-700);flex:none",
                             "{line.time}"
@@ -1477,4 +1573,33 @@ fn LogStrip() -> Element {
             }
         }
     }
+}
+
+/// One table row as text.
+///
+/// Tab-separated, because what people do with a copied table is paste it
+/// somewhere that understands columns — and because a rule name can contain
+/// spaces, so spaces cannot be the separator.
+fn row_as_text(row: &bliss_core::Snapshot) -> String {
+    format!(
+        "{}\t{}\t{}\t{}\t↓ {}\t↑ {}",
+        row.target,
+        row.process.as_deref().unwrap_or("—"),
+        if row.closed_at.is_some() {
+            "закрыто"
+        } else {
+            "открыто"
+        },
+        row.rule,
+        bytes(row.down),
+        bytes(row.up)
+    )
+}
+
+/// One log line as text, which is what goes on the clipboard.
+///
+/// The level is padded so a pasted block lines up in whatever it is pasted
+/// into — the same reason the pane gives the column a fixed width.
+fn as_text(line: &crate::logs::Line) -> String {
+    format!("{}  {:<5}  {}", line.time, line.level.label(), line.text)
 }
