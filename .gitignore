@@ -1,0 +1,10 @@
+/target
+# Live credentials: server links, UUIDs, Reality keys. Never commit.
+*.local.toml
+bliss.local.*
+/profile
+
+# Design sources. Kept on disk as the reference the UI is built from, out of
+# the repository because they are large binaries that change wholesale: every
+# revision would add another megabyte or two that git cannot diff.
+*.zip

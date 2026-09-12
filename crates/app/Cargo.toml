@@ -1,0 +1,38 @@
+[package]
+name = "bliss"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "VLESS + REALITY client for Windows"
+
+[[bin]]
+name = "bliss"
+path = "src/main.rs"
+
+[features]
+default = ["mimalloc"]
+# Off by default only for A/B measurement:
+#   cargo run --release --no-default-features -- …
+mimalloc = ["dep:mimalloc"]
+
+[dependencies]
+bliss-core = { path = "../core" }
+bliss-proto = { path = "../proto" }
+bliss-xray = { path = "../xray" }
+clap = { workspace = true, features = ["derive"] }
+dioxus = { workspace = true, features = ["desktop"] }
+color-eyre.workspace = true
+directories.workspace = true
+jiff.workspace = true
+mimalloc = { workspace = true, optional = true }
+tokio = { workspace = true }
+toml.workspace = true
+tracing.workspace = true
+tracing-error.workspace = true
+tracing-subscriber.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows = { workspace = true, features = [
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }

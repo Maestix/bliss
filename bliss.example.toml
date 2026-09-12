@@ -1,0 +1,23 @@
+# bliss profile.
+#
+# The only thing you have to supply is a link. Get it from your provider or
+# from a subscription page — it starts with vless:// — uncomment the two lines
+# at the bottom and paste it in. Everything above already has a sane default.
+#
+# This file holds a live credential once you fill it in: the UUID and the
+# REALITY keys are in that link. Treat it like a password.
+
+[inbound]
+# What your browser and other programs point at. Loopback on purpose: anything
+# else puts an open proxy on the network.
+listen = "127.0.0.1"
+socks = 10808
+http = 10809
+
+[engine]
+# Left unset, bliss uses the engine it downloads itself (`bliss engine install`).
+# Point it at an xray.exe you already have if you would rather:
+# xray = "C:/path/to/xray.exe"
+
+# [[server]]
+# link = "vless://…paste yours here…"

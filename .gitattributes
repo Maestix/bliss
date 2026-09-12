@@ -1,0 +1,10 @@
+# One line ending in the repository, whatever the checkout does locally. Mixed
+# endings cost real time on this project: text edits that matched on one machine
+# silently failed to match after a formatter rewrote a file with the other.
+* text=auto eol=lf
+
+# Not text. Left alone so git neither normalises nor diffs them.
+*.zip binary
+*.png binary
+*.ico binary
+*.dat binary

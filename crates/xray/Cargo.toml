@@ -1,0 +1,22 @@
+[package]
+name = "bliss-xray"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Driving an external xray-core: config, process, version gate"
+
+[dependencies]
+base64.workspace = true
+futures-util.workspace = true
+bliss-proto = { path = "../proto" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+zip.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows.workspace = true

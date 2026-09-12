@@ -1,0 +1,20 @@
+[package]
+name = "bliss-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Inbounds, routing, relay and the connection table — everything that stays when the engine is swapped"
+
+[dependencies]
+async-trait.workspace = true
+bliss-proto = { path = "../proto" }
+jiff.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows = { workspace = true, features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
