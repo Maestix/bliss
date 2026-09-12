@@ -1,0 +1,112 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The spike drags in WebView2 and, under its other feature, wgpu + Stylo. Keeping
+# it out of the default set means a bare `cargo build` or `cargo test` stays a few
+# seconds; build it deliberately with `-p bliss-spike`.
+default-members = ["crates/proto", "crates/core", "crates/xray", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Maestix"]
+
+# One table, declared once, used per crate. Entries here are picked deliberately;
+# the comments say why, so a later "do we still need this?" has an answer.
+[workspace.dependencies]
+
+# --- errors ---------------------------------------------------------------
+# The split is the usual one and worth keeping honest: libraries return typed
+# errors the caller can match on, binaries render them for a human.
+thiserror = "2"                                        # every lib crate
+color-eyre = "0.6"                                     # binaries and examples only
+tracing-error = "0.2"                                  # puts tracing spans into eyre reports
+
+# --- logging --------------------------------------------------------------
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- data -----------------------------------------------------------------
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+serde_json = "1"                                       # only to feed xray-core its config
+base64 = "0.22"
+percent-encoding = "2"
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+# --- fetching the engine ---------------------------------------------------
+# rustls rather than native-tls: no OpenSSL, no schannel quirks, one less thing
+# that behaves differently on a user's machine than on ours. The socks feature
+# matters more than it looks — GitHub may well be blocked for the very user who
+# needs to download the engine, so the download can go through a tunnel we
+# already have up.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls", "json", "stream", "socks", "gzip",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+sha2 = "0.10"
+zip = { version = "6", default-features = false, features = ["deflate"] }
+
+# --- runtime ---
+async-trait = "0.1"                                    # Outbound must be dyn-compatible;
+                                                       # native async-in-trait is not, yet-----------------------------------------------------------
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }    # CancellationToken: one clean shutdown path
+bytes = "1"                                            # relay buffers without copying
+arc-swap = "1"                                         # swap the routing table under live traffic
+                                                       # without a lock on the per-connection path
+
+# --- allocator ------------------------------------------------------------
+# Windows' system heap is the weak one under multithreaded churn, and a proxy
+# churns: buffers, headers and a table entry per connection. Binary crates only,
+# never a library, and behind a feature so the resource budget can be measured
+# both ways instead of assumed. The larger win is upstream of it — pooling relay
+# buffers so the fast path stops allocating at all.
+mimalloc = "0.1"
+
+# --- ui -------------------------------------------------------------------
+# One dependency, two renderers: `dioxus/desktop` is WebView2, `dioxus/native`
+# is Blitz on WGPU. Same RSX, same CSS — which is what makes 1.0 a measurement
+# rather than an argument.
+dioxus = "0.7"
+
+# --- platform -------------------------------------------------------------
+# Job Objects now, the routing table for TUN later. Proven necessary rather than
+# assumed: kill_on_drop does not survive TerminateProcess on the parent, so a
+# force-killed bliss left an xray running and holding the bridge port.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+camino = "1"                                           # Utf8Path: Windows paths that print sanely
+directories = "6"                                      # %APPDATA% by the book, not by hand
+jiff = "0.2"                                           # timestamps; correct where chrono is merely popular
+
+# --- crypto, stage 3 ------------------------------------------------------
+zeroize = { version = "1", features = ["derive"] }
+
+# --- dev ------------------------------------------------------------------
+insta = "1"                                            # snapshot tests: the whole parsed struct
+                                                       # is the assertion, so a regression shows
+                                                       # as a diff instead of a failed field check
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+# Not "symbols": that strips the symbol table too, and a release panic then
+# reports its backtrace as bare addresses. "debuginfo" drops the DWARF bulk,
+# which is nearly all of the size, and keeps the names worth having.
+strip = "debuginfo"
+
+# Optimized, but without fat LTO: the 1.0 measurement is about resident memory,
+# which LTO barely moves, and a full-LTO link of wgpu + Stylo costs more minutes
+# than the answer is worth.
+[profile.spike]
+inherits = "release"
+lto = false
+codegen-units = 16

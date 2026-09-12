@@ -1,0 +1,65 @@
+/* Rules specific to the window shell, on top of the Nocturne design system.
+   They live in a file rather than inline in rsx! because braces inside an rsx!
+   string are format placeholders — CSS and format strings do not mix. */
+
+html, body { height: 100%; overflow: hidden; }
+
+/* Nothing in this window is selectable text, and a stray drag-select on a
+   title bar or a button looks broken. The tap highlight is the grey square
+   WebView2 leaves behind on a tapped element. */
+body { font-size: 16px; user-select: none; cursor: default; }
+* { -webkit-tap-highlight-color: transparent; }
+:focus { outline: none; }
+
+/* Every state change fades. Without this the interface snaps between states,
+   which reads as a series of glitches rather than as one thing responding.
+   `transition` is in the subset both renderers support, so this costs nothing
+   if we ever move off WebView2. */
+/* Fades, but only of what should fade. The nav item's left accent bar is an
+   inset box-shadow, and animating it made the bar travel around the rounded
+   corner on every switch — the outline appeared to turn from square to round
+   and back. Colour changes are what the eye wants here; the bar should simply
+   be somewhere else. */
+.nav-item, .wbtn, .row {
+  transition: background-color .14s ease, color .14s ease;
+}
+.ring {
+  transition: box-shadow .24s ease, border-color .24s ease;
+}
+/* The chart deliberately has no transition. Its data scrolls left rather than
+   changing in place, so animating height made every bar appear to grow and
+   shrink on each tick — motion that says something happened when nothing did. */
+
+/* Hover is scoped away from the active item. Otherwise clicking a rail button
+   leaves the hover tint stacked on top of the active tint, and because the
+   pointer does not move afterwards it stays that way — which looks exactly
+   like a highlight that got stuck. */
+.nav-item:not(.active):not(.disabled):hover { background-color: rgba(233, 233, 237, .06); }
+
+.row:hover { background-color: rgba(233, 233, 237, .045); }
+.wbtn:hover { background-color: rgba(233, 233, 237, .07); color: #e9e9ed; }
+.wbtn-close:hover { background-color: #8c3b44; color: #fff; }
+.ring:hover { border-color: #b5abfc; }
+
+/* Screens fade in when switched, so the change reads as a movement rather than
+   as a redraw. */
+@keyframes bliss-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.screen { animation: bliss-enter .18s ease-out; }
+
+/* Scrollbars. WebView2 draws light ones by default, which on this ground look
+   like someone left a browser window open inside the app. They are also only
+   wanted where something actually scrolls — `overflow: scroll` was chosen
+   originally because Blitz has no `auto`, but a permanent empty track is worse
+   than the portability it buys, so panes that fit their content use `hidden`. */
+* { scrollbar-width: thin; scrollbar-color: rgba(233, 233, 237, .16) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(233, 233, 237, .16);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(233, 233, 237, .28); }

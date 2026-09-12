@@ -1,0 +1,258 @@
+//! SOCKS5, both ends of it.
+//!
+//! The client half dials the engine; the server half serves whatever the user
+//! pointed at bliss. Same protocol, opposite directions, so they live together.
+//!
+//! One trap worth naming: SOCKS5 address types are **1 = IPv4, 3 = domain,
+//! 4 = IPv6**. VLESS uses 1, 2, 3 for the same three things. Mixing them up
+//! produces a connection that opens and then talks to the wrong place.
+
+use std::net::SocketAddr;
+
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::target::Target;
+
+const VERSION: u8 = 5;
+const NO_AUTH: u8 = 0;
+const CMD_CONNECT: u8 = 1;
+const RESERVED: u8 = 0;
+
+const ATYP_IPV4: u8 = 1;
+const ATYP_DOMAIN: u8 = 3;
+const ATYP_IPV6: u8 = 4;
+
+/// Longest domain the address field can carry: one length byte.
+const MAX_DOMAIN: usize = 255;
+
+#[derive(Debug, Error)]
+pub enum SocksError {
+    #[error("io")]
+    Io(#[from] std::io::Error),
+
+    #[error("not SOCKS5: version byte {0:#04x}")]
+    Version(u8),
+
+    #[error("the proxy wants an authentication method bliss does not offer ({0:#04x})")]
+    Auth(u8),
+
+    #[error("unsupported command {0:#04x} — bliss serves CONNECT only")]
+    Command(u8),
+
+    #[error("unsupported address type {0:#04x}")]
+    AddressType(u8),
+
+    #[error("domain name is not utf-8")]
+    DomainEncoding,
+
+    #[error("the proxy refused: {}", reply_reason(*.0))]
+    Refused(u8),
+}
+
+fn reply_reason(code: u8) -> &'static str {
+    match code {
+        1 => "general failure",
+        2 => "not allowed by ruleset",
+        3 => "network unreachable",
+        4 => "host unreachable",
+        5 => "connection refused",
+        6 => "TTL expired",
+        7 => "command not supported",
+        8 => "address type not supported",
+        _ => "unknown reason",
+    }
+}
+
+// --- client: dial through a SOCKS5 proxy ----------------------------------
+
+/// Negotiate no-auth and ask the proxy to connect to `target`.
+///
+/// On return the stream carries the tunnelled connection and nothing else.
+pub async fn connect_through<S>(stream: &mut S, target: &Target) -> Result<(), SocksError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Greeting: one method, no authentication.
+    stream.write_all(&[VERSION, 1, NO_AUTH]).await?;
+    stream.flush().await?;
+
+    let mut greeting = [0u8; 2];
+    stream.read_exact(&mut greeting).await?;
+    if greeting[0] != VERSION {
+        return Err(SocksError::Version(greeting[0]));
+    }
+    if greeting[1] != NO_AUTH {
+        return Err(SocksError::Auth(greeting[1]));
+    }
+
+    let mut request = vec![VERSION, CMD_CONNECT, RESERVED];
+    write_target(&mut request, target)?;
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+
+    let mut head = [0u8; 3];
+    stream.read_exact(&mut head).await?;
+    if head[0] != VERSION {
+        return Err(SocksError::Version(head[0]));
+    }
+    if head[1] != 0 {
+        return Err(SocksError::Refused(head[1]));
+    }
+    // The bound address is of no use to us, but it has to be consumed before
+    // the tunnel proper begins.
+    read_target(stream).await?;
+    Ok(())
+}
+
+// --- server: accept a SOCKS5 client ---------------------------------------
+
+/// Read the greeting and the CONNECT request. The reply is the caller's to
+/// send, once it knows whether the outbound leg came up.
+pub async fn accept<S>(stream: &mut S) -> Result<Target, SocksError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let version = stream.read_u8().await?;
+    if version != VERSION {
+        return Err(SocksError::Version(version));
+    }
+    let count = stream.read_u8().await? as usize;
+    let mut methods = vec![0u8; count];
+    stream.read_exact(&mut methods).await?;
+    if !methods.contains(&NO_AUTH) {
+        stream.write_all(&[VERSION, 0xFF]).await?;
+        stream.flush().await?;
+        return Err(SocksError::Auth(methods.first().copied().unwrap_or(0xFF)));
+    }
+    stream.write_all(&[VERSION, NO_AUTH]).await?;
+    stream.flush().await?;
+
+    let mut head = [0u8; 3];
+    stream.read_exact(&mut head).await?;
+    if head[0] != VERSION {
+        return Err(SocksError::Version(head[0]));
+    }
+    if head[1] != CMD_CONNECT {
+        // BIND and UDP ASSOCIATE are not served yet; the client is told so
+        // rather than left waiting.
+        reply(stream, 7).await?;
+        return Err(SocksError::Command(head[1]));
+    }
+    read_target(stream).await
+}
+
+/// Tell the client how the outbound leg went. 0 is success.
+pub async fn reply<S>(stream: &mut S, code: u8) -> Result<(), SocksError>
+where
+    S: AsyncWrite + Unpin,
+{
+    // The bound address is meaningless for CONNECT and every client ignores it.
+    stream
+        .write_all(&[VERSION, code, RESERVED, ATYP_IPV4, 0, 0, 0, 0, 0, 0])
+        .await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Map a dial failure onto the closest SOCKS5 reply code.
+pub fn reply_code_for(err: &std::io::Error) -> u8 {
+    use std::io::ErrorKind::*;
+    match err.kind() {
+        ConnectionRefused => 5,
+        HostUnreachable => 4,
+        NetworkUnreachable => 3,
+        TimedOut => 6,
+        _ => 1,
+    }
+}
+
+// --- shared wire format ---------------------------------------------------
+
+fn write_target(out: &mut Vec<u8>, target: &Target) -> Result<(), SocksError> {
+    match target {
+        Target::Domain { host, port } => {
+            if host.len() > MAX_DOMAIN {
+                return Err(SocksError::DomainEncoding);
+            }
+            out.push(ATYP_DOMAIN);
+            out.push(host.len() as u8);
+            out.extend_from_slice(host.as_bytes());
+            out.extend_from_slice(&port.to_be_bytes());
+        }
+        Target::Socket(SocketAddr::V4(a)) => {
+            out.push(ATYP_IPV4);
+            out.extend_from_slice(&a.ip().octets());
+            out.extend_from_slice(&a.port().to_be_bytes());
+        }
+        Target::Socket(SocketAddr::V6(a)) => {
+            out.push(ATYP_IPV6);
+            out.extend_from_slice(&a.ip().octets());
+            out.extend_from_slice(&a.port().to_be_bytes());
+        }
+    }
+    Ok(())
+}
+
+async fn read_target<S>(stream: &mut S) -> Result<Target, SocksError>
+where
+    S: AsyncRead + Unpin,
+{
+    let atyp = stream.read_u8().await?;
+    let target = match atyp {
+        ATYP_IPV4 => {
+            let mut octets = [0u8; 4];
+            stream.read_exact(&mut octets).await?;
+            let port = stream.read_u16().await?;
+            Target::Socket(SocketAddr::from((octets, port)))
+        }
+        ATYP_IPV6 => {
+            let mut octets = [0u8; 16];
+            stream.read_exact(&mut octets).await?;
+            let port = stream.read_u16().await?;
+            Target::Socket(SocketAddr::from((octets, port)))
+        }
+        ATYP_DOMAIN => {
+            let len = stream.read_u8().await? as usize;
+            let mut host = vec![0u8; len];
+            stream.read_exact(&mut host).await?;
+            let port = stream.read_u16().await?;
+            let host = String::from_utf8(host).map_err(|_| SocksError::DomainEncoding)?;
+            Target::domain(host, port)
+        }
+        other => return Err(SocksError::AddressType(other)),
+    };
+    Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domain_requests_use_type_3_not_type_2() {
+        let mut out = Vec::new();
+        write_target(&mut out, &Target::domain("example.com", 443)).unwrap();
+        // 3, then the length byte, then the name, then the port big-endian.
+        assert_eq!(out[0], ATYP_DOMAIN);
+        assert_eq!(out[1] as usize, "example.com".len());
+        assert_eq!(&out[2..13], b"example.com");
+        assert_eq!(&out[13..], &443u16.to_be_bytes());
+    }
+
+    #[test]
+    fn ipv4_requests_are_packed_flat() {
+        let mut out = Vec::new();
+        write_target(&mut out, &Target::Socket("1.2.3.4:80".parse().unwrap())).unwrap();
+        assert_eq!(out, vec![ATYP_IPV4, 1, 2, 3, 4, 0, 80]);
+    }
+
+    #[tokio::test]
+    async fn round_trips_a_domain_through_the_wire_format() {
+        let mut wire = Vec::new();
+        write_target(&mut wire, &Target::domain("a.example", 8443)).unwrap();
+        let mut cursor = std::io::Cursor::new(wire);
+        let back = read_target(&mut cursor).await.unwrap();
+        assert_eq!(back, Target::domain("a.example", 8443));
+    }
+}

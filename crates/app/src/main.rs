@@ -1,0 +1,653 @@
+//! bliss — a VLESS + REALITY client for Windows.
+
+// Binary crates only. A `#[global_allocator]` in a library would be imposed on
+// everything that links it, which is not a library's call to make.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+mod engine;
+mod icons;
+mod logs;
+mod ui;
+
+use std::io::{Read, Write};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use bliss_proto::{Encryption, Profile, Security, ServerConfig};
+use clap::{Parser, Subcommand};
+use color_eyre::eyre::{Context, Result, bail, eyre};
+use tracing_error::ErrorLayer;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
+
+#[derive(Parser)]
+#[command(name = "bliss", version, about = "VLESS + REALITY client")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Parse and validate a profile, or a single link read from stdin.
+    Check {
+        /// Profile to check. Defaults to the one in the bliss config directory.
+        path: Option<PathBuf>,
+        /// Read one vless:// link from stdin instead of reading a profile.
+        ///
+        /// stdin rather than an argument: a link carries a live UUID and Reality
+        /// keys, and an argument lands in shell history and the process table.
+        #[arg(long, conflicts_with = "path")]
+        link: bool,
+    },
+    /// Manage the xray-core engine bliss runs.
+    Engine {
+        #[command(subcommand)]
+        what: EngineCmd,
+    },
+    /// Start the engine and serve traffic.
+    Run {
+        #[arg(value_name = "PROFILE")]
+        path: Option<PathBuf>,
+        /// Which server to use. Defaults to the first in the profile.
+        #[arg(long, value_name = "TAG")]
+        server: Option<String>,
+        /// How talkative the engine should be: warning, info, debug.
+        #[arg(long, default_value = "warning")]
+        engine_log: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EngineCmd {
+    /// Show recent xray-core releases.
+    List {
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Download an engine into %LOCALAPPDATA%liss and verify its checksum.
+    Install {
+        /// A specific version, e.g. 26.7.28. Defaults to the newest release.
+        #[arg(long)]
+        version: Option<String>,
+        /// Take the newest release even if it is flagged prerelease. Most
+        /// xray-core releases are, so this is often much newer than the
+        /// default — and correspondingly less proven.
+        #[arg(long)]
+        newest: bool,
+        /// Download through a SOCKS5 proxy — typically a bliss bridge that is
+        /// already up, for when GitHub itself is what cannot be reached.
+        #[arg(long, value_name = "ADDR")]
+        via: Option<SocketAddr>,
+    },
+}
+
+fn main() -> Result<()> {
+    color_eyre::install()?;
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_env("BLISS_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(fmt::layer().with_target(false).without_time())
+        .with(file_layer())
+        .with(logs::Recorder)
+        .with(ErrorLayer::default())
+        .init();
+
+    tracing::info!(
+        "--- bliss {} started, {} ---",
+        env!("CARGO_PKG_VERSION"),
+        std::env::args()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end()
+    );
+
+    match Cli::parse().command {
+        // No subcommand is the product: the window. The CLI is for setting it
+        // up and for looking under the hood.
+        None => window().inspect_err(report_to_user),
+        Some(command) => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .wrap_err("could not start a runtime")?
+            .block_on(cli(command)),
+    }
+}
+
+async fn cli(command: Command) -> Result<()> {
+    match command {
+        Command::Check { path, link: true } => {
+            debug_assert!(path.is_none(), "clap enforces this");
+            check_one_link()
+        }
+        Command::Check { path, .. } => check_profile(path),
+        Command::Engine { what } => engine_cmd(what).await,
+        Command::Run {
+            path,
+            server,
+            engine_log,
+        } => run(path, server, &engine_log).await,
+    }
+}
+
+/// Open the window.
+///
+/// This thread belongs to the event loop from here on — every windowing library
+/// insists on the main thread — so the engine gets a runtime of its own.
+fn window() -> Result<()> {
+    let setup = prepare(None, None, "warning")?;
+    let controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
+    ui::launch(controller);
+    Ok(())
+}
+
+/// Everything needed to run, gathered from the profile once.
+fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Result<engine::Setup> {
+    let (profile, path) = load_profile(path)?;
+    let (servers, failed) = profile.parse_servers();
+    for (i, err) in &failed {
+        tracing::warn!("server #{} in the profile is unusable - {err}", i + 1);
+    }
+
+    let server = match &want {
+        Some(tag) => servers
+            .iter()
+            .find(|s| &s.tag == tag)
+            .ok_or_else(|| eyre!("no server tagged {tag:?} in {}", path.display()))?,
+        None => servers.first().ok_or_else(|| {
+            // "No server" and "the server did not parse" are different
+            // problems with different fixes, and telling the user the wrong
+            // one sends them looking in the wrong place.
+            match failed.first() {
+                Some((i, why)) => eyre!(
+                    "server #{} in {} could not be read: {why}",
+                    i + 1,
+                    path.display()
+                ),
+                None => eyre!(
+                    "no server in {}. Paste a vless:// link into it — the [[server]] block at the bottom of the file shows where.",
+                    path.display()
+                ),
+            }
+        })?,
+    }
+    .clone();
+
+    Ok(engine::Setup {
+        exe: resolve_engine(&profile)?,
+        work_dir: work_dir()?,
+        engine_log: parse_log_level(engine_log)?,
+        autostart: true,
+        profile,
+        server,
+    })
+}
+
+// --- engine ---------------------------------------------------------------
+
+async fn engine_cmd(what: EngineCmd) -> Result<()> {
+    match what {
+        EngineCmd::List { limit } => {
+            let client = bliss_xray::client(None)?;
+            let releases = bliss_xray::list(&client, limit)
+                .await
+                .wrap_err("could not list xray-core releases")?;
+            println!("{:<12} {:<12} channel", "version", "published");
+            for r in &releases {
+                println!(
+                    "{:<12} {:<12} {}",
+                    r.version(),
+                    &r.published[..10],
+                    if r.prerelease { "prerelease" } else { "stable" }
+                );
+            }
+            if releases.iter().all(|r| r.prerelease) {
+                println!();
+                println!(
+                    "Every one of these is flagged prerelease, which is normal for xray-core."
+                );
+                println!("bliss installs the newest non-prerelease by default, which can be");
+                println!("months behind. Use --newest to take the newest build of any kind.");
+            }
+            Ok(())
+        }
+        EngineCmd::Install {
+            version,
+            newest,
+            via,
+        } => install_engine(version.as_deref(), newest, via).await,
+    }
+}
+
+async fn install_engine(
+    version: Option<&str>,
+    newest: bool,
+    via: Option<SocketAddr>,
+) -> Result<()> {
+    let channel = if newest {
+        bliss_xray::Channel::Newest
+    } else {
+        bliss_xray::Channel::Stable
+    };
+
+    let client = bliss_xray::client(via)?;
+    if let Some(addr) = via {
+        println!("downloading through {addr}");
+    }
+
+    let release = bliss_xray::select(&client, channel, version)
+        .await
+        .wrap_err("could not pick a release to install")?;
+    println!(
+        "xray-core {} ({}, {})",
+        release.version(),
+        &release.published[..10],
+        if release.prerelease {
+            "prerelease"
+        } else {
+            "stable"
+        }
+    );
+
+    let dir = work_dir()?;
+    let mut last_shown = 0u64;
+    let path = bliss_xray::install(&client, &release, &dir, |done, total| {
+        // Redraw at most every 512 KB: a progress line that repaints on every
+        // chunk costs more than the download.
+        if done - last_shown < 512 * 1024 && done != total {
+            return;
+        }
+        last_shown = done;
+        let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+        if total > 0 {
+            print!(
+                "\r  {:.1} / {:.1} MB ({:.0}%)",
+                mb(done),
+                mb(total),
+                done as f64 / total as f64 * 100.0
+            );
+        } else {
+            print!("\r  {:.1} MB", mb(done));
+        }
+        let _ = std::io::stdout().flush();
+    })
+    .await
+    .wrap_err("could not install the engine")?;
+    println!();
+
+    let installed = bliss_xray::check_version(&path, None)
+        .await
+        .wrap_err("the downloaded engine does not run")?;
+    println!(
+        "
+installed xray-core {installed}
+  {}",
+        path.display()
+    );
+    println!(
+        "
+bliss uses it automatically — no engine.xray needed in the profile."
+    );
+    Ok(())
+}
+
+// --- run ------------------------------------------------------------------
+
+async fn run(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Result<()> {
+    let setup = prepare(path, want, engine_log)?;
+    let listen = format!(
+        "{}:{}",
+        setup.profile.inbound.listen, setup.profile.inbound.socks
+    );
+    let described = describe(&setup.server);
+    let bridge = setup.profile.engine.bridge_port;
+
+    let mut controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
+
+    // Wait for it to settle, so a failure is reported here rather than left in
+    // a log line while the terminal claims to be ready.
+    loop {
+        let frame = controller.frame();
+        match frame.state {
+            engine::State::Running => break,
+            engine::State::Failed => {
+                bail!("{}", frame.error.unwrap_or_else(|| "engine failed".into()))
+            }
+            _ => controller.changed().await,
+        }
+    }
+
+    println!(
+        "
+bliss - {}",
+        controller.frame().engine
+    );
+    println!("  server   {described}");
+    println!("  listen   {listen}  (socks5 + http on either)");
+    println!("  bridge   127.0.0.1:{bridge} -> engine");
+    println!(
+        "
+ready. Try it:"
+    );
+    println!("  curl -x socks5h://{listen} https://ifconfig.me");
+    println!(
+        "
+Ctrl-C to stop.
+"
+    );
+
+    tokio::signal::ctrl_c().await?;
+    report(&controller.frame());
+    // The engine is a child in a Job Object, so it goes when we do.
+    Ok(())
+}
+
+/// What went through us, printed on the way out.
+///
+/// This is the data behind the connections screen, and precisely what xray-core
+/// cannot supply: it never sees the local socket, so it cannot name a process.
+fn report(frame: &engine::Frame) {
+    println!(
+        "
+{} connection(s), {} up, {} down",
+        frame.opened,
+        engine::bytes(frame.up_total),
+        engine::bytes(frame.down_total)
+    );
+    if frame.connections.is_empty() {
+        return;
+    }
+    println!(
+        "
+  {:<34} {:<8} {:<18} {:>11} {:>11}",
+        "target", "route", "process", "up", "down"
+    );
+    for row in frame.connections.iter().take(20) {
+        println!(
+            "  {:<34} {:<8} {:<18} {:>11} {:>11}",
+            elide(&row.target, 34),
+            row.route.to_string(),
+            row.process.as_deref().unwrap_or("-"),
+            engine::bytes(row.up),
+            engine::bytes(row.down)
+        );
+    }
+}
+
+/// Trim to a column width. Neither a terminal nor Blitz does text-overflow, so
+/// the truncation is ours either way.
+fn elide(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_owned();
+    }
+    let keep: String = s.chars().take(width.saturating_sub(1)).collect();
+    format!("{keep}…")
+}
+
+/// A copy of the log on disk.
+///
+/// The window has no console to print to, and a desktop app that fails at
+/// startup otherwise leaves the user with nothing to look at.
+///
+/// Appended to, not truncated: truncating meant that a second bliss — a test
+/// run, a stray copy — erased the record of the first, which is exactly when
+/// the log is wanted. Trimmed when it gets large rather than rotated, since one
+/// file someone can open beats a directory of numbered ones.
+fn file_layer<S>() -> Option<impl tracing_subscriber::Layer<S>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    const LIMIT: u64 = 2 * 1024 * 1024;
+
+    let path = work_dir().ok()?.join("bliss.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIMIT) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    Some(
+        fmt::layer()
+            .with_ansi(false)
+            .with_target(false)
+            // A handle per event is a syscall we can afford at a few lines a
+            // second, and it keeps this to one function with no new dependency.
+            .with_writer(move || file.try_clone().expect("clone the log handle")),
+    )
+}
+
+/// Put a startup failure where someone who double-clicked can read it.
+fn report_to_user(error: &color_eyre::Report) {
+    let text = format!(
+        "{error}
+
+Подробности в журнале:
+{}",
+        work_dir()
+            .map(|d| d.join("bliss.log").display().to_string())
+            .unwrap_or_else(|_| "—".to_owned())
+    );
+    show_message(&text);
+}
+
+#[cfg(windows)]
+fn show_message(text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use windows::core::HSTRING;
+    // SAFETY: both strings outlive the call, and a message box has no other
+    // preconditions.
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from("bliss"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn show_message(text: &str) {
+    eprintln!("{text}");
+}
+
+// The console stays. Detaching it with FreeConsole made the window look tidier
+// when launched from a shell, and broke it entirely when launched from Explorer
+// — the process kept running and serving traffic, but created no window at all.
+// A shell inherits its parent's console, so detaching there is harmless; a
+// double-click owns its console, and destroying it takes the window with it.
+// Tested the first way, shipped, and broke the second.
+//
+// The proper fix is the windows subsystem plus AttachConsole for the CLI paths,
+// which needs testing from Explorer before it goes anywhere near a release.
+
+/// Write a profile a user can fill in, rather than one they have to invent.
+fn seed_profile(path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("cannot create {}", parent.display()))?;
+    }
+    std::fs::write(path, include_str!("../../../bliss.example.toml"))
+        .wrap_err_with(|| format!("cannot write {}", path.display()))?;
+    Ok(())
+}
+
+/// Where the engine binary lives: the profile wins, then the copy bliss manages.
+fn resolve_engine(profile: &Profile) -> Result<PathBuf> {
+    if let Some(path) = &profile.engine.xray {
+        if !path.is_file() {
+            bail!(
+                "engine.xray points at {}, which is not a file",
+                path.display()
+            );
+        }
+        return Ok(path.clone());
+    }
+
+    let managed = work_dir()?.join("xray.exe");
+    if managed.is_file() {
+        return Ok(managed);
+    }
+    bail!(
+        "no engine yet. Either let bliss fetch one:
+
+  bliss engine install
+
+or point the profile at an xray.exe you already have:
+
+  [engine]
+  xray = \"C:/path/to/xray.exe\""
+    )
+}
+
+fn parse_log_level(s: &str) -> Result<bliss_xray::LogLevel> {
+    use bliss_xray::LogLevel::*;
+    Ok(match s {
+        "debug" => Debug,
+        "info" => Info,
+        "warning" | "warn" => Warning,
+        "error" => Error,
+        "none" => None,
+        other => {
+            bail!("unknown engine log level {other:?}: use debug, info, warning, error or none")
+        }
+    })
+}
+
+// --- check ----------------------------------------------------------------
+
+fn check_one_link() -> Result<()> {
+    let mut link = String::new();
+    std::io::stdin()
+        .read_to_string(&mut link)
+        .wrap_err("failed to read a link from stdin")?;
+    if link.trim().is_empty() {
+        bail!("nothing on stdin — paste a vless:// link, then Ctrl-Z Enter");
+    }
+
+    let config: ServerConfig = link
+        .trim()
+        .parse()
+        .wrap_err("this is not a vless:// link bliss can use")?;
+
+    println!("{}", describe(&config));
+    Ok(())
+}
+
+fn check_profile(path: Option<PathBuf>) -> Result<()> {
+    let (profile, path) = load_profile(path)?;
+
+    let (ok, failed) = profile.parse_servers();
+    println!("{} — {} server(s)\n", path.display(), profile.servers.len());
+    for config in &ok {
+        println!("  ✓ {}", describe(config));
+    }
+    for (i, err) in &failed {
+        // The link itself is not echoed back: it is exactly the thing that must
+        // not end up in a pasted terminal log.
+        println!("  ✗ server #{} — {err}", i + 1);
+    }
+
+    let inbound = &profile.inbound;
+    println!(
+        "\n  inbound   socks {}:{}   http {}:{}",
+        inbound.listen, inbound.socks, inbound.listen, inbound.http
+    );
+    println!("  bridge    127.0.0.1:{}", profile.engine.bridge_port);
+    if inbound.socks == inbound.http {
+        bail!(
+            "socks and http are both on port {} — they cannot share one",
+            inbound.socks
+        );
+    }
+    if !failed.is_empty() {
+        bail!(
+            "{} of {} servers did not parse",
+            failed.len(),
+            profile.servers.len()
+        );
+    }
+    Ok(())
+}
+
+// --- shared ---------------------------------------------------------------
+
+fn load_profile(path: Option<PathBuf>) -> Result<(Profile, PathBuf)> {
+    let explicit = path.is_some();
+    let path = match path {
+        Some(p) => p,
+        None => default_profile_path()?,
+    };
+
+    // A missing profile is the first run, not an error to report in OS terms.
+    // Left alone it surfaces as "os error 3", which tells the user nothing about
+    // what to do next; so the default profile is created, with the one thing
+    // they have to fill in marked.
+    if !explicit && !path.exists() {
+        seed_profile(&path)?;
+        // Printed rather than carried in the error: color-eyre indents the
+        // continuation lines of a multi-line message, which turns instructions
+        // into a ransom note.
+        println!(
+            "bliss had no profile, so it wrote one:
+"
+        );
+        println!(
+            "  {}
+",
+            path.display()
+        );
+        println!("Open it, paste your vless:// link where the file says to, and run bliss again.");
+        bail!("no profile yet");
+    }
+
+    let text = std::fs::read_to_string(&path)
+        .wrap_err_with(|| format!("cannot read the profile at {}", path.display()))?;
+    let profile: Profile = toml::from_str(&text)
+        .wrap_err_with(|| format!("{} is not a valid bliss profile", path.display()))?;
+    Ok((profile, path))
+}
+
+/// One line per server: what it is, where it goes, how it hides.
+fn describe(c: &ServerConfig) -> String {
+    let security = match &c.security {
+        Security::Reality(r) => {
+            format!("reality/{} sni={} sid={}", r.fingerprint, r.sni, r.short_id)
+        }
+        Security::Tls(t) => format!("tls sni={}", t.sni.as_deref().unwrap_or("-")),
+        Security::None => "plain".to_owned(),
+    };
+    let encryption = match &c.encryption {
+        Encryption::None => String::new(),
+        Encryption::MlKem768X25519Plus(e) => format!("  enc={}/{}", e.mode, e.rtt),
+    };
+    let flow = match c.flow {
+        bliss_proto::Flow::XtlsRprxVision => "  vision",
+        bliss_proto::Flow::None => "",
+    };
+    format!(
+        "{:<20} {}:{}  {security}{flow}{encryption}",
+        c.tag, c.address, c.port
+    )
+}
+
+fn project_dirs() -> Result<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "", "bliss").ok_or_else(|| eyre!("cannot locate %APPDATA%"))
+}
+
+fn default_profile_path() -> Result<PathBuf> {
+    // %APPDATA%lissliss.toml, not the crate's config_dir(): that appends a
+    // "config" folder, which is a unix habit. On Windows an app's settings live
+    // directly under its own folder in Roaming, and this is a file users edit.
+    let base = directories::BaseDirs::new().ok_or_else(|| eyre!("cannot locate %APPDATA%"))?;
+    Ok(base.config_dir().join("bliss").join("bliss.toml"))
+}
+
+/// Where generated configs and the managed engine live.
+fn work_dir() -> Result<PathBuf> {
+    Ok(project_dirs()?.data_local_dir().to_path_buf())
+}

@@ -1,0 +1,37 @@
+---
+source: crates/proto/tests/links.rs
+expression: reality(REALITY_LINK)
+---
+ServerConfig {
+    tag: "test-reserved",
+    address: Ip(
+        203.0.113.10,
+    ),
+    port: 443,
+    user: 11111111…5555,
+    encryption: MlKem768X25519Plus(
+        VlessEncryption {
+            mode: Native,
+            rtt: Zero,
+            keys: [
+                X25519(AAAAAAAA…AAAA),
+            ],
+            ..
+        },
+    ),
+    flow: XtlsRprxVision,
+    security: Reality(
+        Reality {
+            sni: "store.steampowered.com",
+            fingerprint: Firefox,
+            public_key: BBBBBBBB…BBBQ,
+            short_id: 0123456789abcd,
+            spider_x: Some(
+                "/deadbeef",
+            ),
+        },
+    ),
+    transport: Tcp {
+        header: None,
+    },
+}
