@@ -308,6 +308,34 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
    typing; keep the typed text in a local signal.
 7. The window never touches tokio. The engine thread publishes a `Frame` on a
    watch channel; the UI sends `Command`s through `Controller`.
+8. **Pictures ship inside the binary, in the stylesheet.** `STYLES` in `ui.rs`
+   replaces `url(status-card.jpg)` in `app.css` with a base64 data URI, once. That
+   url() must appear in `app.css` exactly once, comments included — a comment
+   naming it was replaced too, and tripped `the_scene_matches_the_card_surface`.
+   Keep pictures out of inline styles (rule 1).
+9. **The icon.** `crates/app/build.rs` compiles `bliss.rc` into the executable
+   with `embed-resource`, using `rc.exe` from the Windows SDK. The call is
+   `manifest_required`: on MSVC a missing rc.exe fails the build either way,
+   but on a GNU toolchain without windres `manifest_optional` would ship an exe
+   with no icon. The resource reaches the test binary too, which
+   `the_icon_is_compiled_in` relies on. Dioxus shows its own logo on any window
+   built without an icon, so `launch` sets one; `set_icons` picks frames for the
+   monitor's scale when the window is built, and `WindowIcons` again whenever
+   the scale changes. `assets/bliss.ico` has fifteen frames: 16–96 px are the
+   mark alone, recentred on the plate with the wordmark painted out, and cover
+   both window-icon sizes at every scale Windows offers from 100% to 300% (a
+   custom 275% rounds down to the next frame); 128 and 256 px keep the
+   wordmark, a smudge at anything smaller, and `icon_side` never asks for them.
+   Replace the file with all fifteen
+   (`the_icon_has_a_frame_for_every_window_icon_size`). `LoadImageW` resizes
+   the nearest frame when there is no exact one, so a test that merely loads
+   the icon at some size cannot tell which frames exist.
+10. **The status card's scene** (`assets/status-card.jpg`) is the right-hand part
+    of a generated night picture: its flat sky (#141423) shifted to
+    `--color-surface`, faded to exactly that colour along the left and top
+    edges, saved as JPEG q90 without chroma subsampling. A new surface colour
+    means remaking the file, or its edge shows as a rectangle. The generated
+    originals are not in git.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -326,6 +354,18 @@ inline styles and `getComputedStyle`; `Input.dispatchMouseEvent` for real clicks
 and hover; `Page.captureScreenshot` for images. Record state after every step and
 once with the pointer moved away. Close the window afterwards. It still opens
 when 10808 is taken, which is fine for UI work.
+
+Two more probes that worked:
+
+- **Window icons:** `WM_GETICON` on the `bliss` window, then `GetIconInfo` and
+  `GetDIBits`; compare the pixels with the frame of `assets/bliss.ico` at that
+  size. A zero difference proves the resource is in use and the Dioxus logo is
+  not.
+- **Static replica for a design choice** (not a verification): the Browser pane
+  may not paint while Claude's window is behind others. Headless Edge takes the
+  picture without stealing focus:
+  `msedge.exe --headless=new --no-proxy-server --user-data-dir=<scratch dir> --window-size=W,H --screenshot=<png> <url>`.
+  `nocturne.css` has its own `.card` class, so name replica classes differently.
 
 ## 8. Debugging discipline
 
@@ -371,7 +411,8 @@ when 10808 is taken, which is fine for UI work.
 **Done in stage 1:** renderer spike; profile and link parsing; xray management
 and download; relay and connection table; system proxy (three modes, crash-safe
 restore); routing (proxy / direct / block by domain, address, port, process,
-geosite/geoip) and its screen; server list with ping; copy to clipboard. The
+geosite/geoip) and its screen; server list with ping; copy to clipboard; the
+application icon and the status card's picture. The
 tunnel already starts with the window (`Setup.autostart`).
 
 **Open:** subscriptions (1.6); UDP ASSOCIATE; an idle timeout for half-open

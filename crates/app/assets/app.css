@@ -84,6 +84,29 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .wbtn-close:hover { background-color: #8c3b44; color: #fff; }
 .ring:hover { border-color: #b5abfc; }
 
+/* The night scene on the status card.
+   - The picture's sky was shifted to --color-surface when the file was made,
+     so its edge melts into the card without a seam. Change that token and the
+     file has to be remade: `the_scene_matches_the_card_surface` holds the two
+     together.
+   - Anchored right at full height, so the moon and the peaks keep their size
+     however wide the window gets.
+   - On a narrow card the scene would run under the status text; the gradient
+     laid over it fades the picture out across the text column.
+   - The file name in the url() below is replaced with the file's bytes as a
+     data URI (`STYLES` in ui.rs), so the picture ships inside bliss.exe like
+     this stylesheet does instead of being a file that must sit next to it.
+     Write that url() nowhere else in this file, comments included: every
+     copy would be replaced. */
+.status-card {
+  background-image:
+    linear-gradient(to right, var(--color-surface) 38%, transparent 70%),
+    url(status-card.jpg);
+  background-repeat: no-repeat;
+  background-position: 0 0, right center;
+  background-size: 100% 100%, auto 100%;
+}
+
 /* Screens fade in when switched, so the change reads as a movement rather than
    as a redraw. */
 @keyframes bliss-enter {

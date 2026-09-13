@@ -40,6 +40,10 @@
 //! and `radius_literals_match_the_design_tokens` holds the mirrored numbers to
 //! the tokens they came from.
 
+use std::sync::LazyLock;
+
+use base64::Engine as _;
+use dioxus::desktop::tao::window::{Icon, Window};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
@@ -48,6 +52,18 @@ use bliss_proto::ProxyMode;
 
 const NOCTURNE: &str = include_str!("../assets/nocturne.css");
 const APP_CSS: &str = include_str!("../assets/app.css");
+/// The status card's night scene; see `.status-card` in app.css.
+const SCENE: &[u8] = include_bytes!("../assets/status-card.jpg");
+/// How app.css names the scene, for `STYLES` to replace.
+const SCENE_URL: &str = "url(status-card.jpg)";
+
+/// app.css with the scene inlined as a data URI, so the picture ships inside
+/// bliss.exe the way the stylesheets do. Built once: `App` renders twice a
+/// second and should not encode a picture every time.
+static STYLES: LazyLock<String> = LazyLock::new(|| {
+    let data = base64::engine::general_purpose::STANDARD.encode(SCENE);
+    APP_CSS.replace(SCENE_URL, &format!("url(data:image/jpeg;base64,{data})"))
+});
 
 /// This file, so a test can check the styles in it rather than trust a rule to
 /// be remembered. See `radius_literals_match_the_design_tokens`.
@@ -72,19 +88,77 @@ const BUSY: (&str, &str, &str) = (ACCENT, "rgba(145,132,217,.20)", "rgba(145,132
 pub fn launch(controller: Controller) {
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
-            Config::new().with_window(
-                WindowBuilder::new()
-                    .with_title("bliss")
-                    // The design draws its own chrome, so Windows must not draw
-                    // any. Everything the frame used to do — drag, minimise,
-                    // maximise, close — is re-implemented in TitleBar below.
-                    .with_decorations(false)
-                    .with_inner_size(LogicalSize::new(1040.0, 660.0))
-                    .with_min_inner_size(LogicalSize::new(880.0, 560.0)),
-            ),
+            Config::new()
+                .with_window(
+                    WindowBuilder::new()
+                        .with_title("bliss")
+                        // The design draws its own chrome, so Windows must not draw
+                        // any. Everything the frame used to do — drag, minimise,
+                        // maximise, close — is re-implemented in TitleBar below.
+                        .with_decorations(false)
+                        .with_inner_size(LogicalSize::new(1040.0, 660.0))
+                        .with_min_inner_size(LogicalSize::new(880.0, 560.0))
+                        // Dioxus puts its own logo on any window built without one.
+                        .with_window_icon(app_icon(None)),
+                )
+                .with_on_window(|window, _| set_icons(&window, window.scale_factor())),
         )
         .with_context(controller)
         .launch(App);
+}
+
+/// The icon build.rs compiles into bliss.exe (resource 1 in bliss.rc), with a
+/// side in physical pixels, or at the system's default size.
+#[cfg(windows)]
+fn app_icon(side: Option<u32>) -> Option<Icon> {
+    use dioxus::desktop::tao::dpi::PhysicalSize;
+    use dioxus::desktop::tao::platform::windows::IconExtWindows;
+
+    Icon::from_resource(1, side.map(|side| PhysicalSize::new(side, side)))
+        .inspect_err(|e| tracing::warn!("could not load the application icon: {e}"))
+        .ok()
+}
+
+#[cfg(not(windows))]
+fn app_icon(_side: Option<u32>) -> Option<Icon> {
+    None
+}
+
+/// The frames of `assets/bliss.ico` that carry the mark alone. The file's two
+/// larger frames add the wordmark, a smudge at any size a window icon is drawn.
+const MARK_FRAMES: [u32; 13] = [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96];
+
+/// The side to ask for, for an icon `at_100` px across at 100% scale.
+///
+/// Rounded down to a frame the file has. Given a side it has no frame for,
+/// `LoadImageW` resizes the nearest one, and above 300% the nearest can be a
+/// frame with the wordmark in it.
+fn icon_side(at_100: f64, scale: f64) -> u32 {
+    let want = (at_100 * scale).round() as u32;
+    MARK_FRAMES
+        .into_iter()
+        .rev()
+        .find(|&side| side <= want)
+        .unwrap_or(MARK_FRAMES[0])
+}
+
+/// Sets the window's icons at the sizes a monitor of this scale draws.
+///
+/// The builder's copy only keeps Dioxus from installing its logo. It is loaded
+/// before the event loop makes the process DPI-aware, at the default 32 px, and
+/// set as the small icon with no large one; nobody sees it, because the window
+/// is built hidden and this runs before it is shown. Called for the monitor the
+/// window is built on, and by `WindowIcons` whenever the scale changes.
+fn set_icons(window: &Window, scale: f64) {
+    // The shell's small and large icons are 16 and 32 px at 100%.
+    if let Some(small) = app_icon(Some(icon_side(16.0, scale))) {
+        window.set_window_icon(Some(small));
+    }
+    #[cfg(windows)]
+    if let Some(large) = app_icon(Some(icon_side(32.0, scale))) {
+        use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+        window.set_taskbar_icon(Some(large));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -161,8 +235,8 @@ fn App() -> Element {
     let frame = frame();
 
     rsx! {
-        style { dangerous_inner_html: NOCTURNE }
-        style { dangerous_inner_html: APP_CSS }
+        Styles {}
+        WindowIcons {}
         // The title bar spans the whole window, as in the reference, with the
         // sidebar beginning underneath it.
         div {
@@ -196,6 +270,42 @@ fn App() -> Element {
             }
         }
     }
+}
+
+/// Both stylesheets, in a component of their own so they render once.
+///
+/// A component without props is never re-run by its parent. Inline in `App`,
+/// which renders twice a second, every render copied about 44 KB of CSS into
+/// fresh strings only to find them unchanged.
+#[component]
+fn Styles() -> Element {
+    rsx! {
+        style { dangerous_inner_html: NOCTURNE }
+        style { dangerous_inner_html: STYLES.as_str() }
+    }
+}
+
+/// Picks the window's icons again whenever its monitor's scale changes.
+///
+/// `set_icons` chooses frames for the monitor the window is built on. Dragged
+/// to a monitor with another scale, Windows would stretch or shrink those —
+/// the very thing choosing by scale is for.
+#[component]
+fn WindowIcons() -> Element {
+    let desktop = dioxus::desktop::window();
+    dioxus::desktop::use_wry_event_handler(move |event, _| {
+        use dioxus::desktop::tao::event::{Event, WindowEvent};
+        if let Event::WindowEvent {
+            window_id,
+            event: WindowEvent::ScaleFactorChanged { scale_factor, .. },
+            ..
+        } = event
+            && *window_id == desktop.window.id()
+        {
+            set_icons(&desktop.window, *scale_factor);
+        }
+    });
+    rsx! {}
 }
 
 // --- chrome ---------------------------------------------------------------
@@ -475,6 +585,8 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
 
             div { style: "display:flex;gap:13px;align-items:stretch;flex:none",
                 div {
+                    // The night scene behind the status: `.status-card` in app.css.
+                    class: "status-card",
                     style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
                             padding:18px;background-color:var(--color-surface);\
                             border-radius:8px;box-shadow:var(--shadow-sm)",
@@ -1433,6 +1545,107 @@ fn bar_colour(value: u64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frames Windows chooses between, and the ones `icon_side` asks for.
+    /// Most converters write one 256 px frame, and then every window icon is
+    /// that frame shrunk, wordmark and all.
+    #[test]
+    fn the_icon_has_a_frame_for_every_window_icon_size() {
+        const ICO: &[u8] = include_bytes!("../assets/bliss.ico");
+        assert_eq!(ICO[..4], [0, 0, 1, 0], "not an icon file");
+        let count = usize::from(u16::from_le_bytes([ICO[4], ICO[5]]));
+        // Each directory entry is 16 bytes and starts with the width; 0 is 256.
+        let sides: Vec<u32> = (0..count)
+            .map(|i| match ICO[6 + 16 * i] {
+                0 => 256,
+                side => u32::from(side),
+            })
+            .collect();
+        let mut expected = MARK_FRAMES.to_vec();
+        expected.extend([128, 256]);
+        assert_eq!(sides, expected);
+
+        // Every scale Windows offers up to 300% lands exactly on a frame, so the
+        // shell never resizes one. Any other scale — a custom 275%, or 400% —
+        // rounds down to a frame without the wordmark, never up to one with it.
+        const OFFERED: [u32; 8] = [100, 125, 150, 175, 200, 225, 250, 300];
+        for percent in (100..=500).step_by(25) {
+            let scale = f64::from(percent) / 100.0;
+            for at_100 in [16.0, 32.0] {
+                let side = icon_side(at_100, scale);
+                assert!(
+                    MARK_FRAMES.contains(&side),
+                    "{at_100} px at {percent}%: {side}"
+                );
+                if OFFERED.contains(&percent) {
+                    assert_eq!(
+                        f64::from(side),
+                        (at_100 * scale).round(),
+                        "{at_100} px at {percent}%"
+                    );
+                }
+            }
+        }
+    }
+
+    /// build.rs has to get bliss.rc into the executable; without it the window
+    /// quietly falls back to the Dioxus logo and Explorer to the generic
+    /// application icon. `LoadImageW` resizes whatever frame it finds, so this
+    /// can only tell that resource 1 is there — which frames it holds is the
+    /// test above.
+    #[cfg(windows)]
+    #[test]
+    fn the_icon_is_compiled_in() {
+        assert!(
+            app_icon(None).is_some(),
+            "no icon resource 1 in this executable: build.rs did not compile bliss.rc"
+        );
+    }
+
+    /// The scene's sky was shifted to the card's colour when the file was made,
+    /// and app.css names the file so that `STYLES` can inline it.
+    #[test]
+    fn the_scene_matches_the_card_surface() {
+        const SURFACE: [u8; 3] = [0x23, 0x25, 0x32];
+        assert!(
+            NOCTURNE.contains("--color-surface: #232532;"),
+            "the card surface changed colour: remake status-card.jpg with its edges \
+             at the new value, then change SURFACE here"
+        );
+
+        // The picture itself: its left and top edges have to be that colour, or
+        // they show as a rectangle on the card.
+        let mut decoder = jpeg_decoder::Decoder::new(SCENE);
+        let pixels = decoder.decode().expect("status-card.jpg decodes");
+        let info = decoder.info().expect("decoded, so described");
+        assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+        let (width, height) = (usize::from(info.width), usize::from(info.height));
+        let at = |x: usize, y: usize| &pixels[(y * width + x) * 3..(y * width + x) * 3 + 3];
+        for pixel in (0..height)
+            .map(|y| at(0, y))
+            .chain((0..width).map(|x| at(x, 0)))
+        {
+            for (got, want) in pixel.iter().zip(SURFACE) {
+                assert!(
+                    got.abs_diff(want) <= 3,
+                    "edge pixel {pixel:?} is not the card's {SURFACE:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            APP_CSS.matches(SCENE_URL).count(),
+            1,
+            "app.css names the scene once"
+        );
+        assert!(!STYLES.contains(SCENE_URL), "the scene was not inlined");
+        // base64 of a JPEG's first three bytes, FF D8 FF.
+        assert!(STYLES.contains("url(data:image/jpeg;base64,/9j/"));
+        assert!(
+            SOURCE.contains("class: \"status-card\""),
+            "the status card lost its class"
+        );
+    }
 
     /// The inline radii are literals because the token form does not survive
     /// being rewritten (see the note at the top of this file), which means the
