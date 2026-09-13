@@ -152,6 +152,36 @@ pub struct Frame {
     /// What the chart's full height means, in bytes per second. Computed here
     /// rather than in the UI so it can be smoothed across ticks.
     pub scale: u64,
+    /// Whether the profile file exists yet. It does not until the window
+    /// writes something into it, and until then there is nothing to open or
+    /// to read again.
+    pub profile_exists: bool,
+    /// What became of the last pasted link.
+    pub added: Option<Added>,
+}
+
+/// The answer to "add this server".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Added {
+    /// Counts up with every attempt, so a form can tell a fresh answer from one
+    /// it has already acted on — two identical refusals in a row are two
+    /// answers, and would otherwise look like one.
+    pub attempt: u64,
+    /// The new server's name, or why it was not added.
+    pub outcome: Result<String, String>,
+}
+
+/// A pasted server link on its way to the profile.
+///
+/// It carries the user's UUID and keys, so its `Debug` shows none of it:
+/// `Command` is `Debug`, and one `{command:?}` in a log line would otherwise put
+/// a credential in bliss.log.
+pub struct Link(pub String);
+
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Link(..)")
+    }
 }
 
 #[derive(Debug)]
@@ -185,6 +215,8 @@ pub enum Command {
     Check(String),
     /// Append a starting set of rules to the profile.
     SeedRules,
+    /// Add a server from a pasted link, writing the profile if there is none.
+    AddServer(Link),
     /// Show one of bliss's own files to the user.
     Reveal(Reveal),
 }
@@ -221,25 +253,52 @@ impl Controller {
 
 pub struct Setup {
     pub profile: Profile,
-    /// Every server that parsed, in profile order. Never empty: `prepare` in
-    /// main refuses to build a Setup without at least one, because everything
-    /// below indexes into this.
+    /// Every server that parsed, in profile order. Empty in a window that has
+    /// none yet, which is why every look into it goes through `server`.
     pub servers: Vec<ServerConfig>,
     /// Which of them to use. An index rather than a clone, so switching is a
     /// number and the list stays the single copy of the truth.
     pub selected: usize,
-    pub exe: PathBuf,
     pub work_dir: PathBuf,
-    /// The profile on disk, so the window can offer to open it.
+    /// Where the profile is, or will be: the window writes it when there is
+    /// first something to put in it.
     pub profile_path: PathBuf,
     pub engine_log: bliss_xray::LogLevel,
     pub autostart: bool,
+    /// Why the profile on disk could not be used, for the window to say.
+    pub problem: Option<String>,
 }
 
 impl Setup {
-    fn server(&self, index: usize) -> &ServerConfig {
-        debug_assert!(index < self.servers.len(), "selection is bounds-checked");
-        &self.servers[index.min(self.servers.len() - 1)]
+    fn server(&self, index: usize) -> Option<&ServerConfig> {
+        self.servers.get(index)
+    }
+}
+
+/// Where the engine binary is: the profile's choice, then the copy bliss manages.
+///
+/// Looked up at every start rather than once at launch, so the window opens
+/// without an engine, and one installed while it is open is simply found.
+pub fn engine_path(setup: &Setup) -> Result<PathBuf, String> {
+    if let Some(path) = &setup.profile.engine.xray {
+        return if path.is_file() {
+            Ok(path.clone())
+        } else {
+            Err(format!(
+                "в профиле [engine] xray указывает на {}, но такого файла нет",
+                path.display()
+            ))
+        };
+    }
+    let managed = setup.work_dir.join("xray.exe");
+    if managed.is_file() {
+        Ok(managed)
+    } else {
+        Err(
+            "движок не установлен. Скачайте его командой «bliss engine install» \
+             или укажите путь к своему xray.exe в профиле, в разделе [engine]"
+                .to_owned(),
+        )
     }
 }
 
@@ -276,6 +335,7 @@ pub fn spawn(setup: Setup) -> std::io::Result<Controller> {
 fn initial_frame(setup: &Setup) -> Frame {
     let mut frame = Frame {
         state: State::Stopped,
+        error: setup.problem.clone(),
         listen: format!(
             "socks {} · http {}",
             setup.profile.inbound.socks, setup.profile.inbound.http
@@ -286,18 +346,25 @@ fn initial_frame(setup: &Setup) -> Frame {
             .servers
             .iter()
             .enumerate()
-            .map(|(i, server)| ServerRow {
-                tag: server.tag.clone(),
-                addr: format!("{}:{}", server.address, server.port),
-                kind: how_it_hides(server),
-                ping: Ping::Unknown,
-                current: i == setup.selected,
-            })
+            .map(|(i, server)| server_row(server, i == setup.selected))
             .collect(),
+        profile_exists: setup.profile_path.is_file(),
         ..Frame::default()
     };
-    describe_selection(&mut frame, setup.server(setup.selected));
+    if let Some(server) = setup.server(setup.selected) {
+        describe_selection(&mut frame, server);
+    }
     frame
+}
+
+fn server_row(server: &ServerConfig, current: bool) -> ServerRow {
+    ServerRow {
+        tag: server.tag.clone(),
+        addr: format!("{}:{}", server.address, server.port),
+        kind: how_it_hides(server),
+        ping: Ping::Unknown,
+        current,
+    }
 }
 
 /// The fields that describe whichever server is in use.
@@ -335,7 +402,7 @@ fn how_it_hides(server: &ServerConfig) -> String {
 
 /// The engine's whole life: start, publish, obey, stop.
 async fn drive(
-    setup: Setup,
+    mut setup: Setup,
     frames: watch::Sender<Frame>,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
@@ -347,6 +414,8 @@ async fn drive(
     // Probing on every tick would put a connection a second through the tunnel
     // just to draw one number.
     let mut probe = tokio::time::interval(Duration::from_secs(8));
+    // Numbers the answers to "add a server"; see `Added::attempt`.
+    let mut attempts = 0u64;
 
     // Starting the engine blocks this loop for as long as it takes — up to ten
     // seconds if the engine comes up but never listens. The default behaviour
@@ -430,7 +499,7 @@ async fn drive(
                                 parts.stop().await;
                             }
                             selected = index;
-                            let server = setup.server(selected);
+                            let server = &setup.servers[selected];
                             tracing::info!("server is now {}", server.tag);
                             frames.send_modify(|f| {
                                 describe_selection(f, server);
@@ -484,12 +553,25 @@ async fn drive(
                         let answer = check_target(&rules.router, &text);
                         frames.send_modify(|f| f.check = answer);
                     }
-                    Command::SeedRules => match seed_rules(&setup.profile_path) {
+                    Command::SeedRules => match crate::profile_file::add_starting_rules(&setup.profile_path) {
                         Ok(()) => {
                             tracing::info!("routing: starting rules written to the profile");
-                            if let Ok(fresh) = Rules::reread(&setup) {
-                                rules = fresh;
-                                publish_routing(&frames, &rules);
+                            frames.send_modify(|f| f.profile_exists = true);
+                            match Rules::reread(&setup) {
+                                Ok(fresh) => {
+                                    rules = fresh;
+                                    publish_routing(&frames, &rules);
+                                    // As with a reload: the inbounds hold the
+                                    // table they started with, so rules written
+                                    // now apply only once the tunnel comes back.
+                                    if let Some(parts) = running.take() {
+                                        parts.stop().await;
+                                        running =
+                                            start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                        apply_proxy(proxy, &setup, running.is_some(), &frames);
+                                    }
+                                }
+                                Err(e) => tracing::error!("routing: {e}"),
                             }
                         }
                         Err(e) => {
@@ -499,14 +581,60 @@ async fn drive(
                             });
                         }
                     },
+                    Command::AddServer(link) => {
+                        attempts += 1;
+                        let first = setup.servers.is_empty();
+                        let outcome = match crate::profile_file::add_server(&setup.profile_path, &link.0) {
+                            Ok((entry, server)) => {
+                                // The name only: the link is a credential.
+                                tracing::info!("server added: {}", server.tag);
+                                let tag = server.tag.clone();
+                                let row = server_row(&server, first);
+                                frames.send_modify(|f| {
+                                    if first {
+                                        describe_selection(f, &server);
+                                    }
+                                    f.servers.push(row);
+                                    f.profile_exists = true;
+                                });
+                                setup.profile.servers.push(entry);
+                                setup.servers.push(server);
+                                Ok(tag)
+                            }
+                            Err(why) => {
+                                tracing::info!("a pasted link was not added");
+                                Err(why)
+                            }
+                        };
+                        let added = outcome.is_ok();
+                        // Before any start, which holds this loop for seconds:
+                        // the form should hear back the moment the file is written.
+                        frames.send_modify(|f| {
+                            f.added = Some(Added {
+                                attempt: attempts,
+                                outcome,
+                            });
+                        });
+                        if added {
+                            ping_all(&setup.servers, &frames, &probes);
+                        }
+                        // The first server is what the window was waiting for.
+                        // Connect, as opening the window with one already would.
+                        if added && first && setup.autostart && running.is_none() {
+                            running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                            apply_proxy(proxy, &setup, running.is_some(), &frames);
+                        }
+                    }
                     Command::Proxy(mode) => {
                         proxy = mode;
                         apply_proxy(proxy, &setup, running.is_some(), &frames);
                     }
-                    Command::Reveal(what) => reveal(match what {
-                        Reveal::Profile => &setup.profile_path,
-                        Reveal::WorkDir => &setup.work_dir,
-                    }),
+                    Command::Reveal(what) => match what {
+                        // Nothing to open until something has been written.
+                        Reveal::Profile if !setup.profile_path.is_file() => {}
+                        Reveal::Profile => reveal(&setup.profile_path),
+                        Reveal::WorkDir => reveal(&setup.work_dir),
+                    },
                 }
             }
             _ = ticker.tick() => {
@@ -644,7 +772,7 @@ impl Rules {
     fn from_setup(setup: &Setup) -> Self {
         Self::compile(
             setup.profile.routing.clone(),
-            has_routing_section(&setup.profile_path),
+            crate::profile_file::has_routing_section(&setup.profile_path),
             &setup.work_dir,
         )
     }
@@ -652,17 +780,23 @@ impl Rules {
     /// Read the profile again and recompile.
     ///
     /// From disk rather than from the `Setup` we were handed at startup: the
-    /// entire point of reloading is to pick up an edit made since.
+    /// entire point of reloading is to pick up an edit made since. One read
+    /// answers both questions, so the rules and "is routing written at all"
+    /// describe the same file.
     fn reread(setup: &Setup) -> Result<Self, String> {
-        let text = std::fs::read_to_string(&setup.profile_path)
-            .map_err(|e| format!("{}: {e}", setup.profile_path.display()))?;
-        let profile: Profile =
-            toml::from_str(&text).map_err(|e| format!("{}: {e}", first_line(&e.to_string())))?;
-        Ok(Self::compile(
-            profile.routing,
-            text.lines().any(is_routing_header),
-            &setup.work_dir,
-        ))
+        let path = &setup.profile_path;
+        let (routing, configured) = match std::fs::read_to_string(path) {
+            Ok(text) => (
+                crate::profile_file::parse(path, &text)
+                    .map_err(|e| e.brief())?
+                    .routing,
+                text.lines().any(crate::profile_file::is_routing_header),
+            ),
+            // No profile yet: the defaults, and nothing written.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        Ok(Self::compile(routing, configured, &setup.work_dir))
     }
 
     fn view(&self) -> RoutingView {
@@ -684,28 +818,6 @@ impl Rules {
             unconfigured: !self.configured,
         }
     }
-}
-
-/// Does the profile have a `[routing]` section?
-///
-/// Read from the text rather than from the parsed profile, because serde fills
-/// a missing section in with defaults and the result is indistinguishable from
-/// an empty one someone wrote on purpose. The difference matters: it decides
-/// whether the screen offers to write a starting set or leaves the user's
-/// deliberate choices alone.
-fn has_routing_section(path: &std::path::Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|text| text.lines().any(is_routing_header))
-        .unwrap_or(false)
-}
-
-fn is_routing_header(line: &str) -> bool {
-    let line = line.trim();
-    line == "[routing]" || line.starts_with("[[routing.")
-}
-
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or_default().to_owned()
 }
 
 /// One line per condition, in the words the profile used.
@@ -758,78 +870,6 @@ fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
     })
 }
 
-/// The starting set of rules, appended to the profile.
-///
-/// Appended rather than serialised over the top, and that is the whole design:
-/// writing the profile back from a serde round-trip would delete every comment
-/// in it, including the ones that explain what the user is looking at. Adding
-/// text to the end keeps the file theirs.
-///
-/// Refuses if the profile already says anything about routing. Whatever is in
-/// there is a decision someone made, and appending a second `[routing]` would
-/// not even parse.
-fn seed_rules(path: &std::path::Path) -> Result<(), String> {
-    if has_routing_section(path) {
-        return Err("в профиле уже есть раздел [routing]".to_owned());
-    }
-    let existing = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-
-    let mut text = existing;
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(STARTING_RULES);
-    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// What a first set of rules should be, for someone who has not written any.
-///
-/// Three rules and a comment each, because a set nobody can read is one nobody
-/// will edit. No country-wide site list: those are matters of taste, and this
-/// is meant to be uncontroversial — advertising blocked, the local network not
-/// sent through a tunnel to come back again.
-const STARTING_RULES: &str = r#"
-# --- Маршрутизация ---------------------------------------------------------
-#
-# Правила читаются сверху вниз, срабатывает первое подошедшее.
-# Проверить, ничего не подключая: bliss route youtube.com
-#
-# Это стартовый набор, добавленный из окна. Правьте как угодно — и нажмите
-# «Перечитать» в разделе «Маршрутизация», чтобы изменения вступили в силу.
-
-[routing]
-# Куда идёт всё, что не подошло ни под одно правило.
-fallback = "proxy"
-
-[[routing.rule]]
-name = "Реклама и трекеры"
-action = "block"
-# Готовая категория из geosite.dat. Работает на всю систему, а не только
-# в браузере.
-geosite = ["category-ads-all"]
-
-[[routing.rule]]
-name = "Локальная сеть"
-action = "direct"
-# Домашний роутер, принтер, соседний компьютер: тащить их через туннель
-# на другой континент и обратно незачем.
-ip = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-
-# Дальше — примеры. Раскомментируйте то, что нужно.
-#
-# [[routing.rule]]
-# name = "Торренты напрямую"
-# action = "direct"
-# process = ["qbittorrent.exe", "utorrent.exe"]
-#
-# [[routing.rule]]
-# name = "Свои сайты напрямую"
-# action = "direct"
-# # Без префикса домен значит «он и всё, что под ним». Ещё есть
-# # full: — ровно это имя, и keyword: — текст где угодно в имени.
-# domain = ["gosuslugi.ru", "keyword:sberbank"]
-"#;
-
 /// Tear the tunnel down and say so, whether or not there was one.
 ///
 /// Called even when nothing is running: after a failed start there is no
@@ -854,6 +894,9 @@ async fn start(
     router: &Arc<Router>,
     frames: &watch::Sender<Frame>,
 ) -> Option<Running> {
+    // Nothing to start before a server is added. The window offers to add one,
+    // which says more than a failure would.
+    let server = setup.server(selected)?;
     frames.send_modify(|f| {
         f.state = State::Starting;
         f.error = None;
@@ -865,16 +908,19 @@ async fn start(
         f.latency_ms = None;
     });
 
-    let server = setup.server(selected);
+    let exe = match engine_path(setup) {
+        Ok(exe) => exe,
+        Err(e) => return fail(frames, &e),
+    };
     let needs = bliss_xray::minimum_xray_version(server).map(|(major, _)| major);
-    let version = match bliss_xray::check_version(&setup.exe, needs).await {
+    let version = match bliss_xray::check_version(&exe, needs).await {
         Ok(v) => v,
         Err(e) => return fail(frames, &e.to_string()),
     };
 
     let port = setup.profile.engine.bridge_port;
     let config = bliss_xray::build(server, port, setup.engine_log);
-    let xray = match bliss_xray::Xray::spawn(&setup.exe, &config, &setup.work_dir, port).await {
+    let xray = match bliss_xray::Xray::spawn(&exe, &config, &setup.work_dir, port).await {
         Ok(x) => x,
         Err(e) => return fail(frames, &e.to_string()),
     };
@@ -1365,75 +1411,49 @@ mod tests {
         assert!(sweep.begin(), "and it is available again afterwards");
     }
 
-    /// The one button in bliss that writes to the user's own file, so the
-    /// result had better parse. If it did not, a click would leave a profile
-    /// the program refuses to start with.
+    /// The window opens with no profile and no server, so nothing about its
+    /// first frame may assume there is a server to describe.
     #[test]
-    fn the_starting_rules_append_to_a_profile_and_still_parse() {
-        let dir = std::env::temp_dir().join("bliss-seed-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("bliss.toml");
+    fn a_window_without_servers_gets_a_frame() {
+        // Never created: no profile in it, and no engine either.
+        let dir = std::env::temp_dir()
+            .join("bliss-engine-tests")
+            .join("no-servers-nothing-here");
+        let setup = Setup {
+            profile: Profile::default(),
+            servers: Vec::new(),
+            selected: 0,
+            work_dir: dir.clone(),
+            profile_path: dir.join("bliss.toml"),
+            engine_log: bliss_xray::LogLevel::Warning,
+            autostart: true,
+            problem: Some("профиль не читается".to_owned()),
+        };
+        assert!(setup.server(setup.selected).is_none());
 
-        // A profile with comments and a server in it, which is what a real one
-        // looks like by the time anyone presses the button.
-        let before = "# my profile\n\
-                      [inbound]\n\
-                      socks = 10808\n\
-                      http = 10809\n\n\
-                      [[server]]\n\
-                      # the one I use\n\
-                      link = \"vless://11111111-2222-3333-4444-555555555555@a.example:443\
-                      ?security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sni=b.example\"\n";
-        std::fs::write(&path, before).expect("write");
-
-        seed_rules(&path).expect("appending the starting rules");
-        let after = std::fs::read_to_string(&path).expect("read back");
-
-        // Nothing of theirs was lost — this is why it appends rather than
-        // serialising the profile back over itself.
-        assert!(after.starts_with(before), "the original must be untouched");
-        assert!(after.contains("# the one I use"), "comments survive");
-
-        let profile: Profile = toml::from_str(&after).expect("the result must be a valid profile");
-        assert_eq!(profile.routing.rules.len(), 2);
-        assert_eq!(profile.routing.fallback, Action::Proxy);
-        assert_eq!(profile.routing.rules[0].action, Action::Block);
-        assert_eq!(profile.routing.rules[0].geosite, ["category-ads-all"]);
-        assert_eq!(profile.routing.rules[1].action, Action::Direct);
-        assert_eq!(profile.servers.len(), 1, "the server is still there");
-
-        // And it refuses to do it twice, because two [routing] sections are not
-        // a profile at all.
-        assert!(seed_rules(&path).is_err());
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read"),
-            after,
-            "a refused seed must not have written anything"
+        let frame = initial_frame(&setup);
+        assert!(frame.servers.is_empty());
+        assert!(frame.server_tag.is_empty());
+        assert!(!frame.profile_exists);
+        assert_eq!(frame.error.as_deref(), Some("профиль не читается"));
+        assert!(
+            engine_path(&setup).is_err(),
+            "no engine in a work dir that does not exist"
         );
-
-        std::fs::remove_file(&path).ok();
     }
 
-    /// A missing section and an empty one look identical after serde fills the
-    /// defaults in, and they mean different things: one is "never decided", the
-    /// other is "decided to have none".
+    /// A link is a credential, `Command` is `Debug`, and a `{command:?}` in a
+    /// log line is one careless edit away.
     #[test]
-    fn a_written_routing_section_is_told_apart_from_an_absent_one() {
-        for (text, configured) in [
-            ("[inbound]\nsocks = 10808\n", false),
-            ("[routing]\nfallback = \"proxy\"\n", true),
-            ("[inbound]\nsocks = 1\n\n  [routing]  \n", true),
-            ("[[routing.rule]]\naction = \"block\"\n", true),
-            // Mentioned in prose is not the same as written.
-            ("# see [routing] below one day\n[inbound]\n", false),
-        ] {
-            let dir = std::env::temp_dir().join("bliss-seed-test");
-            std::fs::create_dir_all(&dir).expect("temp dir");
-            let path = dir.join("detect.toml");
-            std::fs::write(&path, text).expect("write");
-            assert_eq!(has_routing_section(&path), configured, "for {text:?}");
-            std::fs::remove_file(&path).ok();
-        }
+    fn a_pasted_link_does_not_show_in_debug_output() {
+        let command = Command::AddServer(Link(
+            "vless://11111111-2222-3333-4444-555555555555@a.example:443?encryption=none".to_owned(),
+        ));
+        let shown = format!("{command:?}");
+        assert!(
+            !shown.contains("11111111") && !shown.contains("a.example"),
+            "{shown}"
+        );
     }
 
     #[test]

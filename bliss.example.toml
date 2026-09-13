@@ -1,11 +1,14 @@
 # bliss profile.
 #
-# The only thing you have to supply is a link. Get it from your provider or
-# from a subscription page — it starts with vless:// — uncomment the two lines
-# at the bottom and paste it in. Everything above already has a sane default.
+# bliss writes this file the first time you add a server in its window, and
+# adds each later one at the end. Everything else here already has a sane
+# default, so nothing has to be filled in by hand.
 #
-# This file holds a live credential once you fill it in: the UUID and the
-# REALITY keys are in that link. Treat it like a password.
+# Editing by hand is fine too: servers are [[server]] blocks with a vless://
+# link, as at the bottom. bliss only ever appends, so comments stay put.
+#
+# This file holds a live credential once a server is in it: the UUID and the
+# REALITY keys are in the link. Treat it like a password.
 
 [inbound]
 # What your browser and other programs point at. Loopback on purpose: anything
@@ -47,11 +50,15 @@ system_proxy = "unchanged"
 #   bliss route youtube.com
 #   bliss route 1.2.3.4 --process qbittorrent.exe
 
-[routing]
-# Куда идёт всё, что не подошло ни под одно правило.
-fallback = "proxy"
-
-# Ниже — набор, с которого разумно начать. Раскомментируйте нужные блоки.
+# Пока раздела [routing] нет, всё идёт через прокси. Кнопка «Добавить набор» в
+# разделе «Маршрутизация» окна допишет стартовый набор в конец этого файла.
+# Или раскомментируйте [routing] и нужные блоки ниже сами.
+#
+# [routing]
+# # Куда идёт всё, что не подошло ни под одно правило.
+# fallback = "proxy"
+#
+# Ниже — набор, с которого разумно начать.
 #
 # Про рекламу: в geosite есть готовая категория, её и блокируем. Работает на
 # всю систему, а не только в браузере.

@@ -43,8 +43,8 @@ The long-form plan, in Russian, lives outside the repo at
   `route` make no network connections, but every invocation first runs
   `sysproxy::recover` (which rewrites the system proxy if a dead run left
   `system-proxy-backup.txt` behind), creates the work dir, and appends to
-  `bliss.log`; `check` and `route` without a path also write a first-run profile
-  if none exists.
+  `bliss.log`. None of them creates the profile: only the window writes it,
+  when a server or the starting rules are first added.
 - **Talk to the user in Russian.** Code, comments, docs and commit messages are
   in English.
 
@@ -66,8 +66,9 @@ knowledge outside `bliss-xray`, not to be extended: the `[engine] xray` path in
 
 Runtime paths on Windows:
 
-- profile: `%APPDATA%\bliss\bliss.toml`, seeded on first run from
-  `bliss.example.toml`, which is compiled into the binary
+- profile: `%APPDATA%\bliss\bliss.toml`. It does not exist until the window
+  writes it, from `bliss.example.toml` (compiled into the binary), when the
+  first server or the starting rules are added; bliss runs without it
 - work dir: `%LOCALAPPDATA%\bliss\data` — `xray.exe`, `geoip.dat`,
   `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
@@ -234,13 +235,24 @@ These cost the most time on this project. None of them announce themselves.
 - **The profile schema is a compatibility surface.** The structs are
   `#[serde(deny_unknown_fields)]`, so renaming or removing a key breaks every
   existing `bliss.toml`. Add keys with `#[serde(default)]`; never rename.
-  `bliss.example.toml` is compiled in as the first-run profile, and
+  `bliss.example.toml` is compiled in as the text of every new profile, and
   `links.rs` asserts that it parses and that its documented defaults match the
-  code — change them together.
-- **The profile is appended to, never re-serialised**: a serde round-trip deletes
-  every comment the user relies on. After serde fills in defaults, a missing
-  section and an empty one look identical; when that matters, read the file text
-  (`has_routing_section` in `engine.rs`).
+  code — change them together. It must not contain an active `[routing]`
+  header, or the starting rules could never be added to a profile the window
+  created (`the_template_is_an_empty_profile_with_routing_left_open`).
+- **Every write to the profile goes through `profile_file.rs`**, and each one
+  keeps three promises: the file is created on first use, never on launch; new
+  text is appended, because a serde round-trip deletes every comment the user
+  relies on; and the whole new text is parsed before one `rename` replaces the
+  file, so a refusal leaves it byte for byte as it was. After serde fills in
+  defaults, a missing section and an empty one look identical; when that
+  matters, read the file text (`has_routing_section`).
+- **A link is a credential in the window too.** `Command::AddServer` carries a
+  `Link` whose `Debug` hides it; the log gets only the server's name; a refused
+  link is explained by `LinkError` variant, never by echoing a value — `BadValue`
+  holds the rejected text, which can be most of a key. A TOML error shown on
+  screen is `ProfileError::brief`, because the full error quotes the offending
+  line, and in a profile that line can be a link.
 - **Assume another bliss shares the work dir** — a test run, a stray copy, the
   user's own instance. `bliss.log` is appended, and trimmed only if an open with
   `share_mode(0)` succeeds, because Rust opens files with `FILE_SHARE_DELETE` and
@@ -348,6 +360,13 @@ Start-Process .\target\debug\bliss.exe
 # DevTools endpoint: http://127.0.0.1:9222/json  (page title "Dioxus app")
 ```
 
+**Point it at a scratch profile**, never the real one, whenever the check
+writes: `BLISS_PROFILE` replaces `%APPDATA%\bliss\bliss.toml` for the window and
+the CLI alike. Leave it unset to test the real first run, and note what it does
+not move: the work dir (engine, `xray.json`, `bliss.log`) stays where it is. A
+scratch profile whose `[engine] xray` names a file that does not exist makes
+any start fail before an engine is spawned or its config written.
+
 From Python with `websocket-client` (installed), after removing the proxy
 variables and with `suppress_origin=True`: `Runtime.evaluate` to read classes,
 inline styles and `getComputedStyle`; `Input.dispatchMouseEvent` for real clicks
@@ -412,7 +431,8 @@ Two more probes that worked:
 and download; relay and connection table; system proxy (three modes, crash-safe
 restore); routing (proxy / direct / block by domain, address, port, process,
 geosite/geoip) and its screen; server list with ping; copy to clipboard; the
-application icon and the status card's picture. The
+application icon and the status card's picture; starting with no profile, no
+server and no engine, and adding a server from the window. The
 tunnel already starts with the window (`Setup.autostart`).
 
 **Open:** subscriptions (1.6); UDP ASSOCIATE; an idle timeout for half-open

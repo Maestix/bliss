@@ -1,4 +1,4 @@
-//! Putting text on the clipboard.
+//! Text to and from the clipboard.
 //!
 //! Through the Win32 clipboard rather than `navigator.clipboard`: the window is
 //! served from a custom protocol, the async clipboard API wants a secure
@@ -8,7 +8,8 @@
 //!
 //! Ownership is the one thing to get right. After a successful
 //! `SetClipboardData` the block belongs to the system and must not be freed;
-//! before that, it is ours and has to be.
+//! before that, it is ours and has to be. A block read with `GetClipboardData`
+//! is never ours.
 
 /// Put `text` on the clipboard, reporting whether it got there.
 #[cfg(windows)]
@@ -76,6 +77,47 @@ pub fn copy(_text: &str) -> bool {
     false
 }
 
+/// The text on the clipboard, if there is any and nobody else is holding it.
+#[cfg(windows)]
+pub fn paste() -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+    // SAFETY: the block belongs to the system and is only read while the
+    // clipboard is open and the block is locked, and never past its own size
+    // even if the terminator is missing. The clipboard is closed on every path.
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return None;
+        }
+        let text = 'read: {
+            let Ok(handle) = GetClipboardData(CF_UNICODETEXT.0 as u32) else {
+                break 'read None;
+            };
+            let block = HGLOBAL(handle.0);
+            let units = GlobalSize(block) / 2;
+            let start = GlobalLock(block).cast::<u16>();
+            if start.is_null() {
+                break 'read None;
+            }
+            let all = std::slice::from_raw_parts(start, units);
+            let len = all.iter().position(|&unit| unit == 0).unwrap_or(units);
+            let text = String::from_utf16_lossy(&all[..len]);
+            let _ = GlobalUnlock(block);
+            Some(text)
+        };
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+#[cfg(not(windows))]
+pub fn paste() -> Option<String> {
+    None
+}
+
 /// Russian agreement for a count of lines, for the "copied N lines" note.
 pub fn lines(n: usize) -> String {
     let form = match (n % 10, n % 100) {
@@ -107,12 +149,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn text_survives_the_round_trip() {
-        use windows::Win32::System::DataExchange::{
-            CloseClipboard, GetClipboardData, OpenClipboard,
-        };
-        use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-        use windows::Win32::System::Ole::CF_UNICODETEXT;
-
         // Cyrillic and a newline: the two things a naive implementation gets
         // wrong, by writing bytes instead of UTF-16 and by leaving the line
         // ending bare.
@@ -122,30 +158,10 @@ mod tests {
             // Not a failure of ours, and not worth making the suite flaky over.
             return;
         }
-
-        // SAFETY: the handle is only read while the clipboard is open and the
-        // lock is held, and nothing here frees it — the system owns it.
-        let got = unsafe {
-            assert!(OpenClipboard(None).is_ok());
-            let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).expect("text on the clipboard");
-            let block = windows::Win32::Foundation::HGLOBAL(handle.0);
-            let ptr = GlobalLock(block).cast::<u16>();
-            assert!(!ptr.is_null());
-            let mut units = Vec::new();
-            let mut at = 0;
-            loop {
-                let unit = *ptr.add(at);
-                if unit == 0 {
-                    break;
-                }
-                units.push(unit);
-                at += 1;
-            }
-            let _ = GlobalUnlock(block);
-            let _ = CloseClipboard();
-            String::from_utf16_lossy(&units)
+        let Some(got) = paste() else {
+            // Taken back between the two calls, for the same reason.
+            return;
         };
-
         assert_eq!(got, "первая строка\r\nвторая строка");
     }
 }
