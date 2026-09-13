@@ -1383,7 +1383,7 @@ mod tests {
                       [[server]]\n\
                       # the one I use\n\
                       link = \"vless://11111111-2222-3333-4444-555555555555@a.example:443\
-                      ?security=reality&pbk=xEJ0rW1fZ6nT8sKqVY2mBhLdGc5PuA7oIzNQ9tRvXwE&sni=b.example\"\n";
+                      ?security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sni=b.example\"\n";
         std::fs::write(&path, before).expect("write");
 
         seed_rules(&path).expect("appending the starting rules");

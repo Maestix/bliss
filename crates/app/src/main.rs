@@ -58,6 +58,7 @@ enum Command {
         /// Pretend the connection came from this program, for process rules.
         #[arg(long, value_name = "NAME")]
         process: Option<String>,
+        /// Profile to read the rules from. Defaults to %APPDATA%\bliss\bliss.toml.
         path: Option<PathBuf>,
     },
     /// Start the engine and serve traffic.
@@ -80,9 +81,10 @@ enum EngineCmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Download an engine into %LOCALAPPDATA%liss and verify its checksum.
+    /// Download an engine into %LOCALAPPDATA%\bliss\data and verify its checksum.
     Install {
-        /// A specific version, e.g. 26.7.28. Defaults to the newest release.
+        /// A specific version, e.g. 26.7.28. Without it: the newest stable
+        /// release, or the newest of any kind with --newest.
         #[arg(long)]
         version: Option<String>,
         /// Take the newest release even if it is flagged prerelease. Most
@@ -791,7 +793,7 @@ fn project_dirs() -> Result<directories::ProjectDirs> {
 }
 
 fn default_profile_path() -> Result<PathBuf> {
-    // %APPDATA%lissliss.toml, not the crate's config_dir(): that appends a
+    // %APPDATA%\bliss\bliss.toml, not the crate's config_dir(): that appends a
     // "config" folder, which is a unix habit. On Windows an app's settings live
     // directly under its own folder in Roaming, and this is a file users edit.
     let base = directories::BaseDirs::new().ok_or_else(|| eyre!("cannot locate %APPDATA%"))?;
