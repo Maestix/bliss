@@ -19,6 +19,7 @@ mimalloc = ["dep:mimalloc"]
 bliss-core = { path = "../core" }
 bliss-proto = { path = "../proto" }
 bliss-xray = { path = "../xray" }
+base64.workspace = true                                # the status card's picture, inlined into the stylesheet
 clap = { workspace = true, features = ["derive"] }
 dioxus = { workspace = true, features = ["desktop"] }
 color-eyre.workspace = true
@@ -42,3 +43,10 @@ windows = { workspace = true, features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
 ] }
+
+[build-dependencies]
+# bliss.rc -> the icon inside bliss.exe; see build.rs.
+embed-resource.workspace = true
+
+[dev-dependencies]
+jpeg-decoder.workspace = true

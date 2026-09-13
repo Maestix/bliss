@@ -1,0 +1,9 @@
+// Resource 1 is the application icon. Explorer shows it for bliss.exe, and the
+// window loads it at runtime for its own icons (`set_icons` in src/ui.rs).
+//
+// Frames of 16 to 96 px carry the mark alone; 128 and 256 px add the wordmark,
+// which at window-icon sizes would be a smudge. The small frames include both
+// window-icon sizes at every scale Windows offers from 100% to 300%, so the
+// shell never has to resize one there. Keep all fifteen when replacing the
+// file — `the_icon_has_a_frame_for_every_window_icon_size` checks.
+1 ICON "assets/bliss.ico"

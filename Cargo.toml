@@ -71,6 +71,14 @@ mimalloc = "0.1"
 # is Blitz on WGPU. Same RSX, same CSS — which is what makes 1.0 a measurement
 # rather than an argument.
 dioxus = "0.7"
+# Build time only. Explorer shows an executable's icon only from its own
+# resources, and shortcuts use that icon by default, so bliss.rc has to be
+# compiled into the binary; this finds rc.exe in the Windows SDK that the MSVC
+# linker needs anyway.
+embed-resource = "3"
+# Tests only: reads the status card's picture back to check that its edges are
+# the card's colour. Already in the tree through Dioxus's image support.
+jpeg-decoder = "0.3"
 
 # --- platform -------------------------------------------------------------
 # Job Objects now, the routing table for TUN later. Proven necessary rather than
