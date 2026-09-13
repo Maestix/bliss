@@ -47,7 +47,7 @@ use dioxus::desktop::tao::window::{Icon, Window};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
-use crate::engine::{Command, Controller, Frame, Ping, Reveal, State, bytes, rate};
+use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, State, bytes, rate};
 use bliss_proto::ProxyMode;
 
 const NOCTURNE: &str = include_str!("../assets/nocturne.css");
@@ -547,9 +547,6 @@ fn nav_tint(active: bool, enabled: bool) -> &'static str {
 
 #[component]
 fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
-    let controller = use_context::<Controller>();
-    let (tone, outer, inner) = tones(frame.state);
-    let on = frame.state.is_on();
     let span_seconds = frame.history.len() / 2;
     let reason = frame.error.clone().unwrap_or_default();
 
@@ -583,71 +580,12 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 }
             }
 
-            div { style: "display:flex;gap:13px;align-items:stretch;flex:none",
-                div {
-                    // The night scene behind the status: `.status-card` in app.css.
-                    class: "status-card",
-                    style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
-                            padding:18px;background-color:var(--color-surface);\
-                            border-radius:8px;box-shadow:var(--shadow-sm)",
-                    div {
-                        class: "ring",
-                        style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
-                                place-items:center;border:1px solid {tone};cursor:default;\
-                                box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
-                        onclick: move |_| controller.send(Command::Toggle { was_on: on }),
-                        crate::icons::Power { size: 28, color: tone }
-                    }
-                    div { style: "display:flex;flex-direction:column;gap:4px;min-width:0",
-                        span {
-                            // Longhands, not the `font:` shorthand: see the
-                            // note at the top of this file.
-                            style: "font-weight:500;font-size:25px;line-height:1.1;\
-                                    font-family:var(--font-heading);color:{tone}",
-                            "{frame.state.label()}"
-                        }
-                        span { style: "font-size:14px;color:var(--color-neutral-400)",
-                            "{elide(&frame.sni, 26)} · {frame.server_addr}"
-                        }
-                        span {
-                            style: "font-size:14px;color:var(--color-neutral-500);\
-                                    font-variant-numeric:tabular-nums",
-                            if on { "В сети {frame.uptime} · {frame.flow}" } else { "{frame.flow}" }
-                        }
-                    }
-                    div {
-                        style: "margin-left:auto;display:flex;flex-direction:column;\
-                                align-items:flex-end;gap:10px",
-                        Toggle {
-                            on,
-                            tone: tone.to_owned(),
-                            onclick: {
-                                let controller = controller.clone();
-                                move |_| controller.send(Command::Toggle { was_on: on })
-                            },
-                        }
-                        span { style: "font-size:13px;color:var(--color-neutral-600)",
-                            "{frame.listen}"
-                        }
-                    }
-                }
-
-                div {
-                    style: "width:232px;flex:none;display:flex;flex-direction:column;gap:10px;\
-                            padding:14px;background-color:var(--color-surface);\
-                            border-radius:8px;box-shadow:var(--shadow-sm)",
-                    StatRow {
-                        label: "Задержка",
-                        value: match frame.latency_ms {
-                            Some(ms) => format!("{ms} мс"),
-                            None => "—".to_owned(),
-                        },
-                    }
-                    StatRow { label: "Сессия ↓", value: bytes(frame.down_total) }
-                    StatRow { label: "Сессия ↑", value: bytes(frame.up_total) }
-                    StatRow { label: "Соединений", value: frame.active.to_string() }
-                    StatRow { label: "uTLS", value: frame.fingerprint.clone() }
-                }
+            // Before the first server there is no status to show, so the card
+            // that would hold it asks for a server instead.
+            if frame.servers.is_empty() {
+                AddServerCard { frame: frame.clone() }
+            } else {
+                StatusCards { frame: frame.clone() }
             }
 
             div {
@@ -692,6 +630,221 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                         Tab::Actions => rsx! { ActionsTab { frame: frame.clone() } },
                     }
                 }
+            }
+        }
+    }
+}
+
+/// The status card and the numbers beside it, for a window with a server.
+#[component]
+fn StatusCards(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let (tone, outer, inner) = tones(frame.state);
+    let on = frame.state.is_on();
+
+    rsx! {
+        div { style: "display:flex;gap:13px;align-items:stretch;flex:none",
+            div {
+                // The night scene behind the status: `.status-card` in app.css.
+                class: "status-card",
+                style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
+                        padding:18px;background-color:var(--color-surface);\
+                        border-radius:8px;box-shadow:var(--shadow-sm)",
+                div {
+                    class: "ring",
+                    style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
+                            place-items:center;border:1px solid {tone};cursor:default;\
+                            box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
+                    onclick: move |_| controller.send(Command::Toggle { was_on: on }),
+                    crate::icons::Power { size: 28, color: tone }
+                }
+                div { style: "display:flex;flex-direction:column;gap:4px;min-width:0",
+                    span {
+                        // Longhands, not the `font:` shorthand: see the
+                        // note at the top of this file.
+                        style: "font-weight:500;font-size:25px;line-height:1.1;\
+                                font-family:var(--font-heading);color:{tone}",
+                        "{frame.state.label()}"
+                    }
+                    span { style: "font-size:14px;color:var(--color-neutral-400)",
+                        // A server without TLS has no name to show, and a line
+                        // opening on a separator looks like something fell off.
+                        if frame.sni.is_empty() {
+                            "{frame.server_addr}"
+                        } else {
+                            "{elide(&frame.sni, 26)} · {frame.server_addr}"
+                        }
+                    }
+                    span {
+                        style: "font-size:14px;color:var(--color-neutral-500);\
+                                font-variant-numeric:tabular-nums",
+                        if on { "В сети {frame.uptime} · {frame.flow}" } else { "{frame.flow}" }
+                    }
+                }
+                div {
+                    style: "margin-left:auto;display:flex;flex-direction:column;\
+                            align-items:flex-end;gap:10px",
+                    Toggle {
+                        on,
+                        tone: tone.to_owned(),
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Toggle { was_on: on })
+                        },
+                    }
+                    span { style: "font-size:13px;color:var(--color-neutral-600)",
+                        "{frame.listen}"
+                    }
+                }
+            }
+
+            div {
+                style: "width:232px;flex:none;display:flex;flex-direction:column;gap:10px;\
+                        padding:14px;background-color:var(--color-surface);\
+                        border-radius:8px;box-shadow:var(--shadow-sm)",
+                StatRow {
+                    label: "Задержка",
+                    value: match frame.latency_ms {
+                        Some(ms) => format!("{ms} мс"),
+                        None => "—".to_owned(),
+                    },
+                }
+                StatRow { label: "Сессия ↓", value: bytes(frame.down_total) }
+                StatRow { label: "Сессия ↑", value: bytes(frame.up_total) }
+                StatRow { label: "Соединений", value: frame.active.to_string() }
+                StatRow { label: "uTLS", value: frame.fingerprint.clone() }
+            }
+        }
+    }
+}
+
+/// What the connection screen shows before there is a server: the one thing
+/// bliss needs from anyone, asked for in the window rather than in a file.
+#[component]
+fn AddServerCard(frame: Frame) -> Element {
+    rsx! {
+        div {
+            // The same night scene as the status card it stands in for.
+            class: "status-card",
+            style: "flex:none;display:flex;flex-direction:column;gap:14px;padding:20px 22px;\
+                    background-color:var(--color-surface);border-radius:8px;\
+                    box-shadow:var(--shadow-sm)",
+            div { style: "display:flex;flex-direction:column;gap:6px;max-width:540px",
+                span {
+                    style: "font-weight:500;font-size:23px;line-height:1.15;\
+                            font-family:var(--font-heading);color:var(--color-text)",
+                    "Добавьте сервер"
+                }
+                span { style: "font-size:14px;line-height:1.5;color:var(--color-neutral-400)",
+                    "Вставьте ссылку vless:// — её даёт провайдер или страница подписки. \
+                     bliss сохранит её в профиль и подключится."
+                }
+            }
+            AddServerForm { frame }
+        }
+    }
+}
+
+/// Paste a link, get a server.
+///
+/// The typed text lives in a local signal rather than in the frame, which is
+/// republished twice a second and would fight whoever is typing. The engine's
+/// answer comes back in `frame.added`; its `attempt` tells a fresh answer from
+/// the one already on screen when this form appeared, so switching tabs does
+/// not replay an old "added".
+#[component]
+fn AddServerForm(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let mut link = use_signal(String::new);
+    let seen = use_hook(|| frame.added.as_ref().map(|added| added.attempt));
+    let fresh = frame
+        .added
+        .clone()
+        .filter(|added| Some(added.attempt) != seen);
+
+    // Empty the field when a fresh success arrives, once. In an effect: writing
+    // a signal while rendering would only render again for nothing.
+    let succeeded = fresh
+        .as_ref()
+        .filter(|added| added.outcome.is_ok())
+        .map(|added| added.attempt);
+    use_effect(use_reactive((&succeeded,), move |(succeeded,)| {
+        if succeeded.is_some() {
+            link.set(String::new());
+        }
+    }));
+
+    let submit = move |text: String| {
+        if !text.trim().is_empty() {
+            controller.send(Command::AddServer(Link(text)));
+        }
+    };
+    let typed = !link().trim().is_empty();
+
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:7px;max-width:680px",
+            div { style: "display:flex;align-items:center;gap:8px",
+                input {
+                    class: "field",
+                    r#type: "text",
+                    value: "{link}",
+                    placeholder: "vless://…",
+                    autocomplete: "off",
+                    spellcheck: "false",
+                    style: "flex:1;min-width:0;padding:8px 10px;border-radius:4px;border:none;\
+                            background-color:#12131d;color:var(--color-text);font-size:14px;\
+                            font-family:ui-monospace,Consolas,monospace;\
+                            box-shadow:inset 0 0 0 1px rgba(233,233,237,.10)",
+                    oninput: move |e| link.set(e.value()),
+                    onkeydown: {
+                        let submit = submit.clone();
+                        move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                submit(link());
+                            }
+                        }
+                    },
+                }
+                Button {
+                    label: "Добавить",
+                    enabled: typed,
+                    onclick: {
+                        let submit = submit.clone();
+                        move |_| submit(link())
+                    },
+                    icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                }
+                // Straight from the clipboard, in one click: the link is long,
+                // and selecting a field to paste into is one more thing to aim at.
+                Button {
+                    label: "Вставить",
+                    enabled: true,
+                    // A clone like the others: rsx builds this handler before
+                    // theirs, so moving the original here left them nothing.
+                    onclick: {
+                        let submit = submit.clone();
+                        move |_| {
+                            if let Some(text) = crate::clipboard::paste() {
+                                let text = text.trim().to_owned();
+                                link.set(text.clone());
+                                submit(text);
+                            }
+                        }
+                    },
+                    icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
+                }
+            }
+            match fresh.map(|added| added.outcome) {
+                Some(Ok(tag)) => rsx! {
+                    span { style: "font-size:13px;color:#5aa87f", "Добавлен «{elide(&tag, 40)}»" }
+                },
+                Some(Err(why)) => rsx! {
+                    span {
+                        style: "font-size:13px;line-height:1.45;color:#d9a2a9;word-break:break-word",
+                        "{why}"
+                    }
+                },
+                None => rsx! {},
             }
         }
     }
@@ -771,7 +924,7 @@ fn ServersTab(frame: Frame) -> Element {
             div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
                 if frame.servers.is_empty() {
                     div { style: "padding:22px 10px;font-size:14.5px;color:var(--color-neutral-600)",
-                        "В профиле нет серверов. Вставьте vless://-ссылку — «Действия» откроют нужный файл."
+                        "Серверов пока нет — вставьте ссылку vless:// в поле ниже."
                     }
                 }
                 for (index, server) in frame.servers.iter().enumerate() {
@@ -803,6 +956,8 @@ fn ServersTab(frame: Frame) -> Element {
                     }
                 }
             }
+
+            AddServerForm { frame: frame.clone() }
 
             div { style: "display:flex;align-items:center;gap:10px;padding-top:2px",
                 Button {
@@ -858,8 +1013,8 @@ fn ActionsTab(frame: Frame) -> Element {
             }
             ActionCard {
                 title: "Открыть профиль",
-                hint: "bliss.toml — сюда вставляются ссылки",
-                enabled: true,
+                hint: if frame.profile_exists { "bliss.toml — серверы и правила" } else { "появится с первым сервером" },
+                enabled: frame.profile_exists,
                 onclick: {
                     let controller = controller.clone();
                     move |_| controller.send(Command::Reveal(Reveal::Profile))
@@ -1251,7 +1406,7 @@ fn Routing(frame: Frame) -> Element {
                     style: "margin-left:auto;display:flex;gap:8px",
                     Button {
                         label: "Перечитать",
-                        enabled: true,
+                        enabled: frame.profile_exists,
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::ReloadRules)
@@ -1260,7 +1415,7 @@ fn Routing(frame: Frame) -> Element {
                     }
                     Button {
                         label: "Открыть профиль",
-                        enabled: true,
+                        enabled: frame.profile_exists,
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::Reveal(Reveal::Profile))
@@ -1282,9 +1437,14 @@ fn Routing(frame: Frame) -> Element {
                         span {
                             style: "font-size:13px;line-height:1.45;color:var(--color-neutral-500)",
                             "Сейчас всё идёт через прокси. Можно добавить стартовый набор: \
-                             реклама блокируется, локальная сеть идёт напрямую. \
-                             Он допишется в конец профиля с комментариями — ваши \
-                             настройки не пострадают."
+                             реклама блокируется, локальная сеть идёт напрямую. "
+                            if frame.profile_exists {
+                                "Он допишется в конец профиля с комментариями — ваши \
+                                 настройки не пострадают."
+                            } else {
+                                "Профиля ещё нет: bliss создаст его, и набор ляжет туда \
+                                 с комментариями."
+                            }
                         }
                     }
                     div { style: "margin-left:auto;flex:none",

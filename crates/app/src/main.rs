@@ -10,6 +10,7 @@ mod clipboard;
 mod engine;
 mod icons;
 mod logs;
+mod profile_file;
 mod ui;
 
 use std::io::{Read, Write};
@@ -173,7 +174,7 @@ async fn cli(command: Command) -> Result<()> {
 /// This thread belongs to the event loop from here on — every windowing library
 /// insists on the main thread — so the engine gets a runtime of its own.
 fn window() -> Result<()> {
-    let setup = prepare(None, None, "warning")?;
+    let setup = window_setup()?;
     let work_dir = setup.work_dir.clone();
     let controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
     ui::launch(controller);
@@ -201,9 +202,53 @@ fn guard_system_proxy(work_dir: PathBuf) {
     }));
 }
 
-/// Everything needed to run, gathered from the profile once.
+/// Everything the window needs, without insisting on anything.
+///
+/// A first run has no profile and no server, and a hand-edited profile can
+/// stop parsing. Neither is a reason for a message box instead of a window:
+/// the window is where a server gets added and where the problem is shown.
+fn window_setup() -> Result<engine::Setup> {
+    let path = default_profile_path()?;
+    let (profile, problem) = match profile_file::read(&path) {
+        Ok(profile) => (profile.unwrap_or_default(), None),
+        Err(e) => {
+            // The brief form in the log too: the full one quotes the offending
+            // line, and in a profile that line can be a link.
+            tracing::error!("profile: {}", e.brief());
+            (
+                Profile::default(),
+                Some(format!("профиль не читается: {}", e.brief())),
+            )
+        }
+    };
+    let (servers, failed) = profile.parse_servers();
+    for (i, err) in &failed {
+        tracing::warn!("server #{} in the profile is unusable - {err}", i + 1);
+    }
+    Ok(engine::Setup {
+        profile,
+        servers,
+        selected: 0,
+        work_dir: work_dir()?,
+        profile_path: path,
+        engine_log: bliss_xray::LogLevel::Warning,
+        autostart: true,
+        problem,
+    })
+}
+
+/// Everything `bliss run` needs, gathered from the profile once.
+///
+/// Stricter than the window: a terminal has nowhere to ask for a server, so a
+/// missing profile, or one without a usable server, is an error here.
 fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Result<engine::Setup> {
     let (profile, path) = load_profile(path)?;
+    let Some(profile) = profile else {
+        bail!(
+            "no profile yet at {}. Add a server in the bliss window, which writes it, or pass the path of a profile.",
+            path.display()
+        );
+    };
     let (servers, failed) = profile.parse_servers();
     for (i, err) in &failed {
         tracing::warn!("server #{} in the profile is unusable - {err}", i + 1);
@@ -227,7 +272,7 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
                     path.display()
                 ),
                 None => bail!(
-                    "no server in {}. Paste a vless:// link into it — the [[server]] block at the bottom of the file shows where.",
+                    "no server in {}. Add one in the bliss window, or paste a vless:// link into the file — the [[server]] block at the bottom shows where.",
                     path.display()
                 ),
             }
@@ -236,7 +281,6 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
     };
 
     Ok(engine::Setup {
-        exe: resolve_engine(&profile)?,
         work_dir: work_dir()?,
         engine_log: parse_log_level(engine_log)?,
         autostart: true,
@@ -244,6 +288,7 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
         profile,
         servers,
         selected,
+        problem: None,
     })
 }
 
@@ -255,7 +300,14 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
 /// did this go direct?" has an answer; this is that question asked ahead of
 /// time, so a rule can be checked before it is trusted with real traffic.
 fn explain_route(path: Option<PathBuf>, target: &str, process: Option<&str>) -> Result<()> {
-    let (profile, _) = load_profile(path)?;
+    let (profile, path) = load_profile(path)?;
+    let profile = profile.unwrap_or_else(|| {
+        println!(
+            "(профиля {} пока нет — действуют значения по умолчанию)\n",
+            path.display()
+        );
+        Profile::default()
+    });
     let dir = profile.routing.geo_dir.clone().unwrap_or(work_dir()?);
 
     let router = bliss_core::Router::build(&profile.routing, &dir);
@@ -413,6 +465,9 @@ bliss uses it automatically — no engine.xray needed in the profile."
 
 async fn run(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Result<()> {
     let setup = prepare(path, want, engine_log)?;
+    // Before the engine thread, so a missing engine is reported here rather
+    // than as a failed start a moment later.
+    engine::engine_path(&setup).map_err(|e| eyre!(e))?;
     let listen = format!(
         "{}:{}",
         setup.profile.inbound.listen, setup.profile.inbound.socks
@@ -618,45 +673,6 @@ fn show_message(text: &str) {
 // The proper fix is the windows subsystem plus AttachConsole for the CLI paths,
 // which needs testing from Explorer before it goes anywhere near a release.
 
-/// Write a profile a user can fill in, rather than one they have to invent.
-fn seed_profile(path: &std::path::Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .wrap_err_with(|| format!("cannot create {}", parent.display()))?;
-    }
-    std::fs::write(path, include_str!("../../../bliss.example.toml"))
-        .wrap_err_with(|| format!("cannot write {}", path.display()))?;
-    Ok(())
-}
-
-/// Where the engine binary lives: the profile wins, then the copy bliss manages.
-fn resolve_engine(profile: &Profile) -> Result<PathBuf> {
-    if let Some(path) = &profile.engine.xray {
-        if !path.is_file() {
-            bail!(
-                "engine.xray points at {}, which is not a file",
-                path.display()
-            );
-        }
-        return Ok(path.clone());
-    }
-
-    let managed = work_dir()?.join("xray.exe");
-    if managed.is_file() {
-        return Ok(managed);
-    }
-    bail!(
-        "no engine yet. Either let bliss fetch one:
-
-  bliss engine install
-
-or point the profile at an xray.exe you already have:
-
-  [engine]
-  xray = \"C:/path/to/xray.exe\""
-    )
-}
-
 fn parse_log_level(s: &str) -> Result<bliss_xray::LogLevel> {
     use bliss_xray::LogLevel::*;
     Ok(match s {
@@ -693,6 +709,12 @@ fn check_one_link() -> Result<()> {
 
 fn check_profile(path: Option<PathBuf>) -> Result<()> {
     let (profile, path) = load_profile(path)?;
+    let Some(profile) = profile else {
+        bail!(
+            "no profile yet at {} — bliss writes it when a server is added in its window",
+            path.display()
+        );
+    };
 
     let (ok, failed) = profile.parse_servers();
     println!("{} — {} server(s)\n", path.display(), profile.servers.len());
@@ -729,39 +751,19 @@ fn check_profile(path: Option<PathBuf>) -> Result<()> {
 
 // --- shared ---------------------------------------------------------------
 
-fn load_profile(path: Option<PathBuf>) -> Result<(Profile, PathBuf)> {
+/// The profile a CLI command reads: the path given, which has to exist, or the
+/// default one, which may not yet. Nothing is created here — the window writes
+/// the profile once there is something to put in it.
+fn load_profile(path: Option<PathBuf>) -> Result<(Option<Profile>, PathBuf)> {
     let explicit = path.is_some();
     let path = match path {
         Some(p) => p,
         None => default_profile_path()?,
     };
-
-    // A missing profile is the first run, not an error to report in OS terms.
-    // Left alone it surfaces as "os error 3", which tells the user nothing about
-    // what to do next; so the default profile is created, with the one thing
-    // they have to fill in marked.
-    if !explicit && !path.exists() {
-        seed_profile(&path)?;
-        // Printed rather than carried in the error: color-eyre indents the
-        // continuation lines of a multi-line message, which turns instructions
-        // into a ransom note.
-        println!(
-            "bliss had no profile, so it wrote one:
-"
-        );
-        println!(
-            "  {}
-",
-            path.display()
-        );
-        println!("Open it, paste your vless:// link where the file says to, and run bliss again.");
-        bail!("no profile yet");
+    let profile = profile_file::read(&path)?;
+    if explicit && profile.is_none() {
+        bail!("there is no profile at {}", path.display());
     }
-
-    let text = std::fs::read_to_string(&path)
-        .wrap_err_with(|| format!("cannot read the profile at {}", path.display()))?;
-    let profile: Profile = toml::from_str(&text)
-        .wrap_err_with(|| format!("{} is not a valid bliss profile", path.display()))?;
     Ok((profile, path))
 }
 
@@ -793,6 +795,12 @@ fn project_dirs() -> Result<directories::ProjectDirs> {
 }
 
 fn default_profile_path() -> Result<PathBuf> {
+    // A different profile altogether, for the window and the CLI alike: for
+    // checking a change against a scratch profile rather than a real one, and
+    // for a portable setup. The work dir does not move with it.
+    if let Some(path) = std::env::var_os("BLISS_PROFILE").filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
     // %APPDATA%\bliss\bliss.toml, not the crate's config_dir(): that appends a
     // "config" folder, which is a unix habit. On Windows an app's settings live
     // directly under its own folder in Roaming, and this is a file users edit.
