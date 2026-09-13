@@ -408,8 +408,12 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
 
     rsx! {
         div {
-            style: "width:210px;flex:none;display:flex;flex-direction:column;gap:2px;\
-                    padding:12px 10px;border-right-width:1px;border-right-style:solid;border-right-color:var(--color-divider)",
+            // A card like the ones on the screens beside it, inset by the same
+            // 18px at the top and bottom that the screens pad themselves with,
+            // so its edges line up with theirs.
+            style: "width:200px;flex:none;display:flex;flex-direction:column;gap:2px;\
+                    margin:18px 0 18px 20px;padding:10px;border-radius:8px;\
+                    background-color:var(--color-surface);box-shadow:var(--shadow-sm)",
 
             NavItem {
                 label: "Подключение",
@@ -476,8 +480,10 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
             }
 
             div {
+                // A faint tint rather than the surface colour: the rail is that
+                // colour now, and the box would vanish into it.
                 style: "margin-top:auto;padding:12px;display:flex;flex-direction:column;gap:5px;\
-                        border-radius:8px;background-color:var(--color-surface)",
+                        border-radius:8px;background-color:rgba(233,233,237,.03)",
                 span {
                     style: "font-size:12px;letter-spacing:.1em;text-transform:uppercase;\
                             color:var(--color-neutral-500)",
@@ -1274,8 +1280,10 @@ fn Connections(frame: Frame) -> Element {
 
     rsx! {
         div {
+            // The same padding as the other screens, so the rail's card lines up
+            // with this one's too.
             style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
-                    padding:18px 24px 20px",
+                    padding:18px 20px",
             div { style: "display:flex;align-items:baseline;gap:10px",
                 h4 { style: "margin:0;font-size:21px", "Логи и трафик" }
                 span { style: "font-size:13.5px;color:var(--color-neutral-500)",
@@ -1370,9 +1378,11 @@ fn Connections(frame: Frame) -> Element {
                     }
                 }
             }
-        }
 
+            // Inside the padded column, not after it: a closing brace once
+            // ended the column early, and the log ran edge to edge beneath it.
             LogStrip {}
+        }
     }
 }
 
