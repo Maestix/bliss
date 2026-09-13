@@ -394,24 +394,22 @@ fn NavItem(
     enabled: bool,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
+    // State by class only. The inline style below is the same string for every
+    // item in every state, and it has to stay that way: Dioxus restores any
+    // inline property a new style string leaves out (see the note at the top of
+    // this file), so an accent bar written inline for the active item was put
+    // back on every item that had ever been clicked. The look for each state is
+    // `.nav-item`, `.nav-item.active` and `.nav-item.disabled` in app.css.
     let class = match (active, enabled) {
         (true, _) => "nav-item active",
         (false, true) => "nav-item",
         (false, false) => "nav-item disabled",
     };
-    let decoration = if active {
-        "color:var(--color-accent);box-shadow:inset 2px 0 0 var(--color-accent);\
-         background-color:rgba(145,132,217,.10);"
-    } else if enabled {
-        "color:var(--color-neutral-300);"
-    } else {
-        "color:var(--color-neutral-700);"
-    };
     rsx! {
         div {
             class: "{class}",
             style: "display:flex;align-items:center;gap:10px;padding:9px 10px;\
-                    border-radius:8px;font-size:15px;cursor:default;{decoration}",
+                    border-radius:8px;font-size:15px;cursor:default",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
@@ -1473,6 +1471,44 @@ mod tests {
                 !code.contains(unstable),
                 "{unstable:?} is a shorthand carrying a variable: the renderer destroys it \
                  when the style is rewritten"
+            );
+        }
+    }
+
+    /// The rail's look must come from its class alone.
+    ///
+    /// This bug was reported three times and declared fixed twice. The second
+    /// "fix" never reached the file — a script aborted before writing and the
+    /// change was then verified against a replica instead of against this code.
+    /// So the check is on the source of `NavItem` itself: its inline style may
+    /// not interpolate anything, because anything interpolated can vary by
+    /// state, and a state-dependent inline property is restored by the renderer
+    /// forever.
+    #[test]
+    fn the_rail_item_style_does_not_vary_by_state() {
+        let body = SOURCE
+            .split_once("fn NavItem(")
+            .expect("NavItem exists")
+            .1
+            .split_once("/// Icons follow the label's colour")
+            .expect("NavItem is followed by nav_tint")
+            .0;
+        let style = body
+            .split_once("style: \"")
+            .expect("NavItem has an inline style")
+            .1
+            .split_once("\",")
+            .expect("the style string ends")
+            .0;
+
+        assert!(
+            !style.contains('{'),
+            "NavItem's inline style interpolates a value: {style:?}"
+        );
+        for state_look in ["box-shadow", "background", "color:"] {
+            assert!(
+                !style.contains(state_look),
+                "{state_look} belongs in .nav-item.active, not inline: {style:?}"
             );
         }
     }
