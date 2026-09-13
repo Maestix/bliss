@@ -1441,7 +1441,12 @@ mod tests {
     /// quietly drifting away from the design system.
     #[test]
     fn radius_literals_match_the_design_tokens() {
-        for (token, literal) in [("--radius-sm", "4px"), ("--radius-md", "8px")] {
+        for (token, literal) in [
+            ("--radius-sm", "4px"),
+            ("--radius-md", "8px"),
+            // The toggle's pill.
+            ("--radius-lg", "14px"),
+        ] {
             let declaration = format!("{token}: {literal};");
             assert!(
                 NOCTURNE.contains(&declaration),
@@ -1450,28 +1455,40 @@ mod tests {
             );
         }
 
-        // And the form that does not survive must not creep back in. Scanned
-        // between the imports and this module, so neither the doc comment that
-        // names the bad form nor this test's own list of it counts as a hit.
-        let code = SOURCE
-            .split_once("use dioxus::prelude::*;")
-            .expect("the imports are at the top")
-            .1
-            .split_once("mod tests {")
-            .expect("the tests are at the bottom")
-            .0;
-        for unstable in [
-            "border-radius:var(",
-            "background:var(",
-            "border-right:1px solid var(",
-            "border-bottom:1px solid var(",
-            "border-top:1px solid var(",
+        // And the forms that do not survive must not creep back in, anywhere in
+        // this file. The first version of this check stopped at this test
+        // module, which left the log pane after it unguarded, and matched exact
+        // no-space spellings, so `border-radius: var(` passed. Now whitespace is
+        // stripped before matching, the value after each shorthand is inspected
+        // up to the next `;` or quote, and the marker is assembled at runtime so
+        // this test's own source never matches it.
+        // Comment lines are skipped: prose about the rule — this comment
+        // included — is not a style and must not trip it.
+        let code: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let variable = ["var", "("].concat();
+        for shorthand in [
+            "border-radius:",
+            "background:",
+            "border:",
+            "border-top:",
+            "border-right:",
+            "border-bottom:",
+            "border-left:",
         ] {
-            assert!(
-                !code.contains(unstable),
-                "{unstable:?} is a shorthand carrying a variable: the renderer destroys it \
-                 when the style is rewritten"
-            );
+            for (at, _) in code.match_indices(shorthand) {
+                let rest = &code[at + shorthand.len()..];
+                let value = &rest[..rest.find([';', '"']).unwrap_or(rest.len())];
+                assert!(
+                    !value.contains(&variable),
+                    "`{shorthand}{value}` puts a variable in a shorthand, which the renderer \
+                     destroys when the style is rewritten"
+                );
+            }
         }
     }
 
