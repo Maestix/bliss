@@ -192,6 +192,19 @@ pub fn ChevronDown(size: u32, color: String) -> Element {
     }
 }
 
+/// A closed group, which a click opens.
+#[component]
+pub fn ChevronRight(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M9.2 6.6 14.6 12 9.2 17.4" }
+        }
+    }
+}
+
 #[component]
 pub fn Pencil(size: u32, color: String) -> Element {
     rsx! {

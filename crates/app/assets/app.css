@@ -154,7 +154,7 @@ body { font-size: 16px; user-select: none; cursor: default; }
    dead: nothing changed under the mouse, not even the cursor. No inline style
    in ui.rs sets a cursor, because an inline one beats any class. */
 .act, .tab, .nav-item, .srv, .row, .logline, .ring, .choice, .seg-choice,
-.pill-choice, .menu-item, .icon-btn, .sort { cursor: pointer; }
+.pill-choice, .menu-item, .icon-btn, .sort, .group-head { cursor: pointer; }
 .act.disabled, .nav-item.disabled, .icon-btn.disabled { cursor: default; }
 .act:not(.disabled):active { background-color: rgba(239, 232, 245, .12); }
 
@@ -318,3 +318,25 @@ body { font-size: 16px; user-select: none; cursor: default; }
   background-color: #120c1a; box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10);
 }
 .search:focus-within { box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .45); }
+
+/* The rule filter beside the search: a hairline like the search box's, pink
+   while a rule is chosen, and a list that drops from it. */
+.filter { color: var(--color-neutral-300); box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10); }
+.filter.on { color: var(--color-accent); box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .45); }
+.dropdown {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 31;
+  width: 290px; max-height: 340px; overflow-y: scroll; overflow-x: hidden; padding: 6px;
+  border-radius: 8px; background-color: #251c31;
+  box-shadow: 0 0 0 1px #3f374d, 0 14px 34px rgba(0, 0, 0, .55);
+  animation: bliss-pop .12s ease-out;
+}
+.menu-item.chosen { color: var(--color-accent); background-color: rgba(238, 130, 196, .08); }
+.menu-item.quiet { color: var(--color-neutral-600); }
+.menu-count { flex: none; font-size: 12.5px; color: var(--color-neutral-600); font-variant-numeric: tabular-nums; }
+
+/* A subscription's heading in the server list, and each server's bin: always
+   there, quiet until its row is under the pointer. */
+.group-head { transition: background-color .14s ease; }
+.group-head:hover { background-color: rgba(239, 232, 245, .05); }
+.srv-tools { display: flex; justify-content: flex-end; opacity: .4; transition: opacity .14s ease; }
+.srv:hover .srv-tools { opacity: 1; }

@@ -77,6 +77,8 @@ pub struct ServerRow {
     pub current: bool,
     /// The subscription it came from, by name; `None` for one added by hand.
     pub group: Option<String>,
+    /// The same subscription by id, which two subscriptions cannot share.
+    pub group_id: Option<String>,
 }
 
 /// One rule, as the routing screen shows it.
@@ -294,6 +296,13 @@ pub enum Command {
     /// Fetch one subscription again, or every one.
     Refresh(Option<String>),
     DeleteSubscription(String),
+    /// Remove the server at this place in the list. Its tag travels with the
+    /// index, so a list that changed in the meantime is noticed rather than
+    /// the server that moved into that place deleted.
+    DeleteServer {
+        index: usize,
+        tag: String,
+    },
     /// A fetch finished. Only the engine sends this, to itself.
     Fetched(FetchDone),
     /// Show one of bliss's own folders to the user.
@@ -435,7 +444,7 @@ fn initial_frame(setup: &Setup) -> Frame {
 /// subscription it came from.
 fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> Vec<ServerRow> {
     // In step with `servers`, which holds the entries that parse, in order.
-    let groups: Vec<Option<String>> = profile
+    let groups: Vec<Option<(String, String)>> = profile
         .servers
         .iter()
         .filter(|entry| entry.parse().is_ok())
@@ -445,19 +454,23 @@ fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> 
                 .subscriptions
                 .iter()
                 .find(|subscription| subscription.id == id)
-                .map(|subscription| subscription.name.clone())
+                .map(|subscription| (subscription.id.clone(), subscription.name.clone()))
         })
         .collect();
     servers
         .iter()
         .enumerate()
-        .map(|(i, server)| ServerRow {
-            tag: server.tag.clone(),
-            addr: format!("{}:{}", server.address, server.port),
-            kind: how_it_hides(server),
-            ping: Ping::Unknown,
-            current: i == selected,
-            group: groups.get(i).cloned().flatten(),
+        .map(|(i, server)| {
+            let group = groups.get(i).cloned().flatten();
+            ServerRow {
+                tag: server.tag.clone(),
+                addr: format!("{}:{}", server.address, server.port),
+                kind: how_it_hides(server),
+                ping: Ping::Unknown,
+                current: i == selected,
+                group_id: group.as_ref().map(|(id, _)| id.clone()),
+                group: group.map(|(_, name)| name),
+            }
         })
         .collect()
 }
@@ -868,6 +881,53 @@ async fn drive(
                                     ),
                                     false,
                                 );
+                                if lost {
+                                    follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
+                                        .await;
+                                }
+                            }
+                            Err(e) => toaster.show(&frames, e, true),
+                        }
+                    }
+                    Command::DeleteServer { index, tag } => {
+                        let links = links_of(&setup.profile);
+                        let was = links.get(selected).cloned();
+                        let Some(link) = setup
+                            .servers
+                            .get(index)
+                            .filter(|server| server.tag == tag)
+                            .and(links.get(index))
+                            .cloned()
+                        else {
+                            toaster.show(&frames, "этого сервера уже нет — список успел измениться", true);
+                            continue;
+                        };
+                        let mut next = setup.profile.clone();
+                        let deleted = crate::profile_file::delete_server(&mut next, &link)
+                            .and_then(|entry| save_profile(&mut store, &next).map(|()| entry));
+                        match deleted {
+                            Ok(entry) => {
+                                tracing::info!("server removed: {tag}");
+                                let from = entry
+                                    .group
+                                    .as_deref()
+                                    .and_then(|id| setup.profile.subscriptions.iter().find(|s| s.id == id))
+                                    .map(|subscription| subscription.name.clone());
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                let lost = reload_servers(&mut setup, &mut selected, was, &frames);
+                                publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                                // Said plainly: one from a subscription is back
+                                // with its next update, as in v2rayN.
+                                let text = match from {
+                                    Some(name) => format!(
+                                        "Сервер «{tag}» удалён. Он вернётся при следующем обновлении подписки «{name}»"
+                                    ),
+                                    None => format!("Сервер «{tag}» удалён"),
+                                };
+                                toaster.show(&frames, text, false);
+                                // The rows came back without their numbers.
+                                ping_all(&setup.servers, &frames, &probes);
                                 if lost {
                                     follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
                                         .await;
