@@ -123,6 +123,14 @@ static TABLE_SORT: GlobalSignal<Sort> = Signal::global(|| Sort::Newest);
 static ROW_MENU: GlobalSignal<Option<RowMenu>> = Signal::global(|| None);
 /// The rule editor, while it is open. Global for the same reason.
 static DRAFT: GlobalSignal<Option<Draft>> = Signal::global(|| None);
+/// The rule the connections table is narrowed to; `None` for every rule.
+static TABLE_RULE: GlobalSignal<Option<String>> = Signal::global(|| None);
+/// Whether the list of rules to narrow the table to is open.
+static RULE_MENU: GlobalSignal<bool> = Signal::global(|| false);
+/// Subscription groups in the server list someone opened or closed, by id.
+/// The rest are open only while they hold the server in use.
+static GROUP_OPEN: GlobalSignal<std::collections::HashMap<String, bool>> =
+    Signal::global(std::collections::HashMap::new);
 
 /// How the connections table is ordered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,6 +365,7 @@ fn App() -> Element {
                     }),
                     "escape" => {
                         *ROW_MENU.write() = None;
+                        *RULE_MENU.write() = false;
                         *DRAFT.write() = None;
                     }
                     _ => {}
@@ -1055,14 +1064,16 @@ fn TrafficTab(frame: Frame) -> Element {
 /// there is nothing to reload — so the row does not pretend to be instant.
 #[component]
 fn ServersTab(frame: Frame) -> Element {
-    const COLUMNS: &str = "grid-template-columns:1.2fr 1.4fr 118px 78px;gap:12px";
     let controller = use_context::<Controller>();
     let probing = sweeping(&frame);
+    // A delete clicked once, by the row's place in the list; the second deletes.
+    let armed = use_signal(|| None::<usize>);
+    let sections = server_sections(&frame.servers, &GROUP_OPEN());
 
     rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:7px",
             div {
-                style: "display:grid;{COLUMNS};padding:0 10px 6px;font-size:12px;\
+                style: "display:grid;{SERVER_COLUMNS};padding:0 10px 6px;font-size:12px;\
                         letter-spacing:.09em;text-transform:uppercase;\
                         color:var(--color-neutral-500);\
                         border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--color-divider)",
@@ -1070,6 +1081,7 @@ fn ServersTab(frame: Frame) -> Element {
                 span { "Адрес" }
                 span { "Защита" }
                 span { style: "text-align:right", "Отклик" }
+                span {}
             }
 
             div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
@@ -1078,38 +1090,54 @@ fn ServersTab(frame: Frame) -> Element {
                         "Серверов пока нет — вставьте ссылку vless:// в поле ниже или нажмите Ctrl+V."
                     }
                 }
-                for (index, server) in frame.servers.iter().enumerate() {
-                    div {
-                        key: "{index}",
-                        class: if server.current { "srv current" } else { "srv" },
-                        // Marked by class, not by inline style: see the note in
-                        // NavItem. A property that vanishes from a style string
-                        // is restored by the renderer, so the previous server
-                        // would keep its marker after a switch.
-                        style: "display:grid;{COLUMNS};align-items:center;padding:8px 10px;\
-                                border-radius:4px",
-                        onclick: {
-                            let controller = controller.clone();
-                            move |_| controller.send(Command::Select(index))
-                        },
-                        div { style: "display:flex;flex-direction:column;min-width:0",
-                            span { style: "font-size:14.5px", "{elide(&server.tag, 22)}" }
-                            if let Some(group) = &server.group {
-                                span { style: "font-size:12px;color:var(--color-neutral-600)",
-                                    "{elide(group, 26)}"
+                for section in sections {
+                    // A subscription's servers sit under its name, closed
+                    // unless the server in use is among them.
+                    if let Some((id, name)) = section.group.clone() {
+                        div {
+                            key: "head-{id}",
+                            class: "group-head",
+                            style: "display:flex;align-items:center;gap:9px;margin-top:4px;\
+                                    padding:9px 10px;border-radius:4px",
+                            onclick: {
+                                let open = section.open;
+                                move |_| {
+                                    GROUP_OPEN.write().insert(id.clone(), !open);
+                                }
+                            },
+                            if section.open {
+                                crate::icons::ChevronDown { size: 15, color: MUTED }
+                            } else {
+                                crate::icons::ChevronRight { size: 15, color: MUTED }
+                            }
+                            crate::icons::Rss { size: 14, color: ACCENT }
+                            span {
+                                style: "font-size:14px;font-weight:700;min-width:0;overflow:hidden;\
+                                        white-space:nowrap",
+                                "{elide(&name, 34)}"
+                            }
+                            span {
+                                style: "font-size:12.5px;color:var(--color-neutral-600);white-space:nowrap",
+                                "{plural(section.rows.len() as u64, \"сервер\", \"сервера\", \"серверов\")}"
+                            }
+                            if !section.open && section.has_current {
+                                span {
+                                    style: "margin-left:auto;font-size:12.5px;white-space:nowrap;\
+                                            color:var(--color-accent-300)",
+                                    "здесь текущий сервер"
                                 }
                             }
                         }
-                        span {
-                            style: "font-size:13.5px;color:var(--color-neutral-400);\
-                                    font-family:ui-monospace,Consolas,monospace",
-                            "{elide(&server.addr, 26)}"
-                        }
-                        span { style: "font-size:13px;color:var(--color-neutral-500)", "{server.kind}" }
-                        span {
-                            style: "text-align:right;font-size:13.5px;\
-                                    font-variant-numeric:tabular-nums;color:{ping_tone(server.ping)}",
-                            "{ping_text(server.ping)}"
+                    }
+                    if section.open {
+                        for index in section.rows.iter().copied() {
+                            ServerLine {
+                                key: "{index}",
+                                index,
+                                server: frame.servers[index].clone(),
+                                grouped: section.group.is_some(),
+                                armed,
+                            }
                         }
                     }
                 }
@@ -1421,9 +1449,21 @@ fn Connections(frame: Frame) -> Element {
     let mut copied = use_signal(String::new);
     let note = copied();
     let query = TABLE_QUERY();
-    let rows = table_rows(&frame.connections, &query, TABLE_SORT());
-    // The menu belongs to this screen; leaving the screen closes it.
-    use_drop(|| *ROW_MENU.write() = None);
+    let rule = TABLE_RULE();
+    let rows = table_rows(&frame.connections, &query, rule.as_deref(), TABLE_SORT());
+    let choices = rule_choices(&frame.routing, &frame.connections);
+    let narrowed = !query.trim().is_empty() || rule.is_some();
+    let nothing = match &rule {
+        Some(rule) if query.trim().is_empty() => {
+            format!("Сейчас нет соединений по правилу «{}».", elide(rule, 32))
+        }
+        _ => format!("Ничего не нашлось по «{}».", elide(&query, 32)),
+    };
+    // The menus belong to this screen; leaving the screen closes them.
+    use_drop(|| {
+        *ROW_MENU.write() = None;
+        *RULE_MENU.write() = false;
+    });
 
     rsx! {
         div {
@@ -1473,7 +1513,7 @@ fn Connections(frame: Frame) -> Element {
                         class: "field bare",
                         r#type: "text",
                         value: "{query}",
-                        placeholder: "Программа, адрес или правило",
+                        placeholder: "Программа или адрес",
                         autocomplete: "off",
                         spellcheck: "false",
                         style: "flex:1;min-width:0;padding:7px 0;border:none;\
@@ -1489,12 +1529,13 @@ fn Connections(frame: Frame) -> Element {
                         }
                     }
                 }
+                RuleFilter { choices, total: frame.connections.len() }
                 span {
                     style: "flex:1 1 0;font-size:12.5px;color:var(--color-neutral-600);min-width:0;\
                             overflow:hidden;white-space:nowrap",
                     if !note.is_empty() {
                         "{note}"
-                    } else if !query.is_empty() {
+                    } else if narrowed {
                         "показано {rows.len()} из {frame.connections.len()}"
                     } else {
                         "правый клик по строке — правило для её программы или сайта"
@@ -1522,7 +1563,7 @@ fn Connections(frame: Frame) -> Element {
                 } else if rows.is_empty() {
                     div {
                         style: "padding:28px 8px;font-size:14.5px;color:var(--color-neutral-600)",
-                        "Ничего не нашлось по «{elide(&query, 32)}»."
+                        "{nothing}"
                     }
                 }
                 for row in rows.iter().copied() {
@@ -2296,22 +2337,120 @@ mod tests {
             row(2, "b.example:443", Some("telegram.exe"), 900, 5),
             row(1, "c.example:443", None, 50, 50),
         ];
+        let mut rows = rows;
+        rows[1].rule = "Локальная сеть".to_owned();
         let ids =
             |shown: Vec<&bliss_core::Snapshot>| shown.iter().map(|r| r.id).collect::<Vec<_>>();
-        assert_eq!(ids(table_rows(&rows, "", Sort::Newest)), [3, 2, 1]);
+        assert_eq!(ids(table_rows(&rows, "", None, Sort::Newest)), [3, 2, 1]);
         assert_eq!(
-            ids(table_rows(&rows, "CHROME", Sort::Newest)),
+            ids(table_rows(&rows, "CHROME", None, Sort::Newest)),
             [3],
             "any case"
         );
         assert_eq!(
-            ids(table_rows(&rows, " example ", Sort::DownMost)),
+            ids(table_rows(&rows, " example ", None, Sort::DownMost)),
             [2, 1, 3]
         );
-        assert_eq!(ids(table_rows(&rows, "", Sort::DownLeast)), [3, 1, 2]);
-        assert_eq!(ids(table_rows(&rows, "", Sort::UpMost)), [3, 1, 2]);
-        assert_eq!(ids(table_rows(&rows, "", Sort::UpLeast)), [2, 1, 3]);
-        assert!(table_rows(&rows, "nothing", Sort::Newest).is_empty());
+        assert_eq!(ids(table_rows(&rows, "", None, Sort::DownLeast)), [3, 1, 2]);
+        assert_eq!(ids(table_rows(&rows, "", None, Sort::UpMost)), [3, 1, 2]);
+        assert_eq!(ids(table_rows(&rows, "", None, Sort::UpLeast)), [2, 1, 3]);
+        assert!(table_rows(&rows, "nothing", None, Sort::Newest).is_empty());
+
+        // A rule is chosen from its list, not typed: its name is not in the
+        // table, and a search that matched it found rows showing no reason.
+        assert!(table_rows(&rows, "Локальная", None, Sort::Newest).is_empty());
+        let local = Some("Локальная сеть");
+        assert_eq!(ids(table_rows(&rows, "", local, Sort::Newest)), [2]);
+        assert!(table_rows(&rows, "chrome", local, Sort::Newest).is_empty());
+    }
+
+    #[test]
+    fn the_rule_list_offers_every_rule_with_its_count() {
+        let row = |id: u64, rule: &str| bliss_core::Snapshot {
+            id,
+            target: "a.example:443".to_owned(),
+            route: bliss_core::Route::Proxy,
+            rule: rule.to_owned(),
+            process: None,
+            opened_at: jiff::Timestamp::UNIX_EPOCH,
+            closed_at: None,
+            up: 0,
+            down: 0,
+        };
+        let rule = |position: usize, name: &str| crate::engine::RuleView {
+            position,
+            name: name.to_owned(),
+            action: Action::Direct,
+            conditions: Vec::new(),
+        };
+        let routing = crate::engine::RoutingView {
+            rules: vec![rule(1, "Реклама"), rule(2, "Локальная сеть")],
+            ..Default::default()
+        };
+        let rows = [
+            row(1, "по умолчанию"),
+            row(2, "Локальная сеть"),
+            row(3, "по умолчанию"),
+            row(4, "удалённое"),
+        ];
+        assert_eq!(
+            rule_choices(&routing, &rows),
+            [
+                ("Реклама".to_owned(), 0),
+                ("Локальная сеть".to_owned(), 1),
+                ("по умолчанию".to_owned(), 2),
+                // A rule deleted since still decided a connection on screen.
+                ("удалённое".to_owned(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn subscription_servers_are_grouped_and_open_where_the_server_in_use_is() {
+        use crate::engine::ServerRow;
+        let server = |tag: &str, group: Option<(&str, &str)>, current: bool| ServerRow {
+            tag: tag.to_owned(),
+            current,
+            group_id: group.map(|(id, _)| id.to_owned()),
+            group: group.map(|(_, name)| name.to_owned()),
+            ..ServerRow::default()
+        };
+        let one = Some(("s1", "Провайдер"));
+        let two = Some(("s2", "Второй"));
+        let servers = [
+            server("mine", None, false),
+            server("a", one, false),
+            server("b", one, true),
+            server("c", two, false),
+            server("also mine", None, false),
+        ];
+
+        let sections = server_sections(&servers, &Default::default());
+        let shape: Vec<(Option<&str>, Vec<usize>, bool)> = sections
+            .iter()
+            .map(|s| {
+                (
+                    s.group.as_ref().map(|(id, _)| id.as_str()),
+                    s.rows.clone(),
+                    s.open,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (None, vec![0, 4], true),
+                (Some("s1"), vec![1, 2], true),
+                (Some("s2"), vec![3], false),
+            ]
+        );
+
+        // Opened or closed by hand, a group stays that way.
+        let chosen =
+            std::collections::HashMap::from([("s1".to_owned(), false), ("s2".to_owned(), true)]);
+        let sections = server_sections(&servers, &chosen);
+        assert!(!sections[1].open && sections[1].has_current);
+        assert!(sections[2].open);
     }
 
     #[test]
@@ -2659,25 +2798,28 @@ fn choice_class(base: &str, on: bool, action: Action) -> String {
 
 // --- the connections table ----------------------------------------------------
 
-/// The connections the table shows: those matching the search, in the order
-/// asked for. A stable sort, so rows with equal traffic keep the engine's
-/// newest-first order.
+/// The connections the table shows: those matching the search and decided by
+/// the chosen rule, in the order asked for. A stable sort, so rows with equal
+/// traffic keep the engine's newest-first order.
 fn table_rows<'a>(
     rows: &'a [bliss_core::Snapshot],
     query: &str,
+    rule: Option<&str>,
     sort: Sort,
 ) -> Vec<&'a bliss_core::Snapshot> {
     let query = query.trim().to_lowercase();
     let mut shown: Vec<&bliss_core::Snapshot> = rows
         .iter()
+        .filter(|row| rule.is_none_or(|rule| row.rule == rule))
         .filter(|row| {
+            // Only what the table shows. A rule's name is not in it, so the
+            // search used to match rows for a reason nobody could see.
             query.is_empty()
                 || row.target.to_lowercase().contains(&query)
                 || row
                     .process
                     .as_deref()
                     .is_some_and(|process| process.to_lowercase().contains(&query))
-                || row.rule.to_lowercase().contains(&query)
         })
         .collect();
     match sort {
@@ -3161,6 +3303,248 @@ fn RuleEditor(draft: Draft) -> Element {
                         onclick: move |_| save(),
                         icon: rsx! { crate::icons::Check { size: 15, color: ACCENT } },
                     }
+                }
+            }
+        }
+    }
+}
+
+// --- narrowing the table to one rule ------------------------------------------
+
+/// The rules to narrow the connections table to, each with how many of the
+/// rows it decided: the routing table's rules in their order, then
+/// "по умолчанию", then any name only the rows still carry — a rule deleted or
+/// renamed since it decided them.
+fn rule_choices(
+    routing: &crate::engine::RoutingView,
+    rows: &[bliss_core::Snapshot],
+) -> Vec<(String, usize)> {
+    /// What the router calls a decision no rule made.
+    const FALLBACK: &str = "по умолчанию";
+    let mut names: Vec<String> = Vec::new();
+    let named = routing
+        .rules
+        .iter()
+        .map(|rule| rule.name.as_str())
+        .chain(std::iter::once(FALLBACK))
+        .chain(rows.iter().map(|row| row.rule.as_str()));
+    for name in named {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let count = rows.iter().filter(|row| row.rule == name).count();
+            (name, count)
+        })
+        .collect()
+}
+
+/// Narrows the connections table to what one rule decided.
+///
+/// A list rather than words in the search box: a rule's name is not shown in
+/// the table, so typing one matched rows for a reason nobody could see.
+#[component]
+fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
+    let chosen = TABLE_RULE();
+    let open = RULE_MENU();
+    let label = match &chosen {
+        Some(rule) => elide(rule, 22),
+        None => "все правила".to_owned(),
+    };
+    rsx! {
+        div { style: "position:relative;flex:none",
+            div {
+                class: if chosen.is_some() { "act filter on" } else { "act filter" },
+                style: "display:inline-flex;align-items:center;gap:7px;padding:6px 10px 6px 11px;\
+                        border-radius:4px;font-size:13.5px;white-space:nowrap",
+                title: "Показать соединения одного правила",
+                onclick: move |_| {
+                    let now = RULE_MENU();
+                    *RULE_MENU.write() = !now;
+                },
+                crate::icons::Split { size: 14, color: if chosen.is_some() { ACCENT } else { MUTED } }
+                "{label}"
+                crate::icons::ChevronDown { size: 14, color: MUTED }
+            }
+            if open {
+                div { class: "menu-veil", onclick: move |_| *RULE_MENU.write() = false }
+                div { class: "dropdown",
+                    div {
+                        class: if chosen.is_none() { "menu-item chosen" } else { "menu-item" },
+                        onclick: move |_| {
+                            *TABLE_RULE.write() = None;
+                            *RULE_MENU.write() = false;
+                        },
+                        span { style: "flex:1", "Все правила" }
+                        span { class: "menu-count", "{total}" }
+                    }
+                    div { class: "menu-sep" }
+                    for (name, count) in choices {
+                        div {
+                            key: "{name}",
+                            class: if chosen.as_deref() == Some(name.as_str()) {
+                                "menu-item chosen"
+                            } else if count == 0 {
+                                "menu-item quiet"
+                            } else {
+                                "menu-item"
+                            },
+                            onclick: {
+                                let name = name.clone();
+                                move |_| {
+                                    *TABLE_RULE.write() = Some(name.clone());
+                                    *RULE_MENU.write() = false;
+                                }
+                            },
+                            span { style: "flex:1;min-width:0;overflow:hidden;white-space:nowrap",
+                                "{elide(&name, 30)}"
+                            }
+                            span { class: "menu-count", "{count}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- the server list ------------------------------------------------------------
+
+/// The server list's columns: name, address, protection, ping, and the bin.
+const SERVER_COLUMNS: &str = "grid-template-columns:1.2fr 1.4fr 118px 78px 30px;gap:12px";
+
+/// A run of the server list: the servers added by hand, or one subscription's.
+#[derive(Clone, Debug, PartialEq)]
+struct Section {
+    /// The subscription's id and name; `None` for servers added by hand.
+    group: Option<(String, String)>,
+    /// Places in `frame.servers`, which is what a click selects by.
+    rows: Vec<usize>,
+    open: bool,
+    has_current: bool,
+}
+
+/// The server list in sections: servers added by hand first, then each
+/// subscription's under its name, in the order they first appear.
+///
+/// A subscription can bring hundreds of servers, so its group starts closed,
+/// unless the server in use is in it; a group someone opened or closed stays
+/// the way they left it (`open`).
+fn server_sections(
+    servers: &[crate::engine::ServerRow],
+    open: &std::collections::HashMap<String, bool>,
+) -> Vec<Section> {
+    let mine: Vec<usize> = servers
+        .iter()
+        .enumerate()
+        .filter(|(_, server)| server.group_id.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    let mut sections = Vec::new();
+    if !mine.is_empty() {
+        sections.push(Section {
+            group: None,
+            rows: mine,
+            open: true,
+            has_current: false,
+        });
+    }
+    for (i, server) in servers.iter().enumerate() {
+        let Some(id) = &server.group_id else {
+            continue;
+        };
+        let existing = sections
+            .iter_mut()
+            .find(|section| section.group.as_ref().is_some_and(|(known, _)| known == id));
+        match existing {
+            Some(section) => {
+                section.rows.push(i);
+                section.has_current |= server.current;
+            }
+            None => sections.push(Section {
+                group: Some((id.clone(), server.group.clone().unwrap_or_default())),
+                rows: vec![i],
+                open: false,
+                has_current: server.current,
+            }),
+        }
+    }
+    for section in &mut sections {
+        if let Some((id, _)) = &section.group {
+            section.open = open.get(id).copied().unwrap_or(section.has_current);
+        }
+    }
+    sections
+}
+
+/// One server: a click switches to it, the bin deletes it after a second click.
+#[component]
+fn ServerLine(
+    index: usize,
+    server: crate::engine::ServerRow,
+    grouped: bool,
+    mut armed: Signal<Option<usize>>,
+) -> Element {
+    let controller = use_context::<Controller>();
+    let select = controller.clone();
+    let arming = armed() == Some(index);
+    let name = elide(&server.tag, 22);
+    let tag = server.tag.clone();
+    // Indented under its subscription's name. Always present, so a changing
+    // value is all the renderer ever sees here (the note at the top).
+    let left = if grouped { 30 } else { 10 };
+    let title = if arming {
+        "Нажмите ещё раз, чтобы удалить"
+    } else if server.group.is_some() {
+        "Удалить — вернётся при обновлении подписки"
+    } else {
+        "Удалить"
+    };
+    rsx! {
+        div {
+            // Marked by class, not by inline style: see the note in NavItem. A
+            // property that vanishes from a style string is restored by the
+            // renderer, so the previous server would keep its marker.
+            class: if server.current { "srv current" } else { "srv" },
+            style: "display:grid;{SERVER_COLUMNS};align-items:center;padding:8px 10px 8px {left}px;\
+                    border-radius:4px",
+            onclick: move |_| select.send(Command::Select(index)),
+            onmouseleave: move |_| {
+                if armed() == Some(index) {
+                    armed.set(None);
+                }
+            },
+            span { style: "font-size:14.5px;min-width:0;overflow:hidden;white-space:nowrap", "{name}" }
+            span {
+                style: "font-size:13.5px;color:var(--color-neutral-400);\
+                        font-family:ui-monospace,Consolas,monospace",
+                "{elide(&server.addr, 26)}"
+            }
+            span { style: "font-size:13px;color:var(--color-neutral-500)", "{server.kind}" }
+            span {
+                style: "text-align:right;font-size:13.5px;\
+                        font-variant-numeric:tabular-nums;color:{ping_tone(server.ping)}",
+                "{ping_text(server.ping)}"
+            }
+            div { class: "srv-tools",
+                IconButton {
+                    title,
+                    enabled: true,
+                    danger: true,
+                    onclick: move |_| {
+                        if armed() == Some(index) {
+                            armed.set(None);
+                            controller.send(Command::DeleteServer { index, tag: tag.clone() });
+                        } else {
+                            armed.set(Some(index));
+                        }
+                    },
+                    icon: rsx! {
+                        crate::icons::Trash { size: 14, color: if arming { BAD } else { MUTED } }
+                    },
                 }
             }
         }

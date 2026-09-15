@@ -434,8 +434,8 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     `code` so a Russian layout works) and `escape` back to `App`; it leaves text
     boxes alone and does nothing while a `[data-modal]` element is open. Blitz
     runs no script, so a Blitz build would need another way. What Esc closes
-    lives in global signals (`ROW_MENU`, `DRAFT`), cleared in `use_drop` by the
-    screen that owns them, or they reopen on its next visit.
+    lives in global signals (`ROW_MENU`, `RULE_MENU`, `DRAFT`), cleared in
+    `use_drop` by the screen that owns them, or they reopen on its next visit.
 15. **A dialog is never taller than the window.** `.dialog-card` has a
     `max-height` and only `.dialog-body` scrolls. The first rule editor grew
     with its hints, and in the default window the geoip note pushed Save and
@@ -570,10 +570,12 @@ and rules from a right-click on a connection; search and sorting in the
 connections table and a resizable log; Ctrl+V for links, lists and
 subscriptions; subscriptions (1.6: base64 or plain lists, `subscription-userinfo`
 and `profile-title`, a refresh every 12 hours, through the tunnel when it is
-up); zoom with the window size; no console window. The tunnel already starts
-with the window (`Setup.autostart`).
+up); zoom with the window size; no console window; deleting servers, a
+subscription's servers grouped under its name, a rule filter for the
+connections table, and log levels in colour. The tunnel already starts with the
+window (`Setup.autostart`).
 
-**Open:** deleting and renaming servers; a settings screen (ports, the engine,
+**Open:** renaming servers; a settings screen (ports, the engine,
 installing it with a button); UDP ASSOCIATE; an idle timeout for half-open
 connections; tray and start-with-Windows via Task Scheduler (1.8); the 12-hour
 memory run.

@@ -589,6 +589,19 @@ pub fn delete_subscription(profile: &mut Profile, id: &str) -> Result<Subscripti
     Ok(profile.subscriptions.remove(at))
 }
 
+/// Remove one server, found by its link.
+///
+/// One that came from a subscription is back with the subscription's next
+/// update, the way it is in v2rayN; the window says so when it happens.
+pub fn delete_server(profile: &mut Profile, link: &str) -> Result<ServerEntry, String> {
+    let at = profile
+        .servers
+        .iter()
+        .position(|s| s.link == link)
+        .ok_or_else(|| "этого сервера уже нет".to_owned())?;
+    Ok(profile.servers.remove(at))
+}
+
 /// Why a pasted link was refused, in words for the window.
 ///
 /// By variant rather than from the error's text, which is English and meant
@@ -963,6 +976,20 @@ mod tests {
         let site = Subject::Site("googlevideo.com".to_owned());
         assert_eq!(route_one(&mut profile, &site, Action::Direct), 4);
         assert_eq!(profile.routing.rules[4].domain, ["googlevideo.com"]);
+    }
+
+    #[test]
+    fn a_server_is_deleted_by_its_link_and_only_that_one() {
+        let mut profile = Profile::default();
+        add_server(&mut profile, FIRST).expect("added");
+        add_server(&mut profile, SECOND).expect("added");
+        assert_eq!(
+            delete_server(&mut profile, FIRST).expect("deleted").link,
+            FIRST
+        );
+        assert_eq!(links(&profile), [SECOND]);
+        assert!(delete_server(&mut profile, FIRST).is_err(), "gone already");
+        assert_eq!(links(&profile), [SECOND]);
     }
 
     #[test]
