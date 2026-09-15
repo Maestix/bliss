@@ -57,14 +57,27 @@ const APP_CSS: &str = include_str!("../assets/app.css");
 const SCENE: &[u8] = include_bytes!("../assets/status-card.jpg");
 /// How app.css names the scene, for `STYLES` to replace.
 const SCENE_URL: &str = "url(status-card.jpg)";
+/// Comfortaa, subset to what the window draws; see the @font-face in theme.css.
+const FONT: &[u8] = include_bytes!("../assets/comfortaa.woff2");
+/// How theme.css names the font, for `THEME_STYLES` to replace.
+const FONT_URL: &str = "url(comfortaa.woff2)";
 
-/// app.css with the scene inlined as a data URI, so the picture ships inside
-/// bliss.exe the way the stylesheets do. Built once: `App` renders twice a
-/// second and should not encode a picture every time.
-static STYLES: LazyLock<String> = LazyLock::new(|| {
-    let data = base64::engine::general_purpose::STANDARD.encode(SCENE);
-    APP_CSS.replace(SCENE_URL, &format!("url(data:image/jpeg;base64,{data})"))
-});
+/// A `url(...)` holding the file's bytes, so the file ships inside bliss.exe
+/// the way the stylesheets do instead of having to sit next to it.
+fn data_url(mime: &str, bytes: &[u8]) -> String {
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("url(data:{mime};base64,{data})")
+}
+
+/// app.css with the scene inlined. Built once: encoding a picture on every
+/// render would be work for nothing.
+static STYLES: LazyLock<String> =
+    LazyLock::new(|| APP_CSS.replace(SCENE_URL, &data_url("image/jpeg", SCENE)));
+
+/// theme.css with the font inlined. Nothing is fetched: the window opens before
+/// the tunnel, for people whose network may well block a font CDN.
+static THEME_STYLES: LazyLock<String> =
+    LazyLock::new(|| THEME.replace(FONT_URL, &data_url("font/woff2", FONT)));
 
 /// This file, so a test can check the styles in it rather than trust a rule to
 /// be remembered. See `radius_literals_match_the_design_tokens`.
@@ -72,7 +85,9 @@ static STYLES: LazyLock<String> = LazyLock::new(|| {
 const SOURCE: &str = include_str!("ui.rs");
 
 /// The wrapper every screen sits in, so the fade-in has something to animate.
-const SCREEN: &str = "flex:1;min-height:0;display:flex;flex-direction:column";
+/// `min-width:0` so a line that must not wrap clips inside the screen instead
+/// of stretching it past the window's edge.
+const SCREEN: &str = "flex:1;min-height:0;min-width:0;display:flex;flex-direction:column";
 /// Soft pink, `--color-accent` in theme.css: what is on, chosen or clickable.
 const ACCENT: &str = "#ee82c4";
 /// Neutral-400: window controls and anything else that should recede.
@@ -284,12 +299,13 @@ fn App() -> Element {
 /// Both stylesheets, in a component of their own so they render once.
 ///
 /// A component without props is never re-run by its parent. Inline in `App`,
-/// which renders twice a second, every render copied about 44 KB of CSS into
-/// fresh strings only to find them unchanged.
+/// which renders twice a second, every render copied the whole CSS — the font
+/// and the picture inlined in it, about a hundred kilobytes — into fresh
+/// strings only to find them unchanged.
 #[component]
 fn Styles() -> Element {
     rsx! {
-        style { dangerous_inner_html: THEME }
+        style { dangerous_inner_html: THEME_STYLES.as_str() }
         style { dangerous_inner_html: STYLES.as_str() }
     }
 }
@@ -419,8 +435,9 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
         div {
             // A card like the ones on the screens beside it, inset by the same
             // 18px at the top and bottom that the screens pad themselves with,
-            // so its edges line up with theirs.
-            style: "width:200px;flex:none;display:flex;flex-direction:column;gap:2px;\
+            // so its edges line up with theirs. 216px is what «Маршрутизация»
+            // and a two-digit count need in Comfortaa at 14px.
+            style: "width:216px;flex:none;display:flex;flex-direction:column;gap:2px;\
                     margin:18px 0 18px 20px;padding:10px;border-radius:8px;\
                     background-color:var(--color-surface);box-shadow:var(--shadow-sm)",
 
@@ -533,8 +550,8 @@ fn NavItem(
     rsx! {
         div {
             class: "{class}",
-            style: "display:flex;align-items:center;gap:10px;padding:9px 10px;\
-                    border-radius:8px;font-size:15px;cursor:default",
+            style: "display:flex;align-items:center;gap:9px;padding:9px 10px;\
+                    border-radius:8px;font-size:14px;cursor:default",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
@@ -571,8 +588,8 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                     padding:18px 20px;overflow:hidden",
 
             div { style: "display:flex;align-items:baseline;gap:10px",
-                h4 { style: "margin:0;font-size:21px", "Подключение" }
-                span { style: "font-size:13.5px;color:var(--color-neutral-500)",
+                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Подключение" }
+                span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{elide(&frame.server_tag, 40)}"
                 }
             }
@@ -673,11 +690,12 @@ fn StatusCards(frame: Frame) -> Element {
                     onclick: move |_| controller.send(Command::Toggle { was_on: on }),
                     crate::icons::Power { size: 28, color: tone }
                 }
-                div { style: "display:flex;flex-direction:column;gap:4px;min-width:0",
+                    // Clips on a narrow card instead of running under the switch beside it.
+                    div { style: "display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden",
                     span {
                         // Longhands, not the `font:` shorthand: see the
                         // note at the top of this file.
-                        style: "font-weight:500;font-size:25px;line-height:1.1;\
+                        style: "font-weight:700;font-size:25px;line-height:1.1;\
                                 font-family:var(--font-heading);color:{tone}",
                         "{frame.state.label()}"
                     }
@@ -707,14 +725,18 @@ fn StatusCards(frame: Frame) -> Element {
                             move |_| controller.send(Command::Toggle { was_on: on })
                         },
                     }
-                    span { style: "font-size:13px;color:var(--color-neutral-600)",
+                    // `.listen` in app.css: hidden in a narrow window.
+                    span { class: "listen", style: "font-size:13px;color:var(--color-neutral-600)",
                         "{frame.listen}"
                     }
                 }
             }
 
             div {
-                style: "width:232px;flex:none;display:flex;flex-direction:column;gap:10px;\
+                // Its width is `.stats-card` in app.css, which narrows it in a
+                // narrow window so the state word beside it still fits.
+                class: "stats-card",
+                style: "flex:none;display:flex;flex-direction:column;gap:10px;\
                         padding:14px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
                 StatRow {
@@ -746,7 +768,7 @@ fn AddServerCard(frame: Frame) -> Element {
                     box-shadow:var(--shadow-sm)",
             div { style: "display:flex;flex-direction:column;gap:6px;max-width:540px",
                 span {
-                    style: "font-weight:500;font-size:23px;line-height:1.15;\
+                    style: "font-weight:700;font-size:23px;line-height:1.15;\
                             font-family:var(--font-heading);color:var(--color-text)",
                     "Добавьте сервер"
                 }
@@ -876,7 +898,7 @@ fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
                     key: "{one.key()}",
                     class: if tab() == one { "tab active" } else { "tab" },
                     style: "padding:5px 12px;border-radius:4px;cursor:default;\
-                            font:500 14.5px/1.35 var(--font-heading)",
+                            font:700 14.5px/1.35 var(--font-heading)",
                     onclick: move |_| tab.set(one),
                     "{one.label()}"
                 }
@@ -1191,7 +1213,7 @@ fn Button(
         div {
             class: if enabled { "act" } else { "act disabled" },
             style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:4px;\
-                    cursor:default;font-size:14px;{tone}",
+                    cursor:default;font-size:14px;white-space:nowrap;flex:none;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
@@ -1285,13 +1307,15 @@ fn Connections(frame: Frame) -> Element {
             style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
                     padding:18px 20px",
             div { style: "display:flex;align-items:baseline;gap:10px",
-                h4 { style: "margin:0;font-size:21px", "Логи и трафик" }
-                span { style: "font-size:13.5px;color:var(--color-neutral-500)",
+                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Логи и трафик" }
+                // Clipped rather than wrapped: the heading and the buttons beside
+                // it keep one line, and this is the part that can give way.
+                span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{plural(frame.active, \"соединение\", \"соединения\", \"соединений\")} сейчас · {frame.opened} за сессию"
                 }
                 span {
                     style: "margin-left:auto;font-size:13.5px;color:var(--color-neutral-500);\
-                            font-variant-numeric:tabular-nums",
+                            font-variant-numeric:tabular-nums;white-space:nowrap;flex:none",
                     "↓ {rate(frame.down_rate)}   ↑ {rate(frame.up_rate)}"
                 }
                 Button {
@@ -1404,8 +1428,8 @@ fn Routing(frame: Frame) -> Element {
                     padding:18px 20px",
 
             div { style: "display:flex;align-items:baseline;gap:10px",
-                h4 { style: "margin:0;font-size:21px", "Маршрутизация" }
-                span { style: "font-size:13.5px;color:var(--color-neutral-500)",
+                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Маршрутизация" }
+                span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{plural(view.rules.len() as u64, \"правило\", \"правила\", \"правил\")} · \
                      остальное {view.fallback.label()}"
                 }
@@ -1484,7 +1508,7 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             div { style: "display:flex;align-items:baseline;gap:10px",
-                span { style: "font:500 16px/1 var(--font-heading)", "Правила" }
+                span { style: "font:700 16px/1 var(--font-heading)", "Правила" }
                 span { style: "font-size:13px;color:var(--color-neutral-600)",
                     "сверху вниз, срабатывает первое"
                 }
@@ -1557,7 +1581,7 @@ fn Checker(
             style: "width:288px;flex:none;display:flex;flex-direction:column;gap:11px;\
                     padding:15px;background-color:var(--color-surface);\
                     border-radius:8px;box-shadow:var(--shadow-sm)",
-            span { style: "font:500 16px/1 var(--font-heading)", "Проверить адрес" }
+            span { style: "font:700 16px/1 var(--font-heading)", "Проверить адрес" }
             span {
                 style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
                 "Имя сайта, или адрес, или host:port. Никуда не подключается — \
@@ -1785,6 +1809,23 @@ mod tests {
         );
     }
 
+    /// The font is inlined like the scene, and its licence stays beside it: the
+    /// SIL Open Font License asks that the licence travel with the font.
+    #[test]
+    fn the_font_is_inlined_and_licensed() {
+        assert_eq!(
+            THEME.matches(FONT_URL).count(),
+            1,
+            "theme.css names the font once"
+        );
+        assert!(!THEME_STYLES.contains(FONT_URL), "the font was not inlined");
+        // base64 of a woff2 file's signature, "wOF2".
+        assert!(THEME_STYLES.contains("url(data:font/woff2;base64,d09GMg"));
+        assert!(THEME.contains("--font-body: \"Comfortaa\""));
+        const LICENCE: &str = include_str!("../assets/OFL-Comfortaa.txt");
+        assert!(LICENCE.contains("SIL Open Font License"));
+    }
+
     /// The inline radii are literals because the token form does not survive
     /// being rewritten (see the note at the top of this file), which means the
     /// numbers are written down twice. This is the thing that keeps the second
@@ -1962,10 +2003,11 @@ fn LogStrip() -> Element {
         div {
             style: "flex:1;min-height:150px;display:flex;flex-direction:column;gap:9px",
             div { style: "display:flex;align-items:center;gap:10px",
-                span { style: "font:500 14px/1 var(--font-heading)", "Журнал" }
+                span { style: "font:700 14px/1 var(--font-heading)", "Журнал" }
                 span { class: "tag tag-accent", style: "font-size:11px;padding:2px 8px", "live" }
                 span {
-                    style: "margin-left:auto;font-size:12.5px;color:var(--color-neutral-600)",
+                    style: "margin-left:auto;font-size:12.5px;color:var(--color-neutral-600);\
+                            min-width:0;overflow:hidden;white-space:nowrap",
                     if note.is_empty() { "строка копируется кликом" } else { "{note}" }
                 }
                 Button {

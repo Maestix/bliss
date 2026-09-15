@@ -7,6 +7,18 @@
    system the first screens were built on; the token names stayed, so every
    `var(...)` in ui.rs and app.css kept working. */
 
+/* Comfortaa, the user's pick: rounded ends, geometric shapes. Subset to Latin,
+   Cyrillic and the punctuation the window uses, as woff2 with its weight axis
+   (300–700) intact. The url() below is replaced with the file's bytes when the
+   window starts (`THEME_STYLES` in ui.rs), so write it nowhere else in this
+   file. SIL Open Font License: OFL-Comfortaa.txt, beside the font. */
+@font-face {
+  font-family: "Comfortaa";
+  font-weight: 300 700;
+  font-display: block;
+  src: url(comfortaa.woff2) format("woff2");
+}
+
 :root {
   --color-bg: #140f1d;
   --color-surface: #1e1629;
@@ -54,9 +66,12 @@
   --color-good: #72cf9e;
   --color-bad: #e56b6f;
 
-  --font-heading: "Inter", system-ui, sans-serif;
-  --font-heading-weight: 500;
-  --font-body: "Inter", system-ui, sans-serif;
+  /* Thick and rounded, as asked: text at 600, headings at Comfortaa's top of
+     700. Its Cyrillic uses Latin-like shapes (д like g, т like m); chosen
+     knowingly over Nunito, whose Cyrillic is conventional. */
+  --font-heading: "Comfortaa", system-ui, sans-serif;
+  --font-heading-weight: 700;
+  --font-body: "Comfortaa", system-ui, sans-serif;
 
   --space-1: 2.8px;
   --space-2: 5.6px;
@@ -90,7 +105,7 @@ h1, h2, h3, h4 { font-family: var(--font-heading); font-weight: var(--font-headi
    ══════════════════════════════════════════════════════════════════════ */
 
 *, *::before, *::after { box-sizing: border-box; }
-body { margin: 0; font-size: 15px; line-height: 1.55; font-weight: 400; }
+body { margin: 0; font-size: 15px; line-height: 1.55; font-weight: 600; }
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   line-height: 1.12; letter-spacing: -0.015em; margin: 0 0 var(--space-2);

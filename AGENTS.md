@@ -320,11 +320,14 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
    typing; keep the typed text in a local signal.
 7. The window never touches tokio. The engine thread publishes a `Frame` on a
    watch channel; the UI sends `Command`s through `Controller`.
-8. **Pictures ship inside the binary, in the stylesheet.** `STYLES` in `ui.rs`
-   replaces `url(status-card.jpg)` in `app.css` with a base64 data URI, once. That
-   url() must appear in `app.css` exactly once, comments included — a comment
-   naming it was replaced too, and tripped `the_scene_matches_the_card_surface`.
-   Keep pictures out of inline styles (rule 1).
+8. **Pictures and the font ship inside the binary, in the stylesheets.** `STYLES`
+   in `ui.rs` replaces `url(status-card.jpg)` in `app.css`, and `THEME_STYLES`
+   replaces `url(comfortaa.woff2)` in `theme.css`, with base64 data URIs, once.
+   Each url() must appear in its file exactly once, comments included — a
+   comment naming the scene was replaced too, and tripped
+   `the_scene_matches_the_card_surface`. Keep pictures out of inline styles
+   (rule 1). Nothing is fetched from the network: the window opens before the
+   tunnel, for people whose network may block font CDNs.
 9. **The icon.** `crates/app/build.rs` compiles `bliss.rc` into the executable
    with `embed-resource`, using `rc.exe` from the Windows SDK. The call is
    `manifest_required`: on MSVC a missing rc.exe fails the build either way,
@@ -358,6 +361,18 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     `FAILED`, and tints of the accent `rgba(238,130,196,…)`) and `app.css`;
     they mirror the tokens, so change both together. Connected and "through the
     proxy" are both pink, which is why "direct" must never borrow `ON`.
+
+    The font is Comfortaa: text at 600, headings at 700, its top weight. The
+    six inline `font-weight:700` / `font:700` in `ui.rs` mirror
+    `--font-heading-weight`. `assets/comfortaa.woff2` is Google Fonts'
+    variable `Comfortaa[wght].ttf` cut with `pyftsubset` to U+0020–007E,
+    00A0–00FF, 0400–045F, 0490–0491, 2010–2027, 2030–203A, 2116, 2190–2195
+    and 2212, with `--layout-features=*` and `--flavor=woff2`; a character
+    outside that set falls back to the system font, so widen the set when the
+    window starts drawing new symbols. `OFL-Comfortaa.txt` must stay beside it
+    (`the_font_is_inlined_and_licensed`). Its Cyrillic uses Latin-like shapes
+    (д like g, т like m); the user chose it over Nunito, whose Cyrillic is
+    conventional, after seeing both in the window.
 
 ## 7. Verifying a UI change: look at the real window
 

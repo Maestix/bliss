@@ -49,6 +49,9 @@ body { font-size: 16px; user-select: none; cursor: default; }
    the tint stayed on every rail item that had ever been clicked, and on the
    previously selected server. Classes are diffed like any other attribute. */
 .nav-item { color: var(--color-neutral-300); }
+/* The icon keeps its size. A flex row shrinks an SVG before it wraps text, so
+   with a wider font "Маршрутизация" squeezed its icon thin, or away entirely. */
+.nav-item svg { flex: none; }
 .nav-item.disabled { color: var(--color-neutral-700); }
 .nav-item.active {
   color: var(--color-accent);
@@ -84,6 +87,20 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .wbtn:hover { background-color: rgba(239, 232, 245, .07); color: #efe8f5; }
 .wbtn-close:hover { background-color: #a8435a; color: #fff; }
 .ring:hover { border-color: #f5b8dc; }
+
+/* The numbers beside the status card. In a class rather than inline so the
+   narrow window below can change it. */
+.stats-card { width: 232px; }
+
+/* In a narrow window the status card cannot hold the state word, the address
+   and the listening ports side by side, and in Comfortaa "Подключение" alone
+   needs about 180px. The word is what the card is for, so the ports give way
+   and the numbers beside it narrow. Checked at 880px, the smallest the window
+   allows, for all four words the state can take. */
+@media (max-width: 980px) {
+  .listen { display: none; }
+  .stats-card { width: 190px; }
+}
 
 /* The night scene on the status card.
    - The picture's sky was shifted to --color-surface when the file was made,
