@@ -166,11 +166,11 @@ fn rejects_reality_without_a_public_key() {
     );
 }
 
-/// The file every new user is handed has to parse.
+/// The documented format has to be a format bliss reads.
 ///
 /// `Profile` denies unknown fields, so a key misspelled in the example — or a
-/// key documented there before it exists in the struct — is a hard failure on
-/// someone's very first run, at the moment they have least idea what is wrong.
+/// key documented there before it exists in the struct — would send anyone who
+/// copies it straight into a refusal.
 #[test]
 fn the_example_profile_is_a_valid_profile() {
     const EXAMPLE: &str = include_str!("../../../bliss.example.toml");

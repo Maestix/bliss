@@ -217,7 +217,13 @@ fn window_setup() -> Result<engine::Setup> {
             tracing::error!("profile: {}", e.brief());
             (
                 Profile::default(),
-                Some(format!("профиль не читается: {}", e.brief())),
+                // Not a dead end: the first change saves a new profile, and
+                // this one is kept beside it (`profile_file::Store::save`).
+                Some(format!(
+                    "профиль не читается: {}. Чинить не обязательно: при первом изменении \
+                     в окне bliss сохранит новый, а этот оставит рядом копией",
+                    e.brief()
+                )),
             )
         }
     };

@@ -43,8 +43,8 @@ The long-form plan, in Russian, lives outside the repo at
   `route` make no network connections, but every invocation first runs
   `sysproxy::recover` (which rewrites the system proxy if a dead run left
   `system-proxy-backup.txt` behind), creates the work dir, and appends to
-  `bliss.log`. None of them creates the profile: only the window writes it,
-  when a server or the starting rules are first added.
+  `bliss.log`. None of them writes the profile: only the window does, after a
+  change made in it.
 - **Talk to the user in Russian.** Code, comments, docs and commit messages are
   in English.
 
@@ -66,9 +66,9 @@ knowledge outside `bliss-xray`, not to be extended: the `[engine] xray` path in
 
 Runtime paths on Windows:
 
-- profile: `%APPDATA%\bliss\bliss.toml`. It does not exist until the window
-  writes it, from `bliss.example.toml` (compiled into the binary), when the
-  first server or the starting rules are added; bliss runs without it
+- profile: `%APPDATA%\bliss\bliss.toml`, written by bliss itself, whole,
+  after every change made in the window, and never on launch; bliss runs
+  without it
 - work dir: `%LOCALAPPDATA%\bliss\data` — `xray.exe`, `geoip.dat`,
   `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
@@ -235,18 +235,18 @@ These cost the most time on this project. None of them announce themselves.
 - **The profile schema is a compatibility surface.** The structs are
   `#[serde(deny_unknown_fields)]`, so renaming or removing a key breaks every
   existing `bliss.toml`. Add keys with `#[serde(default)]`; never rename.
-  `bliss.example.toml` is compiled in as the text of every new profile, and
+  `bliss.example.toml` documents the format, for `bliss run <profile>`, and
   `links.rs` asserts that it parses and that its documented defaults match the
-  code — change them together. It must not contain an active `[routing]`
-  header, or the starting rules could never be added to a profile the window
-  created (`the_template_is_an_empty_profile_with_routing_left_open`).
-- **Every write to the profile goes through `profile_file.rs`**, and each one
-  keeps three promises: the file is created on first use, never on launch; new
-  text is appended, because a serde round-trip deletes every comment the user
-  relies on; and the whole new text is parsed before one `rename` replaces the
-  file, so a refusal leaves it byte for byte as it was. After serde fills in
-  defaults, a missing section and an empty one look identical; when that
-  matters, read the file text (`has_routing_section`).
+  code — change them together.
+- **The profile belongs to bliss, the way v2rayN's config belongs to v2rayN.**
+  Every change is made in the window and written by `profile_file::Store::save`:
+  the whole profile, serialised beside the file and renamed over it, after
+  bliss's `HEADER`. Nothing is written on launch. Before the first write in a
+  run, a file without that header, or one that does not parse, is copied to
+  `bliss.toml.bak` (`.1.bak` and so on if that is taken) — that is how a
+  hand-made profile's comments survive. The engine changes a clone of the
+  profile and takes it only when the save worked (`save_profile`), so the
+  window and the file cannot drift apart. Never write the profile any other way.
 - **A link is a credential in the window too.** `Command::AddServer` carries a
   `Link` whose `Debug` hides it; the log gets only the server's name; a refused
   link is explained by `LinkError` variant, never by echoing a value — `BadValue`
@@ -432,7 +432,8 @@ and download; relay and connection table; system proxy (three modes, crash-safe
 restore); routing (proxy / direct / block by domain, address, port, process,
 geosite/geoip) and its screen; server list with ping; copy to clipboard; the
 application icon and the status card's picture; starting with no profile, no
-server and no engine, and adding a server from the window. The
+server and no engine, and adding a server from the window; the profile written
+by bliss itself, with the system-proxy choice remembered. The
 tunnel already starts with the window (`Setup.autostart`).
 
 **Open:** subscriptions (1.6); UDP ASSOCIATE; an idle timeout for half-open

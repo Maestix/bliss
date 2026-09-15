@@ -1,13 +1,11 @@
-# bliss profile.
+# The bliss profile format, for reference.
 #
-# bliss writes this file the first time you add a server in its window, and
-# adds each later one at the end. Everything else here already has a sane
-# default, so nothing has to be filled in by hand.
+# bliss keeps its own profile at %APPDATA%\bliss\bliss.toml and writes that
+# file itself, whole, after every change made in its window: nobody has to open
+# it. This one shows what a profile can hold, with the defaults, for
+# `bliss run <profile>` and for anyone curious.
 #
-# Editing by hand is fine too: servers are [[server]] blocks with a vless://
-# link, as at the bottom. bliss only ever appends, so comments stay put.
-#
-# This file holds a live credential once a server is in it: the UUID and the
+# A profile holds a live credential once a server is in it: the UUID and the
 # REALITY keys are in the link. Treat it like a password.
 
 [inbound]
