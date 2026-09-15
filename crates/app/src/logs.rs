@@ -10,6 +10,7 @@
 //! buffer drops the oldest line rather than growing, and a test holds it to it.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use tracing::field::{Field, Visit};
@@ -46,13 +47,16 @@ impl Severity {
         }
     }
 
-    /// Colours from the theme: only trouble gets to stand out.
+    /// A colour per level, all of them softened so a page of log stays calm:
+    /// the theme's mint for the ordinary, a muted amber for warnings, the
+    /// failure red for errors, and grey for detail.
     pub fn colour(self) -> &'static str {
         match self {
             Self::Error => "#e56b6f",
-            Self::Warn => "#cbbaf4",
-            Self::Info => "var(--color-neutral-500)",
-            Self::Debug => "var(--color-neutral-700)",
+            Self::Warn => "#d9b16a",
+            // --color-good (#72cf9e), a little quieter: it is most of the log.
+            Self::Info => "rgba(114,207,158,.8)",
+            Self::Debug => "var(--color-neutral-600)",
         }
     }
 }
@@ -85,12 +89,25 @@ pub fn history(limit: usize) -> Vec<Line> {
     buffer.iter().rev().take(limit).cloned().collect()
 }
 
+/// Lines recorded since the start, so the pane can tell there is something new.
+static REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// A number that changes whenever a line arrives.
+///
+/// The pane passes it down as a prop. It reads the buffer itself, and a
+/// component is re-run by its parent only when its props change, so without
+/// this the "live" log drew itself once and then only when clicked.
+pub fn revision() -> u64 {
+    REVISION.load(Ordering::Relaxed)
+}
+
 fn push(line: Line) {
     let mut buffer = buffer().lock().expect("log buffer");
     if buffer.len() == CAPACITY {
         buffer.pop_front();
     }
     buffer.push_back(line);
+    REVISION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Feeds the in-memory buffer. Install alongside the usual fmt layer.
@@ -154,6 +171,15 @@ mod tests {
         // Newest first, and what survived is the newest end.
         assert_eq!(recent[0].text, format!("line {}", CAPACITY * 3 - 1));
         assert_eq!(recent[4].text, format!("line {}", CAPACITY * 3 - 5));
+    }
+
+    /// What wakes the pane. Tests share the buffer, so this asks only that a
+    /// line moves the number, not by how much.
+    #[test]
+    fn every_line_moves_the_revision() {
+        let before = revision();
+        push(line(1));
+        assert!(revision() > before);
     }
 
     #[test]

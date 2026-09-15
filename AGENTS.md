@@ -448,6 +448,14 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     `auto-fill` grid). CSS pixels are then larger than logical ones, so
     `viewport()` gives the page's own size for placing menus. In DevTools the
     zoom shows as `devicePixelRatio`.
+17. **A component is re-run by its parent only when its props change.** One
+    with no props is drawn once, and after that only by its own signals.
+    `Styles` relies on it. `LogStrip`, which reads the log buffer itself rather
+    than through the frame, went stale because of it: the "live" log changed
+    only when a click on it set its copy note, and the user found it that way.
+    It now takes `logs::revision()` as a prop. Anything that reads shared state
+    outside the frame needs a prop that changes with that state, or it goes
+    stale without a sound.
 
 ## 7. Verifying a UI change: look at the real window
 
