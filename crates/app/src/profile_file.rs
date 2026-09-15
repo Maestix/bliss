@@ -19,7 +19,15 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use bliss_proto::{Action, LinkError, Profile, Rule, ServerConfig, ServerEntry};
+use bliss_proto::{Action, LinkError, Profile, Rule, ServerConfig, ServerEntry, Subscription};
+
+use crate::subscription::Fetched;
+use crate::ui::plural;
+
+/// The most servers a profile holds, pasted and subscribed together. Every one
+/// is a row in a frame published twice a second and a socket in every sweep,
+/// and a subscription can bring thousands.
+pub const MAX_PROFILE_SERVERS: usize = 5_000;
 
 /// The first lines of every profile bliss writes, which is also how it tells
 /// its own file from anyone else's.
@@ -183,6 +191,9 @@ pub fn add_server(profile: &mut Profile, link: &str) -> Result<ServerConfig, Str
     if profile.servers.iter().any(|s| s.link.trim() == link) {
         return Err(format!("этот сервер уже есть: «{}»", config.tag));
     }
+    if profile.servers.len() >= MAX_PROFILE_SERVERS {
+        return Err(full());
+    }
     profile.servers.push(ServerEntry {
         link: link.to_owned(),
         name: None,
@@ -239,6 +250,345 @@ fn starting_rules() -> Vec<Rule> {
     ]
 }
 
+fn full() -> String {
+    format!(
+        "в профиле уже {} — больше bliss не держит",
+        plural(MAX_PROFILE_SERVERS as u64, "сервер", "сервера", "серверов")
+    )
+}
+
+/// What pasting servers did.
+#[derive(Debug)]
+pub struct Imported {
+    pub added: Vec<ServerConfig>,
+    /// Already in the profile.
+    pub known: usize,
+    /// Links to other protocols, and vless:// links that do not parse.
+    pub skipped: usize,
+}
+
+impl Imported {
+    /// One line for the window.
+    pub fn summary(&self) -> String {
+        let mut text = match self.added.as_slice() {
+            [one] => format!("Добавлен «{}»", one.tag),
+            many => format!(
+                "Добавлено {}",
+                plural(many.len() as u64, "сервер", "сервера", "серверов")
+            ),
+        };
+        if self.known > 0 {
+            text.push_str(&format!(", ещё {} уже были", self.known));
+        }
+        if self.skipped > 0 {
+            text.push_str(&format!(", {} пропущено", self.skipped));
+        }
+        text
+    }
+}
+
+/// Add every server in a pasted text: one link, several, or a base64 list.
+///
+/// A single line that is not a working link is explained the way `add_server`
+/// explains it; a list is added as far as it goes.
+pub fn import_servers(profile: &mut Profile, text: &str) -> Result<Imported, String> {
+    let text = text.trim();
+    let found = crate::subscription::links_in(text);
+    if found.links.is_empty() {
+        if !text.contains('\n') {
+            return add_server(profile, text).map(|config| Imported {
+                added: vec![config],
+                known: 0,
+                skipped: 0,
+            });
+        }
+        return Err(match (found.foreign, found.broken) {
+            (0, 0) => "в тексте нет ссылок vless://".to_owned(),
+            (foreign, 0) => format!(
+                "{} других протоколов, а bliss понимает только vless://",
+                plural(foreign as u64, "ссылка", "ссылки", "ссылок")
+            ),
+            (_, broken) => format!(
+                "{} vless:// не читаются — скопируйте заново",
+                plural(broken as u64, "ссылка", "ссылки", "ссылок")
+            ),
+        });
+    }
+
+    let mut imported = Imported {
+        added: Vec::new(),
+        known: 0,
+        skipped: found.foreign + found.broken,
+    };
+    for link in found.links {
+        if profile.servers.iter().any(|s| s.link.trim() == link) {
+            imported.known += 1;
+            continue;
+        }
+        let Ok(config) = link.parse::<ServerConfig>() else {
+            imported.skipped += 1;
+            continue;
+        };
+        if profile.servers.len() >= MAX_PROFILE_SERVERS {
+            if imported.added.is_empty() {
+                return Err(full());
+            }
+            break;
+        }
+        profile.servers.push(ServerEntry {
+            link,
+            name: None,
+            group: None,
+        });
+        imported.added.push(config);
+    }
+    if imported.added.is_empty() {
+        return Err("все эти серверы уже есть".to_owned());
+    }
+    Ok(imported)
+}
+
+// --- rules --------------------------------------------------------------------
+
+/// Put a rule in the profile: in place of the one at `at`, or after the others.
+pub fn save_rule(profile: &mut Profile, at: Option<usize>, rule: Rule) -> Result<(), String> {
+    if rule.is_empty() {
+        return Err("у правила нет ни одного условия".to_owned());
+    }
+    let rules = &mut profile.routing.rules;
+    match at {
+        Some(at) => *rules.get_mut(at).ok_or_else(no_such_rule)? = rule,
+        None => rules.push(rule),
+    }
+    Ok(())
+}
+
+pub fn delete_rule(profile: &mut Profile, at: usize) -> Result<Rule, String> {
+    let rules = &mut profile.routing.rules;
+    if at >= rules.len() {
+        return Err(no_such_rule());
+    }
+    Ok(rules.remove(at))
+}
+
+/// Move a rule to another place in the order — another priority, since the
+/// first rule that matches decides.
+pub fn move_rule(profile: &mut Profile, from: usize, to: usize) -> Result<(), String> {
+    let rules = &mut profile.routing.rules;
+    if from >= rules.len() || to >= rules.len() {
+        return Err(no_such_rule());
+    }
+    let rule = rules.remove(from);
+    rules.insert(to, rule);
+    Ok(())
+}
+
+fn no_such_rule() -> String {
+    "этого правила уже нет — список успел измениться".to_owned()
+}
+
+/// What a rule made from the connections table is about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Subject {
+    /// A program, by the name Windows gives it: `chrome.exe`.
+    Program(String),
+    /// A site and everything under it: `googlevideo.com`.
+    Site(String),
+    /// One address, for a connection that named no site.
+    Address(String),
+}
+
+impl Subject {
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Program(value) | Self::Site(value) | Self::Address(value) => value,
+        }
+    }
+}
+
+/// Send one program, site or address somewhere, from the connections table.
+///
+/// A rule about this and nothing else just changes its action. Otherwise a new
+/// rule goes after the others, so every rule already there still decides
+/// first: a program sent direct keeps its advertising blocked. Returns where
+/// the rule is.
+pub fn route_one(profile: &mut Profile, subject: &Subject, action: Action) -> usize {
+    let rules = &mut profile.routing.rules;
+    let only_this = |rule: &Rule| {
+        let conditions = rule.domain.len()
+            + rule.ip.len()
+            + rule.port.len()
+            + rule.process.len()
+            + rule.geosite.len()
+            + rule.geoip.len();
+        let list = match subject {
+            Subject::Program(_) => &rule.process,
+            Subject::Site(_) => &rule.domain,
+            Subject::Address(_) => &rule.ip,
+        };
+        conditions == 1
+            && list
+                .first()
+                .is_some_and(|value| value.eq_ignore_ascii_case(subject.value()))
+    };
+    if let Some(at) = rules.iter().position(only_this) {
+        rules[at].action = action;
+        return at;
+    }
+    let mut rule = Rule {
+        name: None,
+        action,
+        domain: Vec::new(),
+        ip: Vec::new(),
+        port: Vec::new(),
+        process: Vec::new(),
+        geosite: Vec::new(),
+        geoip: Vec::new(),
+    };
+    match subject {
+        Subject::Program(name) => rule.process.push(name.clone()),
+        Subject::Site(site) => rule.domain.push(site.clone()),
+        Subject::Address(ip) => rule.ip.push(ip.clone()),
+    }
+    rules.push(rule);
+    rules.len() - 1
+}
+
+// --- subscriptions ------------------------------------------------------------
+
+/// The text as a subscription's address: one http(s) address and nothing else.
+pub fn subscription_address(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    let url = reqwest::Url::parse(text).ok()?;
+    let web = matches!(url.scheme(), "http" | "https");
+    (web && url.host_str().is_some_and(|host| !host.is_empty())).then(|| text.to_owned())
+}
+
+/// Add a subscription. Its servers come with the first fetch.
+///
+/// `seed` makes the id; the engine passes the time, and a taken id moves on.
+pub fn add_subscription(
+    profile: &mut Profile,
+    url: &str,
+    seed: u64,
+) -> Result<Subscription, String> {
+    if let Some(known) = profile.subscriptions.iter().find(|s| s.url == url) {
+        return Err(format!("эта подписка уже есть: «{}»", known.name));
+    }
+    let id = (seed..)
+        .map(|n| format!("{n:x}"))
+        .find(|id| !profile.subscriptions.iter().any(|s| &s.id == id))
+        .expect("some id is free");
+    let name = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "подписка".to_owned());
+    let subscription = Subscription {
+        id,
+        name,
+        url: url.to_owned(),
+        updated: None,
+        usage: None,
+    };
+    profile.subscriptions.push(subscription.clone());
+    Ok(subscription)
+}
+
+/// What an update did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Refreshed {
+    pub name: String,
+    pub servers: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// Put a fetched list in the profile.
+///
+/// The servers the subscription brought last time are replaced, in the same
+/// place in the list; servers added by hand are not touched, and a link the
+/// profile already holds is not added twice.
+pub fn apply_subscription(
+    profile: &mut Profile,
+    id: &str,
+    fetched: &Fetched,
+    now: i64,
+) -> Result<Refreshed, String> {
+    let at = profile
+        .subscriptions
+        .iter()
+        .position(|s| s.id == id)
+        .ok_or_else(|| "этой подписки уже нет".to_owned())?;
+    let group = Some(id.to_owned());
+    let before: Vec<String> = profile
+        .servers
+        .iter()
+        .filter(|s| s.group == group)
+        .map(|s| s.link.clone())
+        .collect();
+    // Everything before the first of them is not theirs, so after they are
+    // taken out this is still where they began.
+    let place = profile.servers.iter().position(|s| s.group == group);
+    profile.servers.retain(|s| s.group != group);
+
+    let room = MAX_PROFILE_SERVERS.saturating_sub(profile.servers.len());
+    let fresh: Vec<ServerEntry> = fetched
+        .links
+        .links
+        .iter()
+        .filter(|link| {
+            !profile
+                .servers
+                .iter()
+                .any(|s| s.link.trim() == link.as_str())
+        })
+        .take(room)
+        .map(|link| ServerEntry {
+            link: link.clone(),
+            name: None,
+            group: group.clone(),
+        })
+        .collect();
+    let refreshed = |name: String| Refreshed {
+        name,
+        servers: fresh.len(),
+        added: fresh.iter().filter(|e| !before.contains(&e.link)).count(),
+        removed: before
+            .iter()
+            .filter(|link| !fresh.iter().any(|e| &e.link == *link))
+            .count(),
+    };
+
+    let subscription = &mut profile.subscriptions[at];
+    if let Some(title) = &fetched.title {
+        subscription.name = title.clone();
+    }
+    if fetched.usage.is_some() {
+        subscription.usage = fetched.usage;
+    }
+    subscription.updated = Some(now);
+    let result = refreshed(subscription.name.clone());
+
+    let place = place.unwrap_or(profile.servers.len());
+    profile.servers.splice(place..place, fresh);
+    Ok(result)
+}
+
+/// Remove a subscription and every server it brought.
+pub fn delete_subscription(profile: &mut Profile, id: &str) -> Result<Subscription, String> {
+    let at = profile
+        .subscriptions
+        .iter()
+        .position(|s| s.id == id)
+        .ok_or_else(|| "этой подписки уже нет".to_owned())?;
+    let group = Some(id.to_owned());
+    profile.servers.retain(|s| s.group != group);
+    Ok(profile.subscriptions.remove(at))
+}
+
 /// Why a pasted link was refused, in words for the window.
 ///
 /// By variant rather than from the error's text, which is English and meant
@@ -247,8 +597,8 @@ fn starting_rules() -> Vec<Rule> {
 fn link_problem(link: &str, e: &LinkError) -> String {
     match e {
         LinkError::Scheme(scheme) if scheme == "https" || scheme == "http" => {
-            "это адрес страницы, а не ссылка на сервер. Если это подписка — bliss их \
-             пока не умеет; добавьте сервер ссылкой vless://"
+            "это адрес страницы, а не ссылка на сервер. Адрес подписки добавьте в разделе \
+             «Подписки»"
                 .to_owned()
         }
         LinkError::Scheme(scheme) => {
@@ -480,6 +830,250 @@ mod tests {
             assert!(!refused.contains("SECRETTOKEN"), "{link}: {refused}");
         }
         assert!(profile.servers.is_empty(), "a refused link changes nothing");
+    }
+
+    fn server_link(host: &str) -> String {
+        format!("vless://11111111-2222-3333-4444-555555555555@{host}:443?encryption=none#{host}")
+    }
+
+    fn fetched(links: &[String], title: Option<&str>) -> Fetched {
+        Fetched {
+            links: crate::subscription::links_in(&links.join("\n")),
+            title: title.map(str::to_owned),
+            usage: Some(bliss_proto::Usage {
+                upload: 1,
+                download: 2,
+                total: 0,
+                expire: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn pasted_text_adds_every_server_in_it() {
+        use base64::Engine as _;
+        let mut profile = Profile::default();
+        add_server(&mut profile, FIRST).expect("added");
+
+        let list = format!(
+            "{FIRST}\n{SECOND}\nvmess://AAAA\n{}",
+            server_link("c.example")
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&list);
+        let imported = import_servers(&mut profile, &encoded).expect("imported");
+        assert_eq!(imported.added.len(), 2);
+        assert_eq!((imported.known, imported.skipped), (1, 1));
+        assert_eq!(
+            imported.summary(),
+            "Добавлено 2 сервера, ещё 1 уже были, 1 пропущено"
+        );
+        assert_eq!(profile.servers.len(), 3);
+
+        let again = import_servers(&mut profile, &list).expect_err("nothing new");
+        assert!(again.contains("уже есть"), "{again}");
+        // One line keeps the precise reason a single link gets.
+        let one = import_servers(&mut profile, "trojan://SECRETTOKEN@a.example:443")
+            .expect_err("not ours");
+        assert!(
+            one.contains("trojan") && !one.contains("SECRETTOKEN"),
+            "{one}"
+        );
+    }
+
+    /// The cap on what a profile holds, whichever way servers arrive.
+    #[test]
+    fn a_profile_holds_at_most_max_profile_servers() {
+        let mut profile = Profile {
+            servers: (0..MAX_PROFILE_SERVERS)
+                .map(|n| ServerEntry {
+                    link: server_link(&format!("h{n}.example")),
+                    name: None,
+                    group: None,
+                })
+                .collect(),
+            ..Profile::default()
+        };
+        assert!(add_server(&mut profile, FIRST).is_err());
+        assert!(import_servers(&mut profile, &format!("{FIRST}\n{SECOND}")).is_err());
+
+        let subscription =
+            add_subscription(&mut profile, "https://sub.example/x", 1).expect("added");
+        let refreshed = apply_subscription(
+            &mut profile,
+            &subscription.id,
+            &fetched(&[server_link("new.example")], None),
+            5,
+        )
+        .expect("applied");
+        assert_eq!(refreshed.servers, 0);
+        assert_eq!(profile.servers.len(), MAX_PROFILE_SERVERS);
+    }
+
+    #[test]
+    fn rules_are_saved_moved_and_deleted_in_place() {
+        let mut profile = Profile::default();
+        add_starting_rules(&mut profile).expect("rules");
+        let mine = crate::rule_text::parse("мои", Action::Proxy, "geoip:ru").expect("reads");
+        save_rule(&mut profile, None, mine.clone()).expect("appended");
+        assert_eq!(profile.routing.rules[2], mine);
+
+        move_rule(&mut profile, 2, 0).expect("moved");
+        assert_eq!(profile.routing.rules[0], mine);
+        assert_eq!(
+            profile.routing.rules[1].name.as_deref(),
+            Some("Реклама и трекеры")
+        );
+
+        let mut changed = mine.clone();
+        changed.action = Action::Direct;
+        save_rule(&mut profile, Some(0), changed).expect("replaced");
+        assert_eq!(profile.routing.rules[0].action, Action::Direct);
+        assert_eq!(profile.routing.rules.len(), 3);
+
+        assert_eq!(delete_rule(&mut profile, 0).expect("deleted").geoip, ["ru"]);
+        assert!(delete_rule(&mut profile, 7).is_err());
+        assert!(move_rule(&mut profile, 0, 9).is_err());
+        assert!(save_rule(&mut profile, Some(9), mine).is_err());
+    }
+
+    /// From the connections table: the second choice for the same program
+    /// changes the first rule instead of stacking another under it.
+    #[test]
+    fn a_quick_rule_goes_last_and_is_reused() {
+        let mut profile = Profile::default();
+        add_starting_rules(&mut profile).expect("rules");
+        let chrome = Subject::Program("chrome.exe".to_owned());
+
+        assert_eq!(route_one(&mut profile, &chrome, Action::Direct), 2);
+        assert_eq!(profile.routing.rules[2].process, ["chrome.exe"]);
+        assert_eq!(
+            route_one(
+                &mut profile,
+                &Subject::Program("CHROME.EXE".to_owned()),
+                Action::Proxy
+            ),
+            2
+        );
+        assert_eq!(profile.routing.rules.len(), 3);
+        assert_eq!(profile.routing.rules[2].action, Action::Proxy);
+
+        // A rule that also says something else is not "only this program".
+        profile.routing.rules[2].domain.push("a.example".to_owned());
+        assert_eq!(route_one(&mut profile, &chrome, Action::Block), 3);
+        let site = Subject::Site("googlevideo.com".to_owned());
+        assert_eq!(route_one(&mut profile, &site, Action::Direct), 4);
+        assert_eq!(profile.routing.rules[4].domain, ["googlevideo.com"]);
+    }
+
+    #[test]
+    fn a_subscription_replaces_only_its_own_servers() {
+        let mut profile = Profile::default();
+        add_server(&mut profile, FIRST).expect("by hand");
+        assert_eq!(
+            subscription_address(" https://sub.example/api/x "),
+            Some("https://sub.example/api/x".to_owned())
+        );
+        assert_eq!(subscription_address(FIRST), None);
+        assert_eq!(subscription_address("https://a b"), None);
+
+        let url = "https://sub.example/api/sub/TOKEN";
+        let subscription = add_subscription(&mut profile, url, 0xabc).expect("added");
+        assert_eq!(subscription.name, "sub.example");
+        assert_eq!(subscription.id, "abc");
+        let twice = add_subscription(&mut profile, url, 1).expect_err("once");
+        assert!(twice.contains("уже есть"), "{twice}");
+        add_server(&mut profile, SECOND).expect("by hand, after");
+
+        let first = [
+            server_link("s1.example"),
+            server_link("s2.example"),
+            FIRST.to_owned(),
+        ];
+        let refreshed = apply_subscription(
+            &mut profile,
+            "abc",
+            &fetched(&first, Some("Провайдер")),
+            100,
+        )
+        .expect("applied");
+        assert_eq!(
+            refreshed,
+            Refreshed {
+                name: "Провайдер".to_owned(),
+                servers: 2,
+                added: 2,
+                removed: 0
+            },
+            "a link already in the profile is not added twice"
+        );
+        // Its servers sit where the subscription was added: after the end.
+        let groups: Vec<Option<&str>> =
+            profile.servers.iter().map(|s| s.group.as_deref()).collect();
+        assert_eq!(groups, [None, None, Some("abc"), Some("abc")]);
+
+        // The list changes: one server gone, one new, in the same place.
+        profile.servers.push(ServerEntry {
+            link: server_link("mine.example"),
+            name: None,
+            group: None,
+        });
+        let second = [server_link("s2.example"), server_link("s3.example")];
+        let refreshed =
+            apply_subscription(&mut profile, "abc", &fetched(&second, None), 200).expect("applied");
+        assert_eq!((refreshed.added, refreshed.removed), (1, 1));
+        assert_eq!(
+            refreshed.name, "Провайдер",
+            "a list without a title keeps the name"
+        );
+        let hosts: Vec<&str> = profile
+            .servers
+            .iter()
+            .map(|s| s.link.split('#').nth(1).unwrap_or_default())
+            .collect();
+        assert_eq!(
+            hosts,
+            [
+                "first",
+                "second",
+                "s2.example",
+                "s3.example",
+                "mine.example"
+            ]
+        );
+        assert_eq!(profile.subscriptions[0].updated, Some(200));
+
+        delete_subscription(&mut profile, "abc").expect("deleted");
+        assert!(profile.subscriptions.is_empty());
+        assert_eq!(
+            profile.servers.len(),
+            3,
+            "its servers go with it, and only those"
+        );
+        assert!(apply_subscription(&mut profile, "abc", &fetched(&second, None), 300).is_err());
+    }
+
+    /// Subscriptions, usage and groups have to survive the whole-file rewrite.
+    #[test]
+    fn a_profile_with_a_subscription_reads_back() {
+        let path = scratch("subscription");
+        let mut profile = Profile::default();
+        let subscription =
+            add_subscription(&mut profile, "https://sub.example/api/TOKEN", 7).expect("added");
+        apply_subscription(
+            &mut profile,
+            &subscription.id,
+            &fetched(&[server_link("s1.example")], Some("Провайдер")),
+            1_700_000_000,
+        )
+        .expect("applied");
+        Store::new(path.clone()).save(&profile).expect("saved");
+
+        let back = read(&path).expect("parses").expect("exists");
+        assert_eq!(back.subscriptions, profile.subscriptions);
+        assert_eq!(
+            back.servers[0].group.as_deref(),
+            Some(subscription.id.as_str())
+        );
     }
 
     #[test]

@@ -48,7 +48,8 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, State, bytes, rate};
-use bliss_proto::ProxyMode;
+use crate::profile_file::Subject;
+use bliss_proto::{Action, ProxyMode};
 
 /// The window's palette, type and radii — a calm neon; see theme.css.
 const THEME: &str = include_str!("../assets/theme.css");
@@ -108,6 +109,88 @@ const BUSY: (&str, &str, &str) = ("#a98ce8", "rgba(169,140,232,.26)", "rgba(169,
 const IDLE: (&str, &str, &str) = ("#766a88", "rgba(118,106,136,.16)", "rgba(118,106,136,.08)");
 // A failure is the one state that asks to be looked at.
 const FAILED: (&str, &str, &str) = (BAD, "rgba(229,107,111,.26)", "rgba(229,107,111,.12)");
+
+/// The log pane's height on the logs screen, in CSS pixels. Global, because
+/// the screen is built afresh on every visit and the height should outlive it.
+static LOG_HEIGHT: GlobalSignal<f64> = Signal::global(|| DEFAULT_LOG_HEIGHT);
+const DEFAULT_LOG_HEIGHT: f64 = 230.0;
+const MIN_LOG_HEIGHT: f64 = 110.0;
+/// What the connections table is narrowed to, and in which order.
+static TABLE_QUERY: GlobalSignal<String> = Signal::global(String::new);
+static TABLE_SORT: GlobalSignal<Sort> = Signal::global(|| Sort::Newest);
+/// The right-click menu over a connection, while it is open. Global so Esc,
+/// heard at the top of the window, can close it.
+static ROW_MENU: GlobalSignal<Option<RowMenu>> = Signal::global(|| None);
+/// The rule editor, while it is open. Global for the same reason.
+static DRAFT: GlobalSignal<Option<Draft>> = Signal::global(|| None);
+
+/// How the connections table is ordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sort {
+    /// As the engine hands the rows over: live first, newest first.
+    Newest,
+    DownMost,
+    DownLeast,
+    UpMost,
+    UpLeast,
+}
+
+/// A connection someone right-clicked, and where.
+#[derive(Clone, Debug, PartialEq)]
+struct RowMenu {
+    x: f64,
+    y: f64,
+    target: String,
+    host: String,
+    process: Option<String>,
+    route: bliss_core::Route,
+    rule: String,
+    /// The row as the clipboard gets it.
+    text: String,
+}
+
+/// A rule in the editor, before it is saved.
+#[derive(Clone, Debug, PartialEq)]
+struct Draft {
+    /// The rule it changes, by position from 0; `None` for a new rule.
+    at: Option<usize>,
+    name: String,
+    action: Action,
+    /// One condition to a line, as `rule_text` reads them.
+    conditions: String,
+    /// Why the last attempt to save was refused.
+    problem: Option<String>,
+    /// "Удалить" has been clicked once; the second click deletes.
+    deleting: bool,
+}
+
+/// Keys that mean something anywhere in the window: Ctrl+V or Shift+Insert
+/// adds whatever is on the clipboard, and Esc closes whatever is open.
+///
+/// Heard in the page itself. A key goes to whatever has focus, and with nothing
+/// focused that is the document — outside every element rsx can put a handler
+/// on, which is where the window is most of the time. Blitz runs no script, so
+/// a Blitz build would need these keys some other way.
+const KEY_LISTENER: &str = r#"
+window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        dioxus.send("escape");
+        return;
+    }
+    // By position, not by letter: on a Russian layout the V key types "м".
+    const paste = (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === "KeyV")
+        || (event.shiftKey && !event.ctrlKey && !event.altKey && event.code === "Insert");
+    if (!paste || event.repeat) return;
+    const target = event.target;
+    const typing = target
+        && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+    // A text box pastes into itself, and an open dialog is somebody's work.
+    if (typing || document.querySelector("[data-modal]")) return;
+    event.preventDefault();
+    dioxus.send("paste");
+});
+await new Promise(() => {});
+"#;
 
 pub fn launch(controller: Controller) {
     dioxus::LaunchBuilder::desktop()
@@ -189,6 +272,7 @@ fn set_icons(window: &Window, scale: f64) {
 enum Screen {
     Connection,
     Traffic,
+    Subscriptions,
     Routing,
 }
 
@@ -197,6 +281,7 @@ impl Screen {
         match self {
             Self::Connection => "connection",
             Self::Traffic => "traffic",
+            Self::Subscriptions => "subscriptions",
             Self::Routing => "routing",
         }
     }
@@ -256,11 +341,37 @@ fn App() -> Element {
         }
     });
 
+    // See KEY_LISTENER.
+    let keys = controller.clone();
+    use_future(move || {
+        let controller = keys.clone();
+        async move {
+            let mut listener = document::eval(KEY_LISTENER);
+            while let Ok(key) = listener.recv::<String>().await {
+                match key.as_str() {
+                    // Whatever is there goes to the engine, which says what it
+                    // made of it; an empty clipboard is an answer too.
+                    "paste" => controller.send(Command::Import {
+                        text: Link(crate::clipboard::paste().unwrap_or_default()),
+                        from_form: false,
+                    }),
+                    "escape" => {
+                        *ROW_MENU.write() = None;
+                        *DRAFT.write() = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
     let frame = frame();
 
     rsx! {
         Styles {}
         WindowIcons {}
+        WindowZoom {}
+        ToastLine { toast: frame.toast.clone() }
         // The title bar spans the whole window, as in the reference, with the
         // sidebar beginning underneath it.
         div {
@@ -282,6 +393,11 @@ fn App() -> Element {
                         Screen::Traffic => rsx! {
                             div { key: "{key}", class: "screen", style: SCREEN,
                                 Connections { frame: frame.clone() }
+                            }
+                        },
+                        Screen::Subscriptions => rsx! {
+                            div { key: "{key}", class: "screen", style: SCREEN,
+                                Subscriptions { frame: frame.clone() }
                             }
                         },
                         Screen::Routing => rsx! {
@@ -476,16 +592,15 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                 icon: rsx! { crate::icons::Globe { size: 18, color: nav_tint(at_servers, true) } },
             }
 
-            // The reference's other destinations exist in the design but not yet
-            // in the program. Shown so the shape is right, dimmed and inert so
-            // nothing claims to work that does not.
             NavItem {
                 label: "Подписки",
-                count: 0,
-                active: false,
-                enabled: false,
-                onclick: move |_| {},
-                icon: rsx! { crate::icons::Rss { size: 18, color: nav_tint(false, false) } },
+                count: frame.subscriptions.len(),
+                active: here == Screen::Subscriptions,
+                enabled: true,
+                onclick: move |_| screen.set(Screen::Subscriptions),
+                icon: rsx! {
+                    crate::icons::Rss { size: 18, color: nav_tint(here == Screen::Subscriptions, true) }
+                },
             }
             NavItem {
                 label: "Маршрутизация",
@@ -497,6 +612,9 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                     crate::icons::Split { size: 18, color: nav_tint(here == Screen::Routing, true) }
                 },
             }
+            // Settings exist in the design but not yet in the program. Shown so
+            // the shape is right, dimmed and inert so nothing claims to work
+            // that does not.
             NavItem {
                 label: "Настройки",
                 active: false,
@@ -551,7 +669,7 @@ fn NavItem(
         div {
             class: "{class}",
             style: "display:flex;align-items:center;gap:9px;padding:9px 10px;\
-                    border-radius:8px;font-size:14px;cursor:default",
+                    border-radius:8px;font-size:14px",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
@@ -685,8 +803,9 @@ fn StatusCards(frame: Frame) -> Element {
                 div {
                     class: "ring",
                     style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
-                            place-items:center;border:1px solid {tone};cursor:default;\
+                            place-items:center;border:1px solid {tone};\
                             box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
+                    title: if on { "Отключить" } else { "Подключить" },
                     onclick: move |_| controller.send(Command::Toggle { was_on: on }),
                     crate::icons::Power { size: 28, color: tone }
                 }
@@ -714,21 +833,14 @@ fn StatusCards(frame: Frame) -> Element {
                         if on { "В сети {frame.uptime} · {frame.flow}" } else { "{frame.flow}" }
                     }
                 }
-                div {
-                    style: "margin-left:auto;display:flex;flex-direction:column;\
-                            align-items:flex-end;gap:10px",
-                    Toggle {
-                        on,
-                        tone: tone.to_owned(),
-                        onclick: {
-                            let controller = controller.clone();
-                            move |_| controller.send(Command::Toggle { was_on: on })
-                        },
-                    }
-                    // `.listen` in app.css: hidden in a narrow window.
-                    span { class: "listen", style: "font-size:13px;color:var(--color-neutral-600)",
-                        "{frame.listen}"
-                    }
+                // One switch: the ring. A pill switch beside it did the same
+                // thing, and two controls for one action read as two actions.
+                // `.listen` in app.css: hidden in a narrow window.
+                span {
+                    class: "listen",
+                    style: "margin-left:auto;align-self:flex-start;font-size:13px;\
+                            color:var(--color-neutral-600);white-space:nowrap",
+                    "{frame.listen}"
                 }
             }
 
@@ -773,16 +885,16 @@ fn AddServerCard(frame: Frame) -> Element {
                     "Добавьте сервер"
                 }
                 span { style: "font-size:14px;line-height:1.5;color:var(--color-neutral-400)",
-                    "Вставьте ссылку vless:// — её даёт провайдер или страница подписки. \
-                     bliss сохранит её в профиль и подключится."
+                    "Вставьте ссылку vless:// или адрес подписки — их даёт провайдер. \
+                     bliss сохранит их в профиль и подключится. Можно просто нажать Ctrl+V."
                 }
             }
-            AddServerForm { frame }
+            ImportForm { frame, placeholder: "vless://… или https://… подписки" }
         }
     }
 }
 
-/// Paste a link, get a server.
+/// Paste a link, a list of them or a subscription's address; get servers.
 ///
 /// The typed text lives in a local signal rather than in the frame, which is
 /// republished twice a second and would fight whoever is typing. The engine's
@@ -790,7 +902,7 @@ fn AddServerCard(frame: Frame) -> Element {
 /// the one already on screen when this form appeared, so switching tabs does
 /// not replay an old "added".
 #[component]
-fn AddServerForm(frame: Frame) -> Element {
+fn ImportForm(frame: Frame, placeholder: &'static str) -> Element {
     let controller = use_context::<Controller>();
     let mut link = use_signal(String::new);
     let seen = use_hook(|| frame.added.as_ref().map(|added| added.attempt));
@@ -813,7 +925,10 @@ fn AddServerForm(frame: Frame) -> Element {
 
     let submit = move |text: String| {
         if !text.trim().is_empty() {
-            controller.send(Command::AddServer(Link(text)));
+            controller.send(Command::Import {
+                text: Link(text),
+                from_form: true,
+            });
         }
     };
     let typed = !link().trim().is_empty();
@@ -825,13 +940,12 @@ fn AddServerForm(frame: Frame) -> Element {
                     class: "field",
                     r#type: "text",
                     value: "{link}",
-                    placeholder: "vless://…",
+                    placeholder: "{placeholder}",
                     autocomplete: "off",
                     spellcheck: "false",
                     style: "flex:1;min-width:0;padding:8px 10px;border-radius:4px;border:none;\
-                            background-color:#120c1a;color:var(--color-text);font-size:14px;\
-                            font-family:ui-monospace,Consolas,monospace;\
-                            box-shadow:inset 0 0 0 1px rgba(239,232,245,.10)",
+                            color:var(--color-text);font-size:14px;\
+                            font-family:ui-monospace,Consolas,monospace",
                     oninput: move |e| link.set(e.value()),
                     onkeydown: {
                         let submit = submit.clone();
@@ -872,8 +986,8 @@ fn AddServerForm(frame: Frame) -> Element {
                 }
             }
             match fresh.map(|added| added.outcome) {
-                Some(Ok(tag)) => rsx! {
-                    span { style: "font-size:13px;color:#72cf9e", "Добавлен «{elide(&tag, 40)}»" }
+                Some(Ok(done)) => rsx! {
+                    span { style: "font-size:13px;color:#72cf9e", "{elide(&done, 90)}" }
                 },
                 Some(Err(why)) => rsx! {
                     span {
@@ -897,7 +1011,7 @@ fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
                 div {
                     key: "{one.key()}",
                     class: if tab() == one { "tab active" } else { "tab" },
-                    style: "padding:5px 12px;border-radius:4px;cursor:default;\
+                    style: "padding:5px 12px;border-radius:4px;\
                             font:700 14.5px/1.35 var(--font-heading)",
                     onclick: move |_| tab.set(one),
                     "{one.label()}"
@@ -961,7 +1075,7 @@ fn ServersTab(frame: Frame) -> Element {
             div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
                 if frame.servers.is_empty() {
                     div { style: "padding:22px 10px;font-size:14.5px;color:var(--color-neutral-600)",
-                        "Серверов пока нет — вставьте ссылку vless:// в поле ниже."
+                        "Серверов пока нет — вставьте ссылку vless:// в поле ниже или нажмите Ctrl+V."
                     }
                 }
                 for (index, server) in frame.servers.iter().enumerate() {
@@ -973,12 +1087,19 @@ fn ServersTab(frame: Frame) -> Element {
                         // is restored by the renderer, so the previous server
                         // would keep its marker after a switch.
                         style: "display:grid;{COLUMNS};align-items:center;padding:8px 10px;\
-                                border-radius:4px;cursor:default",
+                                border-radius:4px",
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::Select(index))
                         },
-                        span { style: "font-size:14.5px", "{elide(&server.tag, 22)}" }
+                        div { style: "display:flex;flex-direction:column;min-width:0",
+                            span { style: "font-size:14.5px", "{elide(&server.tag, 22)}" }
+                            if let Some(group) = &server.group {
+                                span { style: "font-size:12px;color:var(--color-neutral-600)",
+                                    "{elide(group, 26)}"
+                                }
+                            }
+                        }
                         span {
                             style: "font-size:13.5px;color:var(--color-neutral-400);\
                                     font-family:ui-monospace,Consolas,monospace",
@@ -994,7 +1115,7 @@ fn ServersTab(frame: Frame) -> Element {
                 }
             }
 
-            AddServerForm { frame: frame.clone() }
+            ImportForm { frame: frame.clone(), placeholder: "vless://… или адрес подписки" }
 
             div { style: "display:flex;align-items:center;gap:10px;padding-top:2px",
                 Button {
@@ -1022,11 +1143,15 @@ fn ActionsTab(frame: Frame) -> Element {
     // The same guard the list's own button carries. Without it the two buttons
     // for one command disagreed, and this one could start sweep after sweep.
     let probing = sweeping(&frame);
+    let refreshing = frame.subscriptions.iter().all(|s| s.fetching);
 
     rsx! {
         div {
+            // As many columns as fit: two in the default window, more when it
+            // grows, rather than two cards stretched across a wide screen.
             style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;display:grid;\
-                    grid-template-columns:1fr 1fr;gap:9px;align-content:start;padding-top:2px",
+                    grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:9px;\
+                    align-content:start;padding-top:2px",
 
             ActionCard {
                 title: if probing { "Проверяю серверы…" } else { "Проверить серверы" },
@@ -1057,6 +1182,19 @@ fn ActionsTab(frame: Frame) -> Element {
                     move |_| controller.send(Command::Reveal(Reveal::WorkDir))
                 },
                 icon: rsx! { crate::icons::Folder { size: 17, color: ACCENT } },
+            }
+
+            if !frame.subscriptions.is_empty() {
+                ActionCard {
+                    title: if refreshing { "Обновляю подписки…" } else { "Обновить подписки" },
+                    hint: plural(frame.subscriptions.len() as u64, "подписка", "подписки", "подписок"),
+                    enabled: !refreshing,
+                    onclick: {
+                        let controller = controller.clone();
+                        move |_| controller.send(Command::Refresh(None))
+                    },
+                    icon: rsx! { crate::icons::Rss { size: 17, color: ACCENT } },
+                }
             }
 
             SystemProxy { frame: frame.clone() }
@@ -1097,13 +1235,14 @@ fn SystemProxy(frame: Frame) -> Element {
                     "{state.0}"
                 }
             }
-            div { style: "display:flex;flex-direction:column;gap:3px",
+            // Stacked in a narrow card, side by side in a wide one.
+            div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:3px",
                 for mode in [ProxyMode::Unchanged, ProxyMode::Set, ProxyMode::Clear] {
                     div {
                         key: "{mode.key()}",
                         class: if mode == chosen { "act choice on" } else { "act choice" },
                         style: "display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:4px;\
-                                cursor:default;font-size:13.5px;\
+                                font-size:13.5px;\
                                 color:{choice_tint(mode == chosen)}",
                         onclick: {
                             let controller = controller.clone();
@@ -1183,9 +1322,10 @@ fn ActionCard(
     };
     rsx! {
         div {
-            class: if enabled { "act" } else { "act disabled" },
-            style: "display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:default;border-radius:8px;\
-                    background-color:rgba(239,232,245,.03);{tone}",
+            // The resting tint and the hover are `.act-card` in app.css. Inline,
+            // the tint outranked the hover, and the cards gave no sign of life.
+            class: if enabled { "act act-card" } else { "act act-card disabled" },
+            style: "display:flex;align-items:center;gap:11px;padding:12px 13px;border-radius:8px;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             div { style: "display:flex;flex-direction:column;gap:2px;min-width:0",
@@ -1213,7 +1353,7 @@ fn Button(
         div {
             class: if enabled { "act" } else { "act disabled" },
             style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:4px;\
-                    cursor:default;font-size:14px;white-space:nowrap;flex:none;{tone}",
+                    font-size:14px;white-space:nowrap;flex:none;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             "{label}"
@@ -1250,25 +1390,6 @@ fn ping_tone(ping: Ping) -> &'static str {
     }
 }
 
-/// The pill switch from the reference. It does the same thing as the ring:
-/// the design offers both, and the switch is the one people reach for.
-#[component]
-fn Toggle(on: bool, tone: String, onclick: EventHandler<MouseEvent>) -> Element {
-    let shift = if on { "23px" } else { "0px" };
-    rsx! {
-        div {
-            style: "width:52px;height:28px;border-radius:14px;padding:2px;display:flex;\
-                    cursor:default;box-shadow:inset 0 0 0 1px {tone};\
-                    background-color:rgba(238,130,196,.08)",
-            onclick: move |e| onclick.call(e),
-            div {
-                style: "width:24px;height:24px;border-radius:50%;background-color:{tone};\
-                        transform:translateX({shift});transition:transform .18s ease",
-            }
-        }
-    }
-}
-
 #[component]
 fn StatRow(label: String, value: String) -> Element {
     rsx! {
@@ -1299,6 +1420,10 @@ fn Connections(frame: Frame) -> Element {
     // Same click-to-copy as the log below it, and the same note.
     let mut copied = use_signal(String::new);
     let note = copied();
+    let query = TABLE_QUERY();
+    let rows = table_rows(&frame.connections, &query, TABLE_SORT());
+    // The menu belongs to this screen; leaving the screen closes it.
+    use_drop(|| *ROW_MENU.write() = None);
 
     rsx! {
         div {
@@ -1320,9 +1445,11 @@ fn Connections(frame: Frame) -> Element {
                 }
                 Button {
                     label: "Скопировать таблицу",
-                    enabled: !frame.connections.is_empty(),
+                    enabled: !rows.is_empty(),
                     onclick: {
-                        let rows = frame.connections.clone();
+                        // What is on screen: searched, and in the order shown.
+                        let rows: Vec<bliss_core::Snapshot> =
+                            rows.iter().map(|row| (*row).clone()).collect();
                         move |_| {
                             let text =
                                 rows.iter().map(row_as_text).collect::<Vec<_>>().join("\n");
@@ -1337,10 +1464,41 @@ fn Connections(frame: Frame) -> Element {
                 }
             }
 
-            if !note.is_empty() {
+            div { style: "flex:none;display:flex;align-items:center;gap:12px",
+                // The box keeps its width and the hint beside it gives way:
+                // squeezed by the hint, it cut its own placeholder short.
+                div { class: "search", style: "flex:0 1 380px;min-width:220px",
+                    crate::icons::Search { size: 15, color: MUTED }
+                    input {
+                        class: "field bare",
+                        r#type: "text",
+                        value: "{query}",
+                        placeholder: "Программа, адрес или правило",
+                        autocomplete: "off",
+                        spellcheck: "false",
+                        style: "flex:1;min-width:0;padding:7px 0;border:none;\
+                                color:var(--color-text);font-size:14px",
+                        oninput: move |e| *TABLE_QUERY.write() = e.value(),
+                    }
+                    if !query.is_empty() {
+                        IconButton {
+                            title: "Очистить",
+                            enabled: true,
+                            onclick: move |_| TABLE_QUERY.write().clear(),
+                            icon: rsx! { crate::icons::Close { size: 14, color: MUTED } },
+                        }
+                    }
+                }
                 span {
-                    style: "flex:none;font-size:12.5px;color:var(--color-neutral-600)",
-                    "{note}"
+                    style: "flex:1 1 0;font-size:12.5px;color:var(--color-neutral-600);min-width:0;\
+                            overflow:hidden;white-space:nowrap",
+                    if !note.is_empty() {
+                        "{note}"
+                    } else if !query.is_empty() {
+                        "показано {rows.len()} из {frame.connections.len()}"
+                    } else {
+                        "правый клик по строке — правило для её программы или сайта"
+                    }
                 }
             }
 
@@ -1351,23 +1509,28 @@ fn Connections(frame: Frame) -> Element {
                 span { "Хост" }
                 span { "Процесс" }
                 span { "Маршрут" }
-                span { style: "text-align:right", "Приём" }
-                span { style: "text-align:right", "Отдача" }
+                SortHeader { label: "Приём", most: Sort::DownMost, least: Sort::DownLeast }
+                SortHeader { label: "Отдача", most: Sort::UpMost, least: Sort::UpLeast }
             }
 
-            div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
+            div { style: "flex:1;min-height:90px;overflow-y:scroll;overflow-x:hidden",
                 if frame.connections.is_empty() {
                     div {
                         style: "padding:28px 8px;font-size:14.5px;color:var(--color-neutral-600)",
                         "Пока пусто. Направьте что-нибудь в socks5://127.0.0.1:{frame.listen.split(' ').nth(1).unwrap_or_default()}"
                     }
+                } else if rows.is_empty() {
+                    div {
+                        style: "padding:28px 8px;font-size:14.5px;color:var(--color-neutral-600)",
+                        "Ничего не нашлось по «{elide(&query, 32)}»."
+                    }
                 }
-                for row in frame.connections.iter() {
+                for row in rows.iter().copied() {
                     div {
                         key: "{row.id}",
                         class: "row",
                         style: "display:grid;{COLUMNS};align-items:center;padding:7px 8px;\
-                                cursor:default;border-bottom:1px solid rgba(239,232,245,.05)",
+                                border-bottom:1px solid rgba(239,232,245,.05)",
                         onclick: {
                             let text = row_as_text(row);
                             move |_| {
@@ -1376,6 +1539,15 @@ fn Connections(frame: Frame) -> Element {
                                 } else {
                                     "буфер обмена занят другой программой".to_owned()
                                 });
+                            }
+                        },
+                        // A rule for its program or its site, right from here.
+                        oncontextmenu: {
+                            let row = row.clone();
+                            move |e: MouseEvent| {
+                                e.prevent_default();
+                                let point = e.client_coordinates();
+                                *ROW_MENU.write() = Some(row_menu(&row, point.x, point.y));
                             }
                         },
                         span {
@@ -1387,7 +1559,7 @@ fn Connections(frame: Frame) -> Element {
                         }
                         span {
                             style: "font-size:12.5px;color:{route_color(row.closed_at.is_some())}",
-                            if row.closed_at.is_some() { "закрыто" } else { "{row.route}" }
+                            if row.closed_at.is_some() { "закрыто" } else { "{route_short(row.route)}" }
                         }
                         span {
                             style: "text-align:right;font-size:13.5px;\
@@ -1405,22 +1577,29 @@ fn Connections(frame: Frame) -> Element {
 
             // Inside the padded column, not after it: a closing brace once
             // ended the column early, and the log ran edge to edge beneath it.
-            LogStrip {}
+            LogDock {}
+        }
+        if let Some(menu) = ROW_MENU() {
+            RowMenuView { menu, copied }
         }
     }
 }
 
 // --- screen: routing ------------------------------------------------------
 
-/// The rule table, and a box for asking it questions.
+/// The rule table, a box for asking it questions, and the editor.
 ///
-/// Shows, explains and tests the rules. Changing them in the window comes with
-/// the rule editor; until then the one change offered is the starting set.
+/// A rule is added with the button over the list or from a connection's
+/// right-click menu, and changed by clicking it. Changes decide the next
+/// connection, with the tunnel left up.
 #[component]
 fn Routing(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
     let view = &frame.routing;
     let query = use_signal(String::new);
+    let suggested = suggested_action(view.fallback);
+    // The editor belongs to this screen; leaving the screen closes it.
+    use_drop(|| *DRAFT.write() = None);
 
     rsx! {
         div {
@@ -1432,6 +1611,14 @@ fn Routing(frame: Frame) -> Element {
                 span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{plural(view.rules.len() as u64, \"правило\", \"правила\", \"правил\")} · \
                      остальное {view.fallback.label()}"
+                }
+                div { style: "margin-left:auto;flex:none;align-self:center",
+                    Button {
+                        label: "Добавить правило",
+                        enabled: true,
+                        onclick: move |_| new_rule(suggested, ""),
+                        icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                    }
                 }
             }
 
@@ -1445,8 +1632,9 @@ fn Routing(frame: Frame) -> Element {
                         span { style: "font-size:14.5px", "Правил пока нет" }
                         span {
                             style: "font-size:13px;line-height:1.45;color:var(--color-neutral-500)",
-                            "Сейчас всё идёт через прокси. Можно добавить стартовый набор: \
-                             реклама блокируется, локальная сеть идёт напрямую."
+                            "Сейчас всё идёт через прокси. Можно добавить стартовый набор — \
+                             реклама блокируется, локальная сеть идёт напрямую, — или своё \
+                             правило кнопкой вверху."
                         }
                     }
                     div { style: "margin-left:auto;flex:none",
@@ -1490,6 +1678,7 @@ fn Routing(frame: Frame) -> Element {
                 Checker {
                     query,
                     result: frame.check.clone(),
+                    suggested,
                     onask: {
                         let controller = controller.clone();
                         move |text: String| controller.send(Command::Check(text))
@@ -1497,11 +1686,19 @@ fn Routing(frame: Frame) -> Element {
                 }
             }
         }
+        if let Some(draft) = DRAFT() {
+            RuleEditor { draft }
+        }
     }
 }
 
 #[component]
 fn RuleList(view: crate::engine::RoutingView) -> Element {
+    let controller = use_context::<Controller>();
+    // The rule whose delete was clicked once; the second click deletes it.
+    let mut armed = use_signal(|| None::<usize>);
+    let count = view.rules.len();
+
     rsx! {
         div {
             style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;padding:15px;\
@@ -1509,8 +1706,10 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                     box-shadow:var(--shadow-sm)",
             div { style: "display:flex;align-items:baseline;gap:10px",
                 span { style: "font:700 16px/1 var(--font-heading)", "Правила" }
-                span { style: "font-size:13px;color:var(--color-neutral-600)",
-                    "сверху вниз, срабатывает первое"
+                span {
+                    style: "font-size:13px;color:var(--color-neutral-600);min-width:0;\
+                            overflow:hidden;white-space:nowrap",
+                    "сверху вниз, срабатывает первое · клик — изменить"
                 }
             }
 
@@ -1519,25 +1718,41 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                         display:flex;flex-direction:column;gap:5px",
                 if view.rules.is_empty() {
                     span {
-                        style: "padding:14px 2px;font-size:14px;color:var(--color-neutral-600)",
-                        "Ни одного правила — значит решает только строка «остальное»."
+                        style: "padding:14px 2px;font-size:14px;line-height:1.5;\
+                                color:var(--color-neutral-600)",
+                        "Ни одного правила — всё решает строка «Всё остальное». Своё правило \
+                         добавляется кнопкой вверху или правым кликом по соединению в «Логах \
+                         и трафике»."
                     }
                 }
-                for rule in view.rules.iter() {
+                for (at, rule) in view.rules.iter().enumerate() {
                     div {
-                        key: "{rule.position}",
+                        key: "{at}",
+                        class: "rule-row",
                         style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;\
-                                border-radius:4px;\
-                                background-color:rgba(239,232,245,.03)",
+                                border-radius:4px",
+                        onclick: {
+                            let source = view.source.get(at).cloned();
+                            move |_| {
+                                if let Some(rule) = &source {
+                                    edit_rule(at, rule);
+                                }
+                            }
+                        },
+                        onmouseleave: move |_| {
+                            if armed() == Some(at) {
+                                armed.set(None);
+                            }
+                        },
                         // The number is the rule: first match wins, so the
                         // order is not decoration.
                         span {
-                            style: "flex:none;width:18px;font-size:13px;text-align:right;\
-                                    color:var(--color-neutral-700);\
+                            style: "flex:none;width:18px;padding-top:1px;font-size:13px;\
+                                    text-align:right;color:var(--color-neutral-700);\
                                     font-variant-numeric:tabular-nums",
                             "{rule.position}"
                         }
-                        div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
+                        div { style: "flex:1;display:flex;flex-direction:column;gap:3px;min-width:0",
                             span { style: "font-size:14px", "{elide(&rule.name, 46)}" }
                             for (n, line) in rule.conditions.iter().enumerate() {
                                 span {
@@ -1548,20 +1763,93 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                                 }
                             }
                         }
-                        div { style: "margin-left:auto;flex:none", ActionPill { action: rule.action } }
+                        div { style: "flex:none;display:flex;align-items:center;gap:8px",
+                            ActionPill { action: rule.action }
+                            div { class: "rule-tools",
+                                IconButton {
+                                    title: "Выше: решает раньше",
+                                    enabled: at > 0,
+                                    onclick: {
+                                        let controller = controller.clone();
+                                        move |_| {
+                                            controller.send(Command::MoveRule {
+                                                from: at,
+                                                to: at.saturating_sub(1),
+                                            })
+                                        }
+                                    },
+                                    icon: rsx! { crate::icons::ChevronUp { size: 16, color: MUTED } },
+                                }
+                                IconButton {
+                                    title: "Ниже",
+                                    enabled: at + 1 < count,
+                                    onclick: {
+                                        let controller = controller.clone();
+                                        move |_| controller.send(Command::MoveRule { from: at, to: at + 1 })
+                                    },
+                                    icon: rsx! { crate::icons::ChevronDown { size: 16, color: MUTED } },
+                                }
+                                IconButton {
+                                    title: "Изменить",
+                                    enabled: true,
+                                    onclick: {
+                                        let source = view.source.get(at).cloned();
+                                        move |_| {
+                                            if let Some(rule) = &source {
+                                                edit_rule(at, rule);
+                                            }
+                                        }
+                                    },
+                                    icon: rsx! { crate::icons::Pencil { size: 15, color: MUTED } },
+                                }
+                                IconButton {
+                                    title: if armed() == Some(at) { "Нажмите ещё раз, чтобы удалить" } else { "Удалить" },
+                                    enabled: true,
+                                    danger: true,
+                                    onclick: {
+                                        let controller = controller.clone();
+                                        move |_| {
+                                            if armed() == Some(at) {
+                                                armed.set(None);
+                                                controller.send(Command::DeleteRule(at));
+                                            } else {
+                                                armed.set(Some(at));
+                                            }
+                                        }
+                                    },
+                                    icon: rsx! {
+                                        crate::icons::Trash {
+                                            size: 15,
+                                            color: if armed() == Some(at) { BAD } else { MUTED },
+                                        }
+                                    },
+                                }
+                            }
+                        }
                     }
                 }
             }
 
             div {
-                style: "display:flex;align-items:center;gap:9px;padding-top:2px;\
+                // Wraps: in the default window the label and three choices do
+                // not share one line, and squeezed, the label broke in two.
+                style: "display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding-top:9px;\
                         border-top-width:1px;border-top-style:solid;border-top-color:var(--color-divider)",
                 span {
-                    style: "padding-top:8px;font-size:13.5px;color:var(--color-neutral-500)",
+                    style: "margin-right:auto;font-size:13.5px;white-space:nowrap;\
+                            color:var(--color-neutral-500)",
                     "Всё остальное"
                 }
-                div { style: "margin-left:auto;padding-top:8px",
-                    ActionPill { action: view.fallback }
+                for action in [Action::Proxy, Action::Direct, Action::Block] {
+                    span {
+                        key: "{action_key(action)}",
+                        class: choice_class("pill-choice", action == view.fallback, action),
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Fallback(action))
+                        },
+                        "{action.label()}"
+                    }
                 }
             }
         }
@@ -1574,8 +1862,13 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
 fn Checker(
     query: Signal<String>,
     result: Option<crate::engine::CheckResult>,
+    /// The action a rule started from here begins with.
+    suggested: Action,
     onask: EventHandler<String>,
 ) -> Element {
+    // `geoip:ru` is a condition for a rule, not an address to check — and it
+    // is exactly what someone looking for a rule editor typed into this box.
+    let condition = crate::rule_text::looks_like_condition(&query());
     rsx! {
         div {
             style: "width:288px;flex:none;display:flex;flex-direction:column;gap:11px;\
@@ -1596,9 +1889,8 @@ fn Checker(
                 autocomplete: "off",
                 spellcheck: "false",
                 style: "padding:8px 10px;border-radius:4px;border:none;\
-                        background-color:#120c1a;color:var(--color-text);font-size:14px;\
-                        font-family:ui-monospace,Consolas,monospace;\
-                        box-shadow:inset 0 0 0 1px rgba(239,232,245,.10)",
+                        color:var(--color-text);font-size:14px;\
+                        font-family:ui-monospace,Consolas,monospace",
                 // The text lives here rather than in the frame: a controlled
                 // input fed from a value that is republished twice a second
                 // fights whoever is typing into it.
@@ -1607,9 +1899,30 @@ fn Checker(
                     query.set(text.clone());
                     onask.call(text);
                 },
+                onkeydown: move |e: KeyboardEvent| {
+                    if e.key() == Key::Enter && condition {
+                        new_rule(suggested, &query());
+                    }
+                },
             }
 
-            if let Some(answer) = result {
+            if condition {
+                div {
+                    style: "display:flex;flex-direction:column;align-items:flex-start;gap:9px;\
+                            padding:11px;border-radius:4px;background-color:rgba(238,130,196,.07);\
+                            box-shadow:inset 0 0 0 1px rgba(238,130,196,.22)",
+                    span { style: "font-size:13px;line-height:1.45;color:var(--color-neutral-300)",
+                        "Это условие для правила, а здесь проверяется адрес сайта. \
+                         Правило с этим условием можно создать сразу."
+                    }
+                    Button {
+                        label: "Создать правило",
+                        enabled: true,
+                        onclick: move |_| new_rule(suggested, &query()),
+                        icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                    }
+                }
+            } else if let Some(answer) = result {
                 div {
                     style: "display:flex;flex-direction:column;gap:7px;padding:11px;\
                             border-radius:4px;background-color:rgba(239,232,245,.03)",
@@ -1673,7 +1986,7 @@ fn elide(s: &str, width: usize) -> String {
 ///
 /// Machine-written text gives itself away here more than anywhere else, and the
 /// rule is four lines.
-fn plural(n: u64, one: &str, few: &str, many: &str) -> String {
+pub(crate) fn plural(n: u64, one: &str, few: &str, many: &str) -> String {
     let form = match (n % 10, n % 100) {
         (1, rest) if rest != 11 => one,
         (2..=4, rest) if !(12..=14).contains(&rest) => few,
@@ -1836,7 +2149,7 @@ mod tests {
         for (token, literal) in [
             ("--radius-sm", "4px"),
             ("--radius-md", "8px"),
-            // The toggle's pill.
+            // The rule editor's corners, in app.css.
             ("--radius-lg", "14px"),
         ] {
             let declaration = format!("{token}: {literal};");
@@ -1922,6 +2235,94 @@ mod tests {
         }
     }
 
+    /// Up to the default window nothing is scaled; past it the page grows, in
+    /// steps, and never so much that a maximised window looks like a poster.
+    #[test]
+    fn the_page_grows_with_the_window_only_past_the_default_size() {
+        assert_eq!(zoom_for(1040.0, 660.0), 1.0);
+        assert_eq!(zoom_for(880.0, 560.0), 1.0);
+        assert_eq!(zoom_for(4000.0, 660.0), 1.0, "the smaller ratio decides");
+        assert_eq!(zoom_for(0.0, 0.0), 1.0);
+        // Maximised on the 2560 by 1440 monitor this was reported from.
+        let maximised = zoom_for(2560.0, 1392.0);
+        assert!((1.3..=1.6).contains(&maximised), "{maximised}");
+
+        let mut last = 1.0;
+        for step in 0..200 {
+            let step = f64::from(step);
+            let zoom = zoom_for(1040.0 + 20.0 * step, 660.0 + 13.0 * step);
+            assert!(zoom >= last, "never smaller in a larger window");
+            assert!(
+                ((zoom * 20.0).round() - zoom * 20.0).abs() < 1e-9,
+                "in steps of 5%: {zoom}"
+            );
+            last = zoom;
+        }
+        assert!(last <= 1.6, "{last}");
+    }
+
+    /// Clickable things take their pointer from app.css, and an inline cursor
+    /// outranks any class: a `cursor:default` left inline on the action cards
+    /// is why hovering them changed nothing. Only the window's own chrome, the
+    /// drag strip and its three buttons, keeps the arrow inline.
+    #[test]
+    fn only_the_window_chrome_sets_a_cursor_inline() {
+        let marker = ["cursor", ":"].concat();
+        let inline: Vec<&str> = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains(&marker))
+            .collect();
+        assert_eq!(inline.len(), 2, "{inline:#?}");
+    }
+
+    #[test]
+    fn the_table_searches_and_sorts_what_it_shows() {
+        let row = |id: u64, target: &str, process: Option<&str>, down: u64, up: u64| {
+            bliss_core::Snapshot {
+                id,
+                target: target.to_owned(),
+                route: bliss_core::Route::Proxy,
+                rule: "по умолчанию".to_owned(),
+                process: process.map(str::to_owned),
+                opened_at: jiff::Timestamp::UNIX_EPOCH,
+                closed_at: None,
+                up,
+                down,
+            }
+        };
+        let rows = [
+            row(3, "a.example:443", Some("Chrome.exe"), 10, 500),
+            row(2, "b.example:443", Some("telegram.exe"), 900, 5),
+            row(1, "c.example:443", None, 50, 50),
+        ];
+        let ids =
+            |shown: Vec<&bliss_core::Snapshot>| shown.iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids(table_rows(&rows, "", Sort::Newest)), [3, 2, 1]);
+        assert_eq!(
+            ids(table_rows(&rows, "CHROME", Sort::Newest)),
+            [3],
+            "any case"
+        );
+        assert_eq!(
+            ids(table_rows(&rows, " example ", Sort::DownMost)),
+            [2, 1, 3]
+        );
+        assert_eq!(ids(table_rows(&rows, "", Sort::DownLeast)), [3, 1, 2]);
+        assert_eq!(ids(table_rows(&rows, "", Sort::UpMost)), [3, 1, 2]);
+        assert_eq!(ids(table_rows(&rows, "", Sort::UpLeast)), [2, 1, 3]);
+        assert!(table_rows(&rows, "nothing", Sort::Newest).is_empty());
+    }
+
+    #[test]
+    fn the_time_since_an_update_reads_like_speech() {
+        assert_eq!(ago(1_000, 1_030), "только что");
+        assert_eq!(ago(1_000, 1_000 + 5 * 60), "5 минут назад");
+        assert_eq!(ago(1_000, 1_000 + 3600), "1 час назад");
+        assert_eq!(ago(1_000, 1_000 + 3 * 86_400), "3 дня назад");
+        assert_eq!(ago(5_000, 1_000), "только что", "a clock that moved back");
+    }
+
     #[test]
     fn russian_plurals_agree() {
         let count = |n| plural(n, "соединение", "соединения", "соединений");
@@ -2001,7 +2402,7 @@ fn LogStrip() -> Element {
 
     rsx! {
         div {
-            style: "flex:1;min-height:150px;display:flex;flex-direction:column;gap:9px",
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:9px",
             div { style: "display:flex;align-items:center;gap:10px",
                 span { style: "font:700 14px/1 var(--font-heading)", "Журнал" }
                 span { class: "tag tag-accent", style: "font-size:11px;padding:2px 8px", "live" }
@@ -2046,7 +2447,7 @@ fn LogStrip() -> Element {
                     div {
                         key: "{n}",
                         class: "logline",
-                        style: "display:flex;gap:10px;align-items:baseline;cursor:default;\
+                        style: "display:flex;gap:10px;align-items:baseline;\
                                 border-radius:3px;margin:0 -4px;padding:0 4px",
                         onclick: {
                             let text = as_text(line);
@@ -2106,4 +2507,861 @@ fn row_as_text(row: &bliss_core::Snapshot) -> String {
 /// into — the same reason the pane gives the column a fixed width.
 fn as_text(line: &crate::logs::Line) -> String {
     format!("{}  {:<5}  {}", line.time, line.level.label(), line.text)
+}
+
+// --- zoom -----------------------------------------------------------------
+
+/// How much to scale the page for a window this size, in logical pixels.
+///
+/// The screens are laid out for the default window, 1040 by 660. Maximised on
+/// a large monitor, the same cards stretched across twice the width with the
+/// same 14-pixel text: a small window's content lost in a big one. So past the
+/// default size the page grows with the window — by the smaller of the two
+/// ratios, so neither direction overflows, and by only half of it, so more
+/// room still shows more rather than the same things blown up. In steps of 5%,
+/// so a live resize does not reflow the page at every pixel.
+fn zoom_for(width: f64, height: f64) -> f64 {
+    const BASE: (f64, f64) = (1040.0, 660.0);
+    const GROWTH: f64 = 0.5;
+    const MOST: f64 = 1.6;
+    let ratio = (width / BASE.0).min(height / BASE.1);
+    if !ratio.is_finite() || ratio <= 1.0 {
+        return 1.0;
+    }
+    let zoom = (1.0 + (ratio - 1.0) * GROWTH).min(MOST);
+    (zoom * 20.0).floor() / 20.0
+}
+
+/// Scales the page with the window; see `zoom_for`.
+#[component]
+fn WindowZoom() -> Element {
+    let desktop = dioxus::desktop::window();
+    let applied = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(1.0_f64)));
+    use_hook({
+        let desktop = desktop.clone();
+        let applied = applied.clone();
+        move || apply_zoom(&desktop, &applied)
+    });
+    dioxus::desktop::use_wry_event_handler(move |event, _| {
+        use dioxus::desktop::tao::event::{Event, WindowEvent};
+        if let Event::WindowEvent {
+            window_id,
+            event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } = event
+            && *window_id == desktop.window.id()
+        {
+            apply_zoom(&desktop, &applied);
+        }
+    });
+    rsx! {}
+}
+
+fn apply_zoom(desktop: &dioxus::desktop::DesktopContext, applied: &std::cell::Cell<f64>) {
+    let (width, height) = logical_size(&desktop.window);
+    // Minimised, the window reports next to no size; keep the zoom it had.
+    if width < 100.0 || height < 100.0 {
+        return;
+    }
+    let zoom = zoom_for(width, height);
+    if zoom != applied.get() {
+        applied.set(zoom);
+        desktop.set_zoom_level(zoom);
+    }
+}
+
+/// The window's inside, in logical pixels.
+fn logical_size(window: &Window) -> (f64, f64) {
+    let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+    (size.width, size.height)
+}
+
+/// The page's size in CSS pixels: the window's, divided by its zoom.
+fn viewport() -> (f64, f64) {
+    let desktop = dioxus::desktop::window();
+    let (width, height) = logical_size(&desktop.window);
+    let zoom = zoom_for(width, height);
+    (width / zoom, height / zoom)
+}
+
+// --- shared pieces ----------------------------------------------------------
+
+/// The line about what the last action did. Keyed by its id, so a new line
+/// fades in even when it replaces one still showing.
+#[component]
+fn ToastLine(toast: Option<crate::engine::Toast>) -> Element {
+    let Some(toast) = toast else {
+        return rsx! {};
+    };
+    rsx! {
+        div { key: "{toast.id}", class: if toast.bad { "toast bad" } else { "toast" }, "{toast.text}" }
+    }
+}
+
+/// A small square button with an icon and no label, for the tools on a row.
+///
+/// It keeps its click to itself: the row under it has a click of its own.
+#[component]
+fn IconButton(
+    icon: Element,
+    title: String,
+    enabled: bool,
+    #[props(default)] danger: bool,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    let class = match (enabled, danger) {
+        (false, _) => "icon-btn disabled",
+        (true, true) => "icon-btn danger",
+        (true, false) => "icon-btn",
+    };
+    rsx! {
+        div {
+            class: "{class}",
+            title: "{title}",
+            onclick: move |e: MouseEvent| {
+                e.stop_propagation();
+                if enabled {
+                    onclick.call(e);
+                }
+            },
+            {icon}
+        }
+    }
+}
+
+fn action_key(action: Action) -> &'static str {
+    match action {
+        Action::Proxy => "proxy",
+        Action::Direct => "direct",
+        Action::Block => "block",
+    }
+}
+
+fn action_phrase(action: Action) -> &'static str {
+    match action {
+        Action::Proxy => "Через прокси",
+        Action::Direct => "Напрямую",
+        Action::Block => "Блокировать",
+    }
+}
+
+/// The class of one of three action choices: which action, and whether it is
+/// the chosen one. State by class, never inline (see the note at the top).
+fn choice_class(base: &str, on: bool, action: Action) -> String {
+    let on = if on { " on" } else { "" };
+    format!("{base} {}{on}", action_key(action))
+}
+
+// --- the connections table ----------------------------------------------------
+
+/// The connections the table shows: those matching the search, in the order
+/// asked for. A stable sort, so rows with equal traffic keep the engine's
+/// newest-first order.
+fn table_rows<'a>(
+    rows: &'a [bliss_core::Snapshot],
+    query: &str,
+    sort: Sort,
+) -> Vec<&'a bliss_core::Snapshot> {
+    let query = query.trim().to_lowercase();
+    let mut shown: Vec<&bliss_core::Snapshot> = rows
+        .iter()
+        .filter(|row| {
+            query.is_empty()
+                || row.target.to_lowercase().contains(&query)
+                || row
+                    .process
+                    .as_deref()
+                    .is_some_and(|process| process.to_lowercase().contains(&query))
+                || row.rule.to_lowercase().contains(&query)
+        })
+        .collect();
+    match sort {
+        Sort::Newest => {}
+        Sort::DownMost => shown.sort_by_key(|row| std::cmp::Reverse(row.down)),
+        Sort::DownLeast => shown.sort_by_key(|row| row.down),
+        Sort::UpMost => shown.sort_by_key(|row| std::cmp::Reverse(row.up)),
+        Sort::UpLeast => shown.sort_by_key(|row| row.up),
+    }
+    shown
+}
+
+/// A column header that orders the table by its traffic: most first, then
+/// least first, then back to the engine's own order.
+#[component]
+fn SortHeader(label: &'static str, most: Sort, least: Sort) -> Element {
+    let sort = TABLE_SORT();
+    let (mark, tip) = if sort == most {
+        (" ↓", "сначала больше всего; ещё клик — сначала меньше")
+    } else if sort == least {
+        (" ↑", "сначала меньше всего; ещё клик — как было")
+    } else {
+        ("", "упорядочить по трафику")
+    };
+    rsx! {
+        span {
+            class: if sort == most || sort == least { "sort on" } else { "sort" },
+            style: "text-align:right",
+            title: "{tip}",
+            onclick: move |_| {
+                *TABLE_SORT.write() = if sort == most {
+                    least
+                } else if sort == least {
+                    Sort::Newest
+                } else {
+                    most
+                };
+            },
+            "{label}{mark}"
+        }
+    }
+}
+
+fn route_short(route: bliss_core::Route) -> &'static str {
+    match route {
+        bliss_core::Route::Proxy => "прокси",
+        bliss_core::Route::Direct => "напрямую",
+        bliss_core::Route::Blocked => "блок",
+    }
+}
+
+fn route_word(route: bliss_core::Route) -> &'static str {
+    match route {
+        bliss_core::Route::Proxy => "через прокси",
+        bliss_core::Route::Direct => "напрямую",
+        bliss_core::Route::Blocked => "заблокировано",
+    }
+}
+
+fn row_menu(row: &bliss_core::Snapshot, x: f64, y: f64) -> RowMenu {
+    let host = bliss_core::Target::parse_authority(&row.target)
+        .map(|target| target.host())
+        .unwrap_or_else(|_| row.target.clone());
+    RowMenu {
+        x,
+        y,
+        target: row.target.clone(),
+        host,
+        process: row.process.clone(),
+        route: row.route,
+        rule: row.rule.clone(),
+        text: row_as_text(row),
+    }
+}
+
+fn subject_label(subject: &Subject) -> String {
+    match subject {
+        Subject::Program(name) => format!("программа · {}", elide(name, 22)),
+        Subject::Site(site) => format!("сайт · {}", elide(site, 26)),
+        Subject::Address(ip) => format!("адрес · {}", elide(ip, 26)),
+    }
+}
+
+/// What a right-click on a connection offers: the three routes for its
+/// program, the three for its site, and a copy of the row.
+#[component]
+fn RowMenuView(menu: RowMenu, mut copied: Signal<String>) -> Element {
+    let controller = use_context::<Controller>();
+    // A connection that named an address has no site; the address stands in.
+    let place = match crate::rule_text::site(&menu.host) {
+        Some(site) => Subject::Site(site),
+        None => Subject::Address(
+            menu.host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_owned(),
+        ),
+    };
+    let subjects: Vec<Subject> = menu
+        .process
+        .clone()
+        .map(Subject::Program)
+        .into_iter()
+        .chain(std::iter::once(place))
+        .collect();
+
+    // Kept inside the window: opened upwards when it would run off the bottom.
+    let (width, height) = viewport();
+    let groups = subjects.len() as f64;
+    let tall = 12.0 + 27.0 + groups * (11.0 + 27.0 + 3.0 * 33.0) + 11.0 + 33.0;
+    let left = menu.x.min(width - 256.0).max(4.0);
+    let top = if menu.y + tall > height - 6.0 {
+        (menu.y - tall).max(4.0)
+    } else {
+        menu.y
+    };
+    let target = menu.target.clone();
+    let process = menu.process.clone();
+    let text = menu.text.clone();
+
+    rsx! {
+        div {
+            class: "menu-veil",
+            onclick: move |_| *ROW_MENU.write() = None,
+            oncontextmenu: move |e: MouseEvent| {
+                e.prevent_default();
+                *ROW_MENU.write() = None;
+            },
+        }
+        div { class: "menu", style: "left:{left}px;top:{top}px",
+            div { class: "menu-title",
+                "сейчас {route_word(menu.route)} · {elide(&menu.rule, 20)}"
+            }
+            for subject in subjects {
+                div { key: "{subject.value()}",
+                    div { class: "menu-sep" }
+                    div { class: "menu-title", "{subject_label(&subject)}" }
+                    for action in [Action::Proxy, Action::Direct, Action::Block] {
+                        div {
+                            key: "{action_key(action)}",
+                            class: "menu-item",
+                            onclick: {
+                                let controller = controller.clone();
+                                let subject = subject.clone();
+                                let target = target.clone();
+                                let process = process.clone();
+                                move |_| {
+                                    controller.send(Command::RouteOne {
+                                        subject: subject.clone(),
+                                        action,
+                                        target: target.clone(),
+                                        process: process.clone(),
+                                    });
+                                    *ROW_MENU.write() = None;
+                                }
+                            },
+                            span { class: "menu-dot {action_key(action)}" }
+                            "{action_phrase(action)}"
+                        }
+                    }
+                }
+            }
+            div { class: "menu-sep" }
+            div {
+                class: "menu-item",
+                onclick: move |_| {
+                    copied.set(if crate::clipboard::copy(&text) {
+                        format!("скопировано: {}", elide(&text, 44))
+                    } else {
+                        "буфер обмена занят другой программой".to_owned()
+                    });
+                    *ROW_MENU.write() = None;
+                },
+                crate::icons::Copy { size: 14, color: MUTED }
+                "Скопировать строку"
+            }
+        }
+    }
+}
+
+/// The log under the connections table, and the bar that shares the height
+/// between them.
+#[component]
+fn LogDock() -> Element {
+    use dioxus::prelude::dioxus_elements::input_data::MouseButton;
+
+    // Where a drag began: the pointer's height on the page, and the log's.
+    let mut drag = use_signal(|| None::<(f64, f64)>);
+    let height = LOG_HEIGHT();
+    rsx! {
+        div {
+            class: if drag().is_some() { "splitter dragging" } else { "splitter" },
+            title: "Потяните, чтобы изменить высоту журнала. Двойной клик — как было",
+            onmousedown: move |e: MouseEvent| {
+                e.prevent_default();
+                drag.set(Some((e.client_coordinates().y, LOG_HEIGHT())));
+            },
+            ondoubleclick: move |_| *LOG_HEIGHT.write() = DEFAULT_LOG_HEIGHT,
+        }
+        // Over the whole window while dragging, so the moves keep coming
+        // however fast the pointer leaves the bar.
+        if let Some((from, start)) = drag() {
+            div {
+                class: "drag-veil",
+                onmousemove: move |e: MouseEvent| {
+                    // Released outside the window, where no mouseup reaches us.
+                    if !e.held_buttons().contains(MouseButton::Primary) {
+                        drag.set(None);
+                        return;
+                    }
+                    let (_, page) = viewport();
+                    let wanted = start + (from - e.client_coordinates().y);
+                    *LOG_HEIGHT.write() =
+                        wanted.clamp(MIN_LOG_HEIGHT, (page - 330.0).max(MIN_LOG_HEIGHT));
+                },
+                onmouseup: move |_| drag.set(None),
+            }
+        }
+        div {
+            style: "flex:none;height:{height}px;max-height:calc(100vh - 330px);min-height:0;\
+                    display:flex;flex-direction:column",
+            LogStrip {}
+        }
+    }
+}
+
+// --- the rule editor ------------------------------------------------------------
+
+/// The action a new rule starts with: anything but what already happens to
+/// everything else, since a rule that repeats the fallback changes nothing.
+fn suggested_action(fallback: Action) -> Action {
+    match fallback {
+        Action::Proxy => Action::Direct,
+        Action::Direct | Action::Block => Action::Proxy,
+    }
+}
+
+fn new_rule(action: Action, conditions: &str) {
+    *DRAFT.write() = Some(Draft {
+        at: None,
+        name: String::new(),
+        action,
+        conditions: conditions.trim().to_owned(),
+        problem: None,
+        deleting: false,
+    });
+}
+
+fn edit_rule(at: usize, rule: &bliss_proto::Rule) {
+    *DRAFT.write() = Some(Draft {
+        at: Some(at),
+        name: rule.name.clone().unwrap_or_default(),
+        action: rule.action,
+        conditions: crate::rule_text::to_text(rule),
+        problem: None,
+        deleting: false,
+    });
+}
+
+/// The shapes a condition takes, shown under the box they are typed into.
+const CONDITION_HINTS: [(&str, &str); 8] = [
+    ("youtube.com", "сайт и всё, что под ним"),
+    ("full:a.example", "ровно это имя"),
+    ("keyword:video", "слово где угодно в имени"),
+    ("geosite:category-ru", "набор сайтов из geosite.dat"),
+    ("geoip:ru", "адреса страны"),
+    ("10.0.0.0/8", "адрес или подсеть"),
+    ("port:443", "порт или диапазон 6881-6889"),
+    ("process:telegram.exe", "программа"),
+];
+
+/// A label over a field in the editor.
+const LABEL: &str = "font-size:12px;letter-spacing:.08em;text-transform:uppercase;\
+                     color:var(--color-neutral-500)";
+
+/// Adding or changing one rule, over the routing screen.
+///
+/// It closes by Save, Cancel, the cross, Esc or a click beside it — every way
+/// out anyone might try. The screen before it offered an "add" that led
+/// nowhere a rule could be written, and no obvious way back.
+#[component]
+fn RuleEditor(draft: Draft) -> Element {
+    let controller = use_context::<Controller>();
+    let geoip = draft.conditions.to_ascii_lowercase().contains("geoip:");
+    let heading = match draft.at {
+        Some(at) => format!("Правило №{}", at + 1),
+        None => "Новое правило".to_owned(),
+    };
+    let delete = {
+        let controller = controller.clone();
+        move || {
+            let Some(current) = DRAFT() else { return };
+            let Some(at) = current.at else { return };
+            if current.deleting {
+                controller.send(Command::DeleteRule(at));
+                *DRAFT.write() = None;
+            } else if let Some(open) = DRAFT.write().as_mut() {
+                open.deleting = true;
+            }
+        }
+    };
+    let save = move || {
+        let Some(current) = DRAFT() else { return };
+        match crate::rule_text::parse(&current.name, current.action, &current.conditions) {
+            Ok(rule) => {
+                controller.send(Command::SaveRule {
+                    at: current.at,
+                    rule,
+                });
+                *DRAFT.write() = None;
+            }
+            Err(why) => {
+                if let Some(open) = DRAFT.write().as_mut() {
+                    open.problem = Some(why);
+                }
+            }
+        }
+    };
+    // Cloned here rather than inside rsx: it builds handlers in its own order,
+    // and a clone taken there can come after the button has moved the original.
+    let save_on_key = save.clone();
+
+    rsx! {
+        div {
+            class: "veil",
+            // Ctrl+V leaves the window alone while this is open: see KEY_LISTENER.
+            "data-modal": "true",
+            onclick: move |_| *DRAFT.write() = None,
+            div {
+                class: "dialog-card",
+                onclick: move |e: MouseEvent| e.stop_propagation(),
+                div { style: "flex:none;display:flex;align-items:center;gap:10px",
+                    span {
+                        style: "font-weight:700;font-size:20px;line-height:1.2;\
+                                font-family:var(--font-heading)",
+                        "{heading}"
+                    }
+                    div { style: "margin-left:auto",
+                        IconButton {
+                            title: "Закрыть — Esc",
+                            enabled: true,
+                            onclick: move |_| *DRAFT.write() = None,
+                            icon: rsx! { crate::icons::Close { size: 16, color: MUTED } },
+                        }
+                    }
+                }
+
+                // Only this part scrolls, so the heading and the buttons stay in
+                // view however far the notes below push the height.
+                div { class: "dialog-body",
+                    // Why a save was refused, first: after a Ctrl+Enter the
+                    // reason must be where the eye already is, not scrolled away.
+                    if let Some(problem) = &draft.problem {
+                        span {
+                            style: "flex:none;font-size:13px;line-height:1.45;color:#f2a7ad;\
+                                    word-break:break-word",
+                            "{problem}"
+                        }
+                    }
+
+                    div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+                        span { style: LABEL, "Название" }
+                        input {
+                            class: "field",
+                            r#type: "text",
+                            value: "{draft.name}",
+                            placeholder: "можно не заполнять — назовётся по условиям",
+                            autocomplete: "off",
+                            spellcheck: "false",
+                            style: "padding:8px 10px;border-radius:4px;border:none;\
+                                    color:var(--color-text);font-size:14px",
+                            oninput: move |e| {
+                                if let Some(open) = DRAFT.write().as_mut() {
+                                    open.name = e.value();
+                                }
+                            },
+                        }
+                    }
+
+                    div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+                        span { style: LABEL, "Что делать" }
+                        div { style: "display:flex;gap:8px",
+                            for action in [Action::Proxy, Action::Direct, Action::Block] {
+                                div {
+                                    key: "{action_key(action)}",
+                                    class: choice_class("seg-choice", action == draft.action, action),
+                                    onclick: move |_| {
+                                        if let Some(open) = DRAFT.write().as_mut() {
+                                            open.action = action;
+                                        }
+                                    },
+                                    span { class: "menu-dot {action_key(action)}" }
+                                    "{action_phrase(action)}"
+                                }
+                            }
+                        }
+                    }
+
+                    div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+                        span { style: LABEL, "Условия — по одному в строке, хватит любого" }
+                        textarea {
+                            class: "field",
+                            value: "{draft.conditions}",
+                            rows: "5",
+                            spellcheck: "false",
+                            placeholder: "geoip:ru\ngeosite:category-ru\nyoutube.com",
+                            style: "min-height:112px;resize:vertical;padding:9px 10px;\
+                                    border-radius:4px;border:none;color:var(--color-text);\
+                                    font-size:14px;line-height:1.55;\
+                                    font-family:ui-monospace,Consolas,monospace",
+                            onmounted: move |e: MountedEvent| async move {
+                                let _ = e.data().set_focus(true).await;
+                            },
+                            oninput: move |e| {
+                                if let Some(open) = DRAFT.write().as_mut() {
+                                    open.conditions = e.value();
+                                    open.problem = None;
+                                }
+                            },
+                            onkeydown: move |e: KeyboardEvent| {
+                                if e.key() == Key::Enter && e.modifiers().ctrl() {
+                                    e.prevent_default();
+                                    save_on_key();
+                                }
+                            },
+                        }
+                    }
+
+                    if geoip {
+                        span {
+                            style: "flex:none;font-size:12.5px;line-height:1.5;color:#cbbaf4;\
+                                    padding:9px 11px;border-radius:4px;\
+                                    background-color:rgba(203,186,244,.07);\
+                                    box-shadow:inset 0 0 0 1px rgba(203,186,244,.18)",
+                            "geoip сравнивает адреса, а не имена сайтов. Браузер через прокси \
+                             называет сайт по имени, так что это правило поймает только \
+                             программы, которые подключаются сразу по адресу. Сайты страны \
+                             ловит geosite — например, geosite:category-ru."
+                        }
+                    }
+
+                    div {
+                        style: "flex:none;display:grid;grid-template-columns:auto 1fr;gap:2px 14px;\
+                                font-size:12.5px;line-height:1.5",
+                        for (example, meaning) in CONDITION_HINTS {
+                            div { key: "{example}", style: "display:contents",
+                                span {
+                                    style: "font-family:ui-monospace,Consolas,monospace;\
+                                            color:var(--color-neutral-300)",
+                                    "{example}"
+                                }
+                                span { style: "color:var(--color-neutral-600)", "{meaning}" }
+                            }
+                        }
+                    }
+                }
+
+                div { style: "flex:none;display:flex;align-items:center;gap:8px;padding-top:2px",
+                    if draft.at.is_some() {
+                        Button {
+                            label: if draft.deleting { "Точно удалить?" } else { "Удалить" },
+                            enabled: true,
+                            onclick: move |_| delete(),
+                            icon: rsx! { crate::icons::Trash { size: 15, color: BAD } },
+                        }
+                    }
+                    span {
+                        style: "margin-left:auto;font-size:12px;color:var(--color-neutral-700);\
+                                white-space:nowrap",
+                        "Ctrl+Enter — сохранить"
+                    }
+                    Button {
+                        label: "Отмена",
+                        enabled: true,
+                        onclick: move |_| *DRAFT.write() = None,
+                        icon: rsx! { crate::icons::Close { size: 15, color: MUTED } },
+                    }
+                    Button {
+                        label: "Сохранить",
+                        enabled: true,
+                        onclick: move |_| save(),
+                        icon: rsx! { crate::icons::Check { size: 15, color: ACCENT } },
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- screen: subscriptions ----------------------------------------------------
+
+/// The provider lists bliss fetches its servers from.
+#[component]
+fn Subscriptions(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let servers: usize = frame.subscriptions.iter().map(|s| s.servers).sum();
+    let all_busy = frame.subscriptions.iter().all(|s| s.fetching);
+
+    rsx! {
+        div {
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:13px;\
+                    padding:18px 20px",
+            div { style: "display:flex;align-items:baseline;gap:10px",
+                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Подписки" }
+                span {
+                    style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;\
+                            overflow:hidden;white-space:nowrap",
+                    "{plural(frame.subscriptions.len() as u64, \"подписка\", \"подписки\", \"подписок\")} · \
+                     {plural(servers as u64, \"сервер\", \"сервера\", \"серверов\")}"
+                }
+                div { style: "margin-left:auto;flex:none;align-self:center",
+                    Button {
+                        label: "Обновить все",
+                        enabled: !frame.subscriptions.is_empty() && !all_busy,
+                        onclick: move |_| controller.send(Command::Refresh(None)),
+                        icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
+                    }
+                }
+            }
+
+            div {
+                style: "flex:none;display:flex;flex-direction:column;gap:10px;padding:15px;\
+                        background-color:var(--color-surface);border-radius:8px;\
+                        box-shadow:var(--shadow-sm)",
+                span { style: "font:700 16px/1 var(--font-heading)", "Добавить подписку" }
+                span { style: "font-size:13px;line-height:1.5;color:var(--color-neutral-500)",
+                    "Адрес списка серверов от провайдера. bliss загрузит список — через туннель, \
+                     если он поднят, — и будет обновлять его раз в 12 часов. Ctrl+V в любом месте \
+                     окна тоже добавляет."
+                }
+                ImportForm { frame: frame.clone(), placeholder: "https://…" }
+            }
+
+            div {
+                style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
+                        display:flex;flex-direction:column;gap:9px",
+                if frame.subscriptions.is_empty() {
+                    span {
+                        style: "padding:10px 2px;font-size:14px;line-height:1.5;\
+                                color:var(--color-neutral-600)",
+                        "Подписок пока нет. Серверы из подписки появятся в списке серверов \
+                         и будут обновляться сами."
+                    }
+                }
+                for row in frame.subscriptions.iter() {
+                    SubscriptionCard { key: "{row.id}", row: row.clone() }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
+    let controller = use_context::<Controller>();
+    // "Удалить" clicked once; the second click deletes.
+    let mut armed = use_signal(|| false);
+    let now = jiff::Timestamp::now().as_second();
+    let (status, tone) = if row.fetching {
+        ("загружаю список…".to_owned(), "var(--color-accent-2-300)")
+    } else if let Some(problem) = &row.problem {
+        (problem.clone(), "#f2a7ad")
+    } else {
+        match row.updated {
+            Some(at) => (
+                format!("обновлена {}", ago(at, now)),
+                "var(--color-neutral-500)",
+            ),
+            None => ("ещё не загружена".to_owned(), "var(--color-neutral-500)"),
+        }
+    };
+    let usage = row.usage.map(|usage| {
+        let used = usage.upload.saturating_add(usage.download);
+        let amount = if usage.total > 0 {
+            format!("{} из {}", bytes(used), bytes(usage.total))
+        } else {
+            format!("израсходовано {}", bytes(used))
+        };
+        let until = usage
+            .expire
+            .and_then(date)
+            .map(|day| format!(" · до {day}"))
+            .unwrap_or_default();
+        let share = if usage.total > 0 {
+            (used as f64 / usage.total as f64).clamp(0.0, 1.0) * 100.0
+        } else {
+            0.0
+        };
+        (format!("{amount}{until}"), share, usage.total > 0)
+    });
+    let refresh = {
+        let controller = controller.clone();
+        let id = row.id.clone();
+        move |_| controller.send(Command::Refresh(Some(id.clone())))
+    };
+    let id = row.id.clone();
+
+    rsx! {
+        div {
+            style: "flex:none;display:flex;align-items:flex-start;gap:13px;padding:14px;\
+                    background-color:var(--color-surface);border-radius:8px;\
+                    box-shadow:var(--shadow-sm)",
+            onmouseleave: move |_| armed.set(false),
+            div {
+                style: "width:36px;height:36px;flex:none;display:grid;place-items:center;\
+                        border-radius:8px;background-color:rgba(238,130,196,.10)",
+                crate::icons::Rss { size: 18, color: ACCENT }
+            }
+            div { style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px",
+                span { style: "font-size:15px;font-weight:700", "{elide(&row.name, 44)}" }
+                span {
+                    style: "font-size:12.5px;color:var(--color-neutral-600);\
+                            font-family:ui-monospace,Consolas,monospace",
+                    "{row.shown_url}"
+                }
+                span { style: "font-size:13px;line-height:1.45;word-break:break-word",
+                    span { style: "color:var(--color-neutral-400)",
+                        "{plural(row.servers as u64, \"сервер\", \"сервера\", \"серверов\")} · "
+                    }
+                    span { style: "color:{tone}", "{status}" }
+                }
+                if let Some((text, share, limited)) = usage {
+                    div { style: "display:flex;flex-direction:column;gap:5px;max-width:420px;padding-top:3px",
+                        if limited {
+                            div {
+                                style: "height:5px;border-radius:3px;overflow:hidden;\
+                                        background-color:rgba(239,232,245,.08)",
+                                div {
+                                    style: "height:100%;width:{share}%;border-radius:3px;\
+                                            background-color:{usage_tone(share)}",
+                                }
+                            }
+                        }
+                        span {
+                            style: "font-size:12.5px;color:var(--color-neutral-500);\
+                                    font-variant-numeric:tabular-nums",
+                            "{text}"
+                        }
+                    }
+                }
+            }
+            div { style: "flex:none;display:flex;gap:6px",
+                Button {
+                    label: if row.fetching { "Загружаю…" } else { "Обновить" },
+                    enabled: !row.fetching,
+                    onclick: refresh,
+                    icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
+                }
+                Button {
+                    label: if armed() { "Точно удалить?" } else { "Удалить" },
+                    enabled: true,
+                    onclick: move |_| {
+                        if armed() {
+                            armed.set(false);
+                            controller.send(Command::DeleteSubscription(id.clone()));
+                        } else {
+                            armed.set(true);
+                        }
+                    },
+                    icon: rsx! { crate::icons::Trash { size: 15, color: BAD } },
+                }
+            }
+        }
+    }
+}
+
+/// Violet while there is plenty left, the failure colour near the end.
+fn usage_tone(percent: f64) -> &'static str {
+    if percent >= 90.0 { BAD } else { "#a98ce8" }
+}
+
+/// How long ago, in the words a person would use.
+fn ago(then: i64, now: i64) -> String {
+    let seconds = now.saturating_sub(then).max(0).unsigned_abs();
+    match seconds {
+        0..60 => "только что".to_owned(),
+        60..3600 => format!(
+            "{} назад",
+            plural(seconds / 60, "минуту", "минуты", "минут")
+        ),
+        3600..86_400 => format!("{} назад", plural(seconds / 3600, "час", "часа", "часов")),
+        _ => format!("{} назад", plural(seconds / 86_400, "день", "дня", "дней")),
+    }
+}
+
+/// A day, the way a Russian date is written.
+fn date(unix: i64) -> Option<String> {
+    let zoned = jiff::Timestamp::from_second(unix)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::system());
+    Some(zoned.strftime("%d.%m.%Y").to_string())
 }

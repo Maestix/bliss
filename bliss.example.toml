@@ -48,9 +48,8 @@ system_proxy = "unchanged"
 #   bliss route youtube.com
 #   bliss route 1.2.3.4 --process qbittorrent.exe
 
-# Пока раздела [routing] нет, всё идёт через прокси. Кнопка «Добавить набор» в
-# разделе «Маршрутизация» окна допишет стартовый набор в конец этого файла.
-# Или раскомментируйте [routing] и нужные блоки ниже сами.
+# Пока раздела [routing] нет, всё идёт через прокси. Правила добавляются в окне,
+# в разделе «Маршрутизация»; для `bliss run` их можно раскомментировать здесь.
 #
 # [routing]
 # # Куда идёт всё, что не подошло ни под одно правило.
@@ -103,6 +102,17 @@ system_proxy = "unchanged"
 
 # Где лежат geosite.dat и geoip.dat. Не задано — те, что пришли с движком.
 # geo_dir = "C:/path/to/geo"
+
+# Subscriptions: an address a provider publishes its server list at. Added in
+# the window (the Subscriptions screen, or Ctrl+V anywhere) and fetched again
+# every 12 hours. Their servers are ordinary [[server]] entries whose `group` is
+# the subscription's `id`. The address carries a personal token: it is as secret
+# as a link.
+#
+# [[subscription]]
+# id = "18f3a2b4c5d"
+# name = "My provider"
+# url = "https://sub.example/api/sub/…"
 
 [engine]
 # Left unset, bliss uses the engine it downloads itself (`bliss engine install`).

@@ -74,7 +74,7 @@ impl Default for Routing {
 /// Every list is optional and a rule matches if **any** entry in **any** of its
 /// lists matches. Written the other way round — all lists having to agree — the
 /// common case ("these twenty domains go direct") would need twenty rules.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     /// What to call this rule in the log and on screen.
