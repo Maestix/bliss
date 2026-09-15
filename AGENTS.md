@@ -257,7 +257,13 @@ These cost the most time on this project. None of them announce themselves.
   user's own instance. `bliss.log` is appended, and trimmed only if an open with
   `share_mode(0)` succeeds, because Rust opens files with `FILE_SHARE_DELETE` and
   deleting a log another process writes to succeeds silently. The system-proxy
-  snapshot records its owner's pid and is not restored while that process lives.
+  snapshot records its owner's pid, and while that process lives nobody else
+  restores it or overwrites it (`set` returns `ProxyError::OwnedElsewhere`). The
+  check is in `restore`, which every path goes through — the tunnel stopping,
+  the window closing, a mode applied at startup. It used to be in `recover`
+  alone, so a second window opened next to a serving copy pulled that copy's
+  proxy out from under it as it started; found while about to open a test
+  window next to the user's running bliss (`a_running_copys_settings_are_left_alone`).
 - **On Windows `std::fs::rename` replaces an existing file**
   (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`); never `remove_file` first.
   Replacing a running `xray.exe` fails with a sharing violation, as intended.
@@ -391,6 +397,15 @@ the CLI alike. Leave it unset to test the real first run, and note what it does
 not move: the work dir (engine, `xray.json`, `bliss.log`) stays where it is. A
 scratch profile whose `[engine] xray` names a file that does not exist makes
 any start fail before an engine is spawned or its config written.
+
+**The user may be running bliss while you check.** Look for a `bliss.exe` first
+(`Get-CimInstance Win32_Process`, which shows the path). A second copy shares
+`%LOCALAPPDATA%\bliss` with the first twice over: the work dir, and WebView2's
+data folder, which dioxus-desktop names after the executable
+(`%LOCALAPPDATA%\<exe stem>`, `webview.rs`), so moving the binary does not
+separate them. Two copies with different WebView2 arguments in one data folder
+do not start cleanly. To check next to a running copy, run a copy of the debug
+build under another name (`bliss-probe.exe`), or ask the user to close theirs.
 
 From Python with `websocket-client` (installed), after removing the proxy
 variables and with `suppress_origin=True`: `Runtime.evaluate` to read classes,

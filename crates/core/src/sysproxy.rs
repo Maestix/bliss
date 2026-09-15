@@ -87,6 +87,17 @@ pub enum ProxyError {
 
     #[error("bliss does not manage the proxy settings on this platform")]
     Unsupported,
+
+    #[error("another bliss (pid {0}) is managing the proxy settings right now")]
+    OwnedElsewhere(u32),
+}
+
+/// Is this snapshot another bliss's, and is that bliss still running?
+///
+/// A snapshot with no owner recorded (pid 0) counts as nobody's: see
+/// `parse_snapshot` for why an unattributed one is treated as orphaned.
+fn owned_elsewhere(kept: &Snapshot) -> bool {
+    kept.pid != 0 && kept.pid != std::process::id() && imp::process_alive(kept.pid)
 }
 
 /// Point the machine at `addr`, remembering what was there before.
@@ -102,6 +113,13 @@ pub fn set(work_dir: &Path, addr: std::net::SocketAddr) -> Result<Snapshot, Prox
     // settings, and the file must keep the *original* values rather than
     // recording ours as if they had been the user's all along.
     let existing = read_snapshot(&path);
+    // Another running bliss set these; writing over them would take its proxy
+    // and, on our way out, restore settings that are not ours to restore.
+    if let Some(kept) = &existing
+        && owned_elsewhere(kept)
+    {
+        return Err(ProxyError::OwnedElsewhere(kept.pid));
+    }
     let before = match existing {
         Some(kept) => Snapshot {
             ours: ours.clone(),
@@ -154,6 +172,18 @@ pub fn restore(work_dir: &Path) -> Result<bool, ProxyError> {
     let Some(kept) = read_snapshot(&path) else {
         return Ok(false);
     };
+    // A copy of bliss that is still running owns these settings. The check is
+    // here rather than only in `recover` because every path leads here — the
+    // tunnel stopping, the window closing, a mode applied at startup. It used
+    // to live in `recover` alone, so a second window opened next to a copy that
+    // was serving pulled that copy's proxy out from under it as it started.
+    if owned_elsewhere(&kept) {
+        tracing::debug!(
+            "the system proxy is managed by bliss pid {}, which is still running",
+            kept.pid
+        );
+        return Ok(false);
+    }
 
     let current = imp::read();
     let still_ours = matches!(&current, Ok((_, server, _)) if server == &kept.ours);
@@ -237,18 +267,9 @@ fn parse_snapshot(text: &str) -> Option<Snapshot> {
 /// until someone works out what happened and fixes the registry by hand.
 ///
 /// A snapshot whose owner is still running belongs to another bliss that is
-/// serving right now, and is left strictly alone.
+/// serving right now, and is left strictly alone — by `restore` itself, which
+/// every path goes through, so this is only the name the startup call reads by.
 pub fn recover(work_dir: &Path) -> Result<bool, ProxyError> {
-    let Some(kept) = read_snapshot(&snapshot_path(work_dir)) else {
-        return Ok(false);
-    };
-    if kept.pid != std::process::id() && imp::process_alive(kept.pid) {
-        tracing::debug!(
-            "the system proxy is managed by bliss pid {}, which is still running",
-            kept.pid
-        );
-        return Ok(false);
-    }
     restore(work_dir)
 }
 
@@ -528,6 +549,63 @@ mod tests {
 
         std::fs::remove_file(&path).expect("clean up");
         assert_eq!(read_snapshot(&path), None, "a missing file is not an error");
+    }
+
+    /// A second bliss must leave a running copy's settings alone on every
+    /// path, not only at startup. `restore` used to skip the owner check that
+    /// `recover` made, so a window opened next to a serving copy pulled that
+    /// copy's proxy out as soon as it applied its own mode.
+    ///
+    /// Touches no registry: every call below has to return before reading or
+    /// writing it. The snapshot is checked before `set` is tried, so code that
+    /// lost the check fails here rather than going on to write a proxy.
+    #[cfg(windows)]
+    #[test]
+    fn a_running_copys_settings_are_left_alone() {
+        /// Ends the stand-in and removes the snapshot even when an assertion fails.
+        struct Cleanup(std::process::Child, PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+                let _ = std::fs::remove_file(&self.1);
+            }
+        }
+
+        // A process that is certainly alive for as long as the test runs,
+        // standing in for the other copy of bliss.
+        let other = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("a stand-in process");
+        let dir = std::env::temp_dir().join("bliss-sysproxy-owner-test");
+        let path = snapshot_path(&dir);
+        let kept = Snapshot {
+            enable: 0,
+            server: String::new(),
+            bypass: String::new(),
+            ours: "http=127.0.0.1:1;https=127.0.0.1:1".into(),
+            pid: other.id(),
+        };
+        let owner = kept.pid;
+        let _cleanup = Cleanup(other, path.clone());
+        write_snapshot(&path, &kept).expect("write");
+
+        let restored = restore(&dir);
+        assert!(matches!(restored, Ok(false)), "{restored:?}");
+        let recovered = recover(&dir);
+        assert!(matches!(recovered, Ok(false)), "{recovered:?}");
+        assert_eq!(
+            read_snapshot(&path),
+            Some(kept),
+            "the running copy's snapshot must still be there"
+        );
+
+        let taken = set(&dir, "127.0.0.1:1".parse().expect("an address"));
+        assert!(
+            matches!(taken, Err(ProxyError::OwnedElsewhere(pid)) if pid == owner),
+            "{taken:?}"
+        );
     }
 
     /// An empty bypass or server has to survive, because "no proxy at all" is
