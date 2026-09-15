@@ -92,9 +92,6 @@ pub struct RoutingView {
     pub rules: Vec<RuleView>,
     /// Rules that cannot work, said out loud. See `Router::warnings`.
     pub warnings: Vec<String>,
-    /// True when the profile has no `[routing]` section at all, which is what
-    /// lets the screen offer to write a starting set rather than explain TOML.
-    pub unconfigured: bool,
 }
 
 /// The answer to "what happens to this destination?"
@@ -152,10 +149,6 @@ pub struct Frame {
     /// What the chart's full height means, in bytes per second. Computed here
     /// rather than in the UI so it can be smoothed across ticks.
     pub scale: u64,
-    /// Whether the profile file exists yet. It does not until the window
-    /// writes something into it, and until then there is nothing to open or
-    /// to read again.
-    pub profile_exists: bool,
     /// What became of the last pasted link.
     pub added: Option<Added>,
 }
@@ -209,22 +202,18 @@ pub enum Command {
     PingAll,
     /// Change what bliss does with the machine's proxy settings.
     Proxy(ProxyMode),
-    /// Read the profile's rules again, without restarting the tunnel.
-    ReloadRules,
     /// Ask the rules about one destination. The answer lands in the frame.
     Check(String),
-    /// Append a starting set of rules to the profile.
+    /// Put the starting set of rules in a profile that has none, and save it.
     SeedRules,
-    /// Add a server from a pasted link, writing the profile if there is none.
+    /// Add a server from a pasted link, and save the profile.
     AddServer(Link),
-    /// Show one of bliss's own files to the user.
+    /// Show one of bliss's own folders to the user.
     Reveal(Reveal),
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Reveal {
-    /// The TOML the user edits.
-    Profile,
     /// Where the log, the engine and its generated config live.
     WorkDir,
 }
@@ -260,8 +249,8 @@ pub struct Setup {
     /// number and the list stays the single copy of the truth.
     pub selected: usize,
     pub work_dir: PathBuf,
-    /// Where the profile is, or will be: the window writes it when there is
-    /// first something to put in it.
+    /// Where the profile is saved. There is no file until the first change
+    /// made in the window.
     pub profile_path: PathBuf,
     pub engine_log: bliss_xray::LogLevel,
     pub autostart: bool,
@@ -296,7 +285,7 @@ pub fn engine_path(setup: &Setup) -> Result<PathBuf, String> {
     } else {
         Err(
             "движок не установлен. Скачайте его командой «bliss engine install» \
-             или укажите путь к своему xray.exe в профиле, в разделе [engine]"
+             — bliss найдёт его при следующем подключении"
                 .to_owned(),
         )
     }
@@ -348,7 +337,6 @@ fn initial_frame(setup: &Setup) -> Frame {
             .enumerate()
             .map(|(i, server)| server_row(server, i == setup.selected))
             .collect(),
-        profile_exists: setup.profile_path.is_file(),
         ..Frame::default()
     };
     if let Some(server) = setup.server(setup.selected) {
@@ -416,6 +404,9 @@ async fn drive(
     let mut probe = tokio::time::interval(Duration::from_secs(8));
     // Numbers the answers to "add a server"; see `Added::attempt`.
     let mut attempts = 0u64;
+    // Every change made in the window is saved through this, and taken only
+    // once the save worked; see `save_profile`.
+    let mut store = crate::profile_file::Store::new(setup.profile_path.clone());
 
     // Starting the engine blocks this loop for as long as it takes — up to ten
     // seconds if the engine comes up but never listens. The default behaviour
@@ -522,70 +513,43 @@ async fn drive(
                         }
                     }
                     Command::PingAll => ping_all(&setup.servers, &frames, &probes),
-                    // Re-read from disk rather than from the Setup we were
-                    // handed: the whole point is to pick up an edit.
-                    Command::ReloadRules => {
-                        match Rules::reread(&setup) {
-                            Ok(fresh) => {
-                                rules = fresh;
+                    Command::Check(text) => {
+                        let answer = check_target(&rules.router, &text);
+                        frames.send_modify(|f| f.check = answer);
+                    }
+                    Command::SeedRules => {
+                        let mut next = setup.profile.clone();
+                        let saved = crate::profile_file::add_starting_rules(&mut next)
+                            .and_then(|()| save_profile(&mut store, &next));
+                        match saved {
+                            Ok(()) => {
+                                tracing::info!("routing: the starting rules are in the profile");
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                rules = Rules::compile(setup.profile.routing.clone(), &setup.work_dir);
                                 publish_routing(&frames, &rules);
-                                // The inbounds hold the old table, so the new
-                                // one only takes effect on a restart. Doing it
-                                // here means "reload" means what it says.
-                                if running.is_some() {
-                                    if let Some(parts) = running.take() {
-                                        parts.stop().await;
-                                    }
+                                // The inbounds hold the table they started with,
+                                // so new rules apply once the tunnel comes back.
+                                if let Some(parts) = running.take() {
+                                    parts.stop().await;
                                     running =
                                         start(&setup, selected, &tracker, &rules.router, &frames).await;
                                     apply_proxy(proxy, &setup, running.is_some(), &frames);
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!("routing: {e}");
-                                frames.send_modify(|f| {
-                                    f.error = Some(format!("не удалось перечитать правила: {e}"));
-                                });
-                            }
+                            Err(e) => frames.send_modify(|f| {
+                                f.error = Some(format!("не удалось сохранить правила: {e}"));
+                            }),
                         }
                     }
-                    Command::Check(text) => {
-                        let answer = check_target(&rules.router, &text);
-                        frames.send_modify(|f| f.check = answer);
-                    }
-                    Command::SeedRules => match crate::profile_file::add_starting_rules(&setup.profile_path) {
-                        Ok(()) => {
-                            tracing::info!("routing: starting rules written to the profile");
-                            frames.send_modify(|f| f.profile_exists = true);
-                            match Rules::reread(&setup) {
-                                Ok(fresh) => {
-                                    rules = fresh;
-                                    publish_routing(&frames, &rules);
-                                    // As with a reload: the inbounds hold the
-                                    // table they started with, so rules written
-                                    // now apply only once the tunnel comes back.
-                                    if let Some(parts) = running.take() {
-                                        parts.stop().await;
-                                        running =
-                                            start(&setup, selected, &tracker, &rules.router, &frames).await;
-                                        apply_proxy(proxy, &setup, running.is_some(), &frames);
-                                    }
-                                }
-                                Err(e) => tracing::error!("routing: {e}"),
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("routing: {e}");
-                            frames.send_modify(|f| {
-                                f.error = Some(format!("не удалось записать правила: {e}"));
-                            });
-                        }
-                    },
                     Command::AddServer(link) => {
                         attempts += 1;
                         let first = setup.servers.is_empty();
-                        let outcome = match crate::profile_file::add_server(&setup.profile_path, &link.0) {
-                            Ok((entry, server)) => {
+                        let mut next = setup.profile.clone();
+                        let saved = crate::profile_file::add_server(&mut next, &link.0)
+                            .and_then(|server| save_profile(&mut store, &next).map(|()| server));
+                        let outcome = match saved {
+                            Ok(server) => {
                                 // The name only: the link is a credential.
                                 tracing::info!("server added: {}", server.tag);
                                 let tag = server.tag.clone();
@@ -595,10 +559,10 @@ async fn drive(
                                         describe_selection(f, &server);
                                     }
                                     f.servers.push(row);
-                                    f.profile_exists = true;
                                 });
-                                setup.profile.servers.push(entry);
+                                setup.profile = next;
                                 setup.servers.push(server);
+                                forget_problem(&mut setup, &frames);
                                 Ok(tag)
                             }
                             Err(why) => {
@@ -608,7 +572,7 @@ async fn drive(
                         };
                         let added = outcome.is_ok();
                         // Before any start, which holds this loop for seconds:
-                        // the form should hear back the moment the file is written.
+                        // the form should hear back the moment it is saved.
                         frames.send_modify(|f| {
                             f.added = Some(Added {
                                 attempt: attempts,
@@ -628,13 +592,23 @@ async fn drive(
                     Command::Proxy(mode) => {
                         proxy = mode;
                         apply_proxy(proxy, &setup, running.is_some(), &frames);
+                        // Remembered, like every other choice made in the window.
+                        // It used to last only until the window closed.
+                        if setup.profile.inbound.system_proxy != mode {
+                            let mut next = setup.profile.clone();
+                            next.inbound.system_proxy = mode;
+                            match save_profile(&mut store, &next) {
+                                Ok(()) => {
+                                    setup.profile = next;
+                                    forget_problem(&mut setup, &frames);
+                                }
+                                Err(e) => frames.send_modify(|f| {
+                                    f.error = Some(format!("выбор не сохранился: {e}"));
+                                }),
+                            }
+                        }
                     }
-                    Command::Reveal(what) => match what {
-                        // Nothing to open until something has been written.
-                        Reveal::Profile if !setup.profile_path.is_file() => {}
-                        Reveal::Profile => reveal(&setup.profile_path),
-                        Reveal::WorkDir => reveal(&setup.work_dir),
-                    },
+                    Command::Reveal(Reveal::WorkDir) => reveal(&setup.work_dir),
                 }
             }
             _ = ticker.tick() => {
@@ -741,12 +715,10 @@ impl Running {
 struct Rules {
     config: bliss_proto::Routing,
     router: Arc<Router>,
-    /// Whether the profile says anything about routing at all.
-    configured: bool,
 }
 
 impl Rules {
-    fn compile(config: bliss_proto::Routing, configured: bool, work_dir: &std::path::Path) -> Self {
+    fn compile(config: bliss_proto::Routing, work_dir: &std::path::Path) -> Self {
         let dir = config
             .geo_dir
             .clone()
@@ -765,38 +737,11 @@ impl Rules {
         Self {
             config,
             router: Arc::new(router),
-            configured,
         }
     }
 
     fn from_setup(setup: &Setup) -> Self {
-        Self::compile(
-            setup.profile.routing.clone(),
-            crate::profile_file::has_routing_section(&setup.profile_path),
-            &setup.work_dir,
-        )
-    }
-
-    /// Read the profile again and recompile.
-    ///
-    /// From disk rather than from the `Setup` we were handed at startup: the
-    /// entire point of reloading is to pick up an edit made since. One read
-    /// answers both questions, so the rules and "is routing written at all"
-    /// describe the same file.
-    fn reread(setup: &Setup) -> Result<Self, String> {
-        let path = &setup.profile_path;
-        let (routing, configured) = match std::fs::read_to_string(path) {
-            Ok(text) => (
-                crate::profile_file::parse(path, &text)
-                    .map_err(|e| e.brief())?
-                    .routing,
-                text.lines().any(crate::profile_file::is_routing_header),
-            ),
-            // No profile yet: the defaults, and nothing written.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
-        Ok(Self::compile(routing, configured, &setup.work_dir))
+        Self::compile(setup.profile.routing.clone(), &setup.work_dir)
     }
 
     fn view(&self) -> RoutingView {
@@ -815,8 +760,40 @@ impl Rules {
                 })
                 .collect(),
             warnings: self.router.warnings.clone(),
-            unconfigured: !self.configured,
         }
+    }
+}
+
+/// Save a changed profile, saying so in the log.
+///
+/// Callers change a clone and take it only when this succeeds, so what the
+/// window shows and what is on disk cannot drift apart.
+fn save_profile(store: &mut crate::profile_file::Store, next: &Profile) -> Result<(), String> {
+    match store.save(next) {
+        Ok(Some(backup)) => {
+            tracing::warn!(
+                "profile: the file bliss replaced was not its own; kept as {}",
+                backup.display()
+            );
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(e) => {
+            tracing::error!("profile: {e}");
+            Err(e)
+        }
+    }
+}
+
+/// After a successful save, the complaint about the profile bliss started
+/// with is out of date: that file has been kept and replaced.
+fn forget_problem(setup: &mut Setup, frames: &watch::Sender<Frame>) {
+    if let Some(problem) = setup.problem.take() {
+        frames.send_modify(|f| {
+            if f.error.as_deref() == Some(problem.as_str()) {
+                f.error = None;
+            }
+        });
     }
 }
 
@@ -1434,7 +1411,6 @@ mod tests {
         let frame = initial_frame(&setup);
         assert!(frame.servers.is_empty());
         assert!(frame.server_tag.is_empty());
-        assert!(!frame.profile_exists);
         assert_eq!(frame.error.as_deref(), Some("профиль не читается"));
         assert!(
             engine_path(&setup).is_err(),

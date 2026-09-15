@@ -143,20 +143,6 @@ pub fn Refresh(size: u32, color: String) -> Element {
     }
 }
 
-/// A page with a folded corner: the profile the user edits.
-#[component]
-pub fn Document(size: u32, color: String) -> Element {
-    rsx! {
-        svg {
-            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
-            stroke: "{color}", stroke_width: STROKE, stroke_linejoin: "round",
-            path { d: "M13.6 3 H7 a2 2 0 0 0-2 2 V19 a2 2 0 0 0 2 2 H17 a2 2 0 0 0 2-2 V8.4 Z" }
-            path { d: "M13.6 3 V8.4 H19" }
-            path { d: "M8.6 13.4 H15.4 M8.6 16.8 H13.4", stroke_linecap: "round" }
-        }
-    }
-}
-
 #[component]
 pub fn Folder(size: u32, color: String) -> Element {
     rsx! {

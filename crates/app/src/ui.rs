@@ -1018,16 +1018,6 @@ fn ActionsTab(frame: Frame) -> Element {
                 icon: rsx! { crate::icons::Refresh { size: 17, color: ACCENT } },
             }
             ActionCard {
-                title: "Открыть профиль",
-                hint: if frame.profile_exists { "bliss.toml — серверы и правила" } else { "появится с первым сервером" },
-                enabled: frame.profile_exists,
-                onclick: {
-                    let controller = controller.clone();
-                    move |_| controller.send(Command::Reveal(Reveal::Profile))
-                },
-                icon: rsx! { crate::icons::Document { size: 17, color: ACCENT } },
-            }
-            ActionCard {
                 title: "Папка bliss",
                 hint: "журнал, движок, конфиг движка",
                 enabled: true,
@@ -1390,11 +1380,8 @@ fn Connections(frame: Frame) -> Element {
 
 /// The rule table, and a box for asking it questions.
 ///
-/// Read-only on purpose, for one reason worth stating: the rules live in the
-/// profile, the profile is full of comments explaining them, and writing it
-/// back from a serde round-trip would delete every one of those comments. So
-/// the screen shows, explains and tests; editing happens in the file, and
-/// «Перечитать» closes the loop without a restart.
+/// Shows, explains and tests the rules. Changing them in the window comes with
+/// the rule editor; until then the one change offered is the starting set.
 #[component]
 fn Routing(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
@@ -1412,32 +1399,10 @@ fn Routing(frame: Frame) -> Element {
                     "{plural(view.rules.len() as u64, \"правило\", \"правила\", \"правил\")} · \
                      остальное {view.fallback.label()}"
                 }
-                span {
-                    style: "margin-left:auto;display:flex;gap:8px",
-                    Button {
-                        label: "Перечитать",
-                        enabled: frame.profile_exists,
-                        onclick: {
-                            let controller = controller.clone();
-                            move |_| controller.send(Command::ReloadRules)
-                        },
-                        icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
-                    }
-                    Button {
-                        label: "Открыть профиль",
-                        enabled: frame.profile_exists,
-                        onclick: {
-                            let controller = controller.clone();
-                            move |_| controller.send(Command::Reveal(Reveal::Profile))
-                        },
-                        icon: rsx! { crate::icons::Document { size: 15, color: ACCENT } },
-                    }
-                }
             }
 
-            // Nothing configured at all: offer the starting set rather than an
-            // empty list and a link to the documentation.
-            if view.unconfigured {
+            // No rules at all: offer the starting set rather than an empty list.
+            if view.rules.is_empty() {
                 div {
                     style: "flex:none;display:flex;align-items:center;gap:13px;padding:14px;\
                             border-radius:8px;background-color:var(--color-surface);\
@@ -1447,14 +1412,7 @@ fn Routing(frame: Frame) -> Element {
                         span {
                             style: "font-size:13px;line-height:1.45;color:var(--color-neutral-500)",
                             "Сейчас всё идёт через прокси. Можно добавить стартовый набор: \
-                             реклама блокируется, локальная сеть идёт напрямую. "
-                            if frame.profile_exists {
-                                "Он допишется в конец профиля с комментариями — ваши \
-                                 настройки не пострадают."
-                            } else {
-                                "Профиля ещё нет: bliss создаст его, и набор ляжет туда \
-                                 с комментариями."
-                            }
+                             реклама блокируется, локальная сеть идёт напрямую."
                         }
                     }
                     div { style: "margin-left:auto;flex:none",

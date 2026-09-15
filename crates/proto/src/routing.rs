@@ -53,7 +53,9 @@ pub struct Routing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geo_dir: Option<std::path::PathBuf>,
 
-    #[serde(default, rename = "rule")]
+    // Left out when empty, like every list in a rule: bliss writes the profile
+    // itself, and `rule = []` is noise in a file that has no rules.
+    #[serde(default, rename = "rule", skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
 }
 
