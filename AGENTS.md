@@ -456,6 +456,30 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     It now takes `logs::revision()` as a prop. Anything that reads shared state
     outside the frame needs a prop that changes with that state, or it goes
     stale without a sound.
+18. **A column of text never sizes a table.** A bare `fr` track is at least as
+    wide as its longest unbreakable word, a host name has no break in it, and
+    each row of a table here is a grid of its own: in a narrow window one long
+    name moved its own row's columns and no other's. Text tracks are
+    `minmax(0,…fr)`, their cells `min-width:0;overflow:hidden;white-space:nowrap`
+    (`CONNECTION_COLUMNS`, `SERVER_COLUMNS`, guarded by
+    `table_columns_do_not_grow_with_their_text`). A header over a list that
+    scrolls takes `.list-head`: the list's scrollbar narrows the rows alone, by
+    10px at zoom 1 and 7px at 1.5, and the header's columns stood that far to the
+    right of theirs. The class gives the header a scrollbar of the same width
+    with nothing to scroll, painted transparent, because WebView2 draws the
+    bar's arrows even then. The subscriptions screen had the same gap between
+    its form and its cards, and puts the form inside the scrolling column.
+19. **A line that must keep its height hides what does not fit instead of
+    wrapping it in place.** `TabBar` is `height:30px;overflow:hidden;
+    flex-wrap:wrap`: a hint too wide for the room beside the tabs wraps onto a
+    second line, out of sight. It used to wrap within itself in any window under
+    1000px wide; the bar grew under the servers tab alone, and the tabs and the
+    card below them moved 10px on every switch. What sits in such a line keeps
+    one width, or it blinks out and back as its numbers change: the traffic
+    tab's line lost "последние 20 с", which the axis under the chart says
+    anyway. `flex-wrap` breaks between any two items, so parts that must stay
+    side by side are one item: a rule's number and its text are, since as two
+    the number took a line of its own.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -504,6 +528,16 @@ of its own (`[inbound] socks/http`, `[engine] bridge_port`), against a fake
 server and a local HTTP server reached through a `direct` rule; that start
 writes `xray.json` in the shared work dir, which the next real start rewrites.
 Ctrl+V needs the real clipboard: put fake data on it and empty it afterwards.
+
+A narrow window is sized from the script, with `SetWindowPos` from a DPI-aware
+process (`SetProcessDpiAwarenessContext(-4)`). The rect includes the window's
+invisible resize borders, 16px wide and 9px tall at 96 dpi, and a size set this
+way is not held to the window's minimum: ask for 896×669 to get the 880×660 page
+a person can reach by dragging. The first try measured a 384px page, which
+nobody can see. Something that moves on a switch is caught by recording its
+position on every `requestAnimationFrame` across the switch, not once after it.
+Pillow is installed, for checking in a screenshot that something meant to be
+invisible is: the header's transparent scrollbar crops to one colour.
 
 Two more probes that worked:
 

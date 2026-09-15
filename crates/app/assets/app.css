@@ -290,6 +290,16 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .icon-btn.disabled { opacity: .3; }
 
 /* --- The connections table ------------------------------------------------- */
+/* A table's header over a list that scrolls. The list's scrollbar takes its
+   width from the rows alone, so the header's columns stood to the right of
+   the rows' by the bar's width: 10px, or 7px at zoom 1.5, since the bar keeps
+   its size in device pixels. The header keeps the same gutter with a scrollbar
+   of its own, which has nothing to scroll and is painted in no colour. And
+   `flex: none`, because a scroll container may shrink to nothing in a column. */
+.list-head {
+  flex: none; overflow-y: scroll; overflow-x: hidden;
+  scrollbar-color: transparent transparent;
+}
 .sort { transition: color .14s ease; white-space: nowrap; }
 .sort:hover { color: var(--color-neutral-200); }
 .sort.on { color: var(--color-accent); }
