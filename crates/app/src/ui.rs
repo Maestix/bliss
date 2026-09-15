@@ -706,7 +706,6 @@ fn nav_tint(active: bool, enabled: bool) -> &'static str {
 
 #[component]
 fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
-    let span_seconds = frame.history.len() / 2;
     let reason = frame.error.clone().unwrap_or_default();
 
     rsx! {
@@ -755,13 +754,15 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 TabBar {
                     tab,
                     meta: match tab() {
+                        // The rates alone: the axis under the chart already
+                        // says it spans the last seconds. Said here too, the
+                        // line outgrew the room beside the tabs in the narrowest
+                        // window once traffic reached megabytes, and the bar
+                        // would hide it and show it again as the numbers moved.
                         Tab::Traffic => rsx! {
                             div {
                                 style: "display:flex;align-items:baseline;gap:16px;font-size:13.5px;\
                                         font-variant-numeric:tabular-nums",
-                                span { style: "color:var(--color-neutral-600)",
-                                    "последние {span_seconds} с"
-                                }
                                 span { style: "color:var(--color-accent-300)", "↓ {rate(frame.down_rate)}" }
                                 span { style: "color:var(--color-neutral-400)", "↑ {rate(frame.up_rate)}" }
                             }
@@ -911,7 +912,14 @@ fn AddServerCard(frame: Frame) -> Element {
 /// the one already on screen when this form appeared, so switching tabs does
 /// not replay an old "added".
 #[component]
-fn ImportForm(frame: Frame, placeholder: &'static str) -> Element {
+fn ImportForm(
+    frame: Frame,
+    placeholder: &'static str,
+    /// Across its card rather than at most 680px wide: over cards with buttons
+    /// of their own, so its buttons end where theirs do.
+    #[props(default)]
+    wide: bool,
+) -> Element {
     let controller = use_context::<Controller>();
     let mut link = use_signal(String::new);
     let seen = use_hook(|| frame.added.as_ref().map(|added| added.attempt));
@@ -941,9 +949,10 @@ fn ImportForm(frame: Frame, placeholder: &'static str) -> Element {
         }
     };
     let typed = !link().trim().is_empty();
+    let width = if wide { "none" } else { "680px" };
 
     rsx! {
-        div { style: "display:flex;flex-direction:column;gap:7px;max-width:680px",
+        div { style: "display:flex;flex-direction:column;gap:7px;max-width:{width}",
             div { style: "display:flex;align-items:center;gap:8px",
                 input {
                     class: "field",
@@ -1015,18 +1024,25 @@ fn ImportForm(frame: Frame, placeholder: &'static str) -> Element {
 #[component]
 fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
     rsx! {
-        div { style: "display:flex;align-items:center;gap:6px",
+        // One line, of one height under every tab. What a tab shows beside the
+        // tabs fits on that line whole or wraps onto a second one, which the
+        // bar cuts off. The servers' hint used to wrap in place in a window
+        // under 1000px wide: the bar grew under that tab alone, and the tabs
+        // and the card below them moved 10px on every switch.
+        div {
+            style: "flex:none;height:30px;overflow:hidden;display:flex;flex-wrap:wrap;\
+                    align-items:center;align-content:flex-start;gap:6px",
             for one in [Tab::Traffic, Tab::Servers, Tab::Actions] {
                 div {
                     key: "{one.key()}",
                     class: if tab() == one { "tab active" } else { "tab" },
-                    style: "padding:5px 12px;border-radius:4px;\
+                    style: "flex:none;padding:5px 12px;border-radius:4px;\
                             font:700 14.5px/1.35 var(--font-heading)",
                     onclick: move |_| tab.set(one),
                     "{one.label()}"
                 }
             }
-            div { style: "margin-left:auto", {meta} }
+            div { style: "margin-left:auto;white-space:nowrap", {meta} }
         }
     }
 }
@@ -1073,6 +1089,7 @@ fn ServersTab(frame: Frame) -> Element {
     rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:7px",
             div {
+                class: "list-head",
                 style: "display:grid;{SERVER_COLUMNS};padding:0 10px 6px;font-size:12px;\
                         letter-spacing:.09em;text-transform:uppercase;\
                         color:var(--color-neutral-500);\
@@ -1080,7 +1097,12 @@ fn ServersTab(frame: Frame) -> Element {
                 span { "Имя" }
                 span { "Адрес" }
                 span { "Защита" }
-                span { style: "text-align:right", "Отклик" }
+                // The hint beside the tabs says it too, and leaves a narrow window.
+                span {
+                    style: "text-align:right",
+                    title: "TCP-рукопожатие до сервера, мимо туннеля",
+                    "Отклик"
+                }
                 span {}
             }
 
@@ -1441,10 +1463,17 @@ fn tones(state: State) -> (&'static str, &'static str, &'static str) {
     }
 }
 
+/// The connections table's columns: host, program, route, received, sent.
+///
+/// The first two take the room that is left and never more. A bare `1.6fr`
+/// track is at least as wide as its longest unbreakable word, and a host name
+/// has no break in it; every row is a grid of its own, so in a narrow window a
+/// long name moved its own row's columns and no other's.
+const CONNECTION_COLUMNS: &str =
+    "grid-template-columns:minmax(0,1.6fr) minmax(0,1fr) 78px 92px 92px;gap:10px";
+
 #[component]
 fn Connections(frame: Frame) -> Element {
-    const COLUMNS: &str = "grid-template-columns:1.6fr 1fr 78px 92px 92px;gap:10px";
-
     // Same click-to-copy as the log below it, and the same note.
     let mut copied = use_signal(String::new);
     let note = copied();
@@ -1544,7 +1573,9 @@ fn Connections(frame: Frame) -> Element {
             }
 
             div {
-                style: "display:grid;{COLUMNS};padding:0 8px 7px;font-size:12px;\
+                // The same gutter as the scrolling rows under it: `.list-head`.
+                class: "list-head",
+                style: "display:grid;{CONNECTION_COLUMNS};padding:0 8px 7px;font-size:12px;\
                         letter-spacing:.09em;text-transform:uppercase;\
                         color:var(--color-neutral-500);border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--color-divider)",
                 span { "Хост" }
@@ -1570,7 +1601,7 @@ fn Connections(frame: Frame) -> Element {
                     div {
                         key: "{row.id}",
                         class: "row",
-                        style: "display:grid;{COLUMNS};align-items:center;padding:7px 8px;\
+                        style: "display:grid;{CONNECTION_COLUMNS};align-items:center;padding:7px 8px;\
                                 border-bottom:1px solid rgba(239,232,245,.05)",
                         onclick: {
                             let text = row_as_text(row);
@@ -1591,24 +1622,31 @@ fn Connections(frame: Frame) -> Element {
                                 *ROW_MENU.write() = Some(row_menu(&row, point.x, point.y));
                             }
                         },
+                        // One line each, cut at the column's edge: a name that
+                        // wrapped at its hyphens made its row twice as tall.
                         span {
-                            style: "font-size:14px;font-family:ui-monospace,Consolas,monospace",
+                            style: "min-width:0;overflow:hidden;white-space:nowrap;font-size:14px;\
+                                    font-family:ui-monospace,Consolas,monospace",
+                            title: "{row.target}",
                             "{elide(&row.target, 40)}"
                         }
-                        span { style: "font-size:13.5px;color:var(--color-neutral-400)",
+                        span {
+                            style: "min-width:0;overflow:hidden;white-space:nowrap;font-size:13.5px;\
+                                    color:var(--color-neutral-400)",
                             "{row.process.clone().unwrap_or_else(|| String::from(\"—\"))}"
                         }
                         span {
-                            style: "font-size:12.5px;color:{route_color(row.closed_at.is_some())}",
+                            style: "overflow:hidden;white-space:nowrap;font-size:12.5px;\
+                                    color:{route_color(row.closed_at.is_some())}",
                             if row.closed_at.is_some() { "закрыто" } else { "{route_short(row.route)}" }
                         }
                         span {
-                            style: "text-align:right;font-size:13.5px;\
+                            style: "text-align:right;white-space:nowrap;font-size:13.5px;\
                                     font-variant-numeric:tabular-nums;color:var(--color-neutral-300)",
                             "{bytes(row.down)}"
                         }
                         span {
-                            style: "text-align:right;font-size:13.5px;\
+                            style: "text-align:right;white-space:nowrap;font-size:13.5px;\
                                     font-variant-numeric:tabular-nums;color:var(--color-neutral-300)",
                             "{bytes(row.up)}"
                         }
@@ -1770,8 +1808,13 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                     div {
                         key: "{at}",
                         class: "rule-row",
-                        style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;\
-                                border-radius:4px",
+                        // Wraps: the action and the tools go under the text
+                        // when they do not fit beside the number and 240px of
+                        // text. Beside it at any width, the text column
+                        // narrowed to nothing in a narrow window, and its words
+                        // broke a letter to a line.
+                        style: "display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 11px;\
+                                padding:9px 10px;border-radius:4px",
                         onclick: {
                             let source = view.source.get(at).cloned();
                             move |_| {
@@ -1785,26 +1828,30 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                                 armed.set(None);
                             }
                         },
-                        // The number is the rule: first match wins, so the
-                        // order is not decoration.
-                        span {
-                            style: "flex:none;width:18px;padding-top:1px;font-size:13px;\
-                                    text-align:right;color:var(--color-neutral-700);\
-                                    font-variant-numeric:tabular-nums",
-                            "{rule.position}"
-                        }
-                        div { style: "flex:1;display:flex;flex-direction:column;gap:3px;min-width:0",
-                            span { style: "font-size:14px", "{elide(&rule.name, 46)}" }
-                            for (n, line) in rule.conditions.iter().enumerate() {
-                                span {
-                                    key: "{n}",
-                                    style: "font-size:12.5px;line-height:1.4;\
-                                            color:var(--color-neutral-600);word-break:break-word",
-                                    "{elide(line, 64)}"
+                        // The number and the text wrap as one: as two items,
+                        // the number took a line of its own in a narrow window.
+                        div { style: "flex:1 1 270px;min-width:0;display:flex;align-items:flex-start;gap:11px",
+                            // The number is the rule: first match wins, so the
+                            // order is not decoration.
+                            span {
+                                style: "flex:none;width:18px;padding-top:1px;font-size:13px;\
+                                        text-align:right;color:var(--color-neutral-700);\
+                                        font-variant-numeric:tabular-nums",
+                                "{rule.position}"
+                            }
+                            div { style: "flex:1;display:flex;flex-direction:column;gap:3px;min-width:0",
+                                span { style: "font-size:14px", "{elide(&rule.name, 46)}" }
+                                for (n, line) in rule.conditions.iter().enumerate() {
+                                    span {
+                                        key: "{n}",
+                                        style: "font-size:12.5px;line-height:1.4;\
+                                                color:var(--color-neutral-600);word-break:break-word",
+                                        "{elide(line, 64)}"
+                                    }
                                 }
                             }
                         }
-                        div { style: "flex:none;display:flex;align-items:center;gap:8px",
+                        div { style: "flex:none;margin-left:auto;display:flex;align-items:center;gap:8px",
                             ActionPill { action: rule.action }
                             div { class: "rule-tools",
                                 IconButton {
@@ -1997,8 +2044,11 @@ fn ActionPill(action: bliss_proto::Action) -> Element {
         bliss_proto::Action::Block => ("rgba(229,107,111,.14)", BAD),
     };
     rsx! {
+        // One width for all three words: the pills stand in a column down the
+        // rule list, and every rule's tools wrap under it at the same width.
         span {
-            style: "padding:3px 9px;border-radius:11px;font-size:12.5px;white-space:nowrap;\
+            style: "display:inline-block;min-width:112px;text-align:center;padding:3px 9px;\
+                    border-radius:11px;font-size:12.5px;white-space:nowrap;\
                     background-color:{text};color:{border}",
             "{action.label()}"
         }
@@ -2178,6 +2228,26 @@ mod tests {
         assert!(THEME.contains("--font-body: \"Comfortaa\""));
         const LICENCE: &str = include_str!("../assets/OFL-Comfortaa.txt");
         assert!(LICENCE.contains("SIL Open Font License"));
+    }
+
+    /// A table's text columns are `minmax(0, …fr)`, never a bare `fr`. A bare
+    /// track is at least as wide as its longest unbreakable word, and every
+    /// row is a grid of its own: a long host name moved its own row's columns
+    /// and no other's, and a narrow window lost the table's order.
+    #[test]
+    fn table_columns_do_not_grow_with_their_text() {
+        for columns in [CONNECTION_COLUMNS, SERVER_COLUMNS] {
+            let tracks = columns
+                .strip_prefix("grid-template-columns:")
+                .and_then(|rest| rest.split(';').next())
+                .expect("a grid-template-columns declaration");
+            for track in tracks.split(' ') {
+                assert!(
+                    !track.contains("fr") || track.starts_with("minmax(0,"),
+                    "{track:?} in {columns:?} grows with its longest word"
+                );
+            }
+        }
     }
 
     /// The inline radii are literals because the token form does not survive
@@ -3414,7 +3484,10 @@ fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
 // --- the server list ------------------------------------------------------------
 
 /// The server list's columns: name, address, protection, ping, and the bin.
-const SERVER_COLUMNS: &str = "grid-template-columns:1.2fr 1.4fr 118px 78px 30px;gap:12px";
+/// Name and address never grow past their share, for the reason given at
+/// `CONNECTION_COLUMNS`.
+const SERVER_COLUMNS: &str =
+    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 118px 78px 30px;gap:12px";
 
 /// A run of the server list: the servers added by hand, or one subscription's.
 #[derive(Clone, Debug, PartialEq)]
@@ -3519,11 +3592,14 @@ fn ServerLine(
             },
             span { style: "font-size:14.5px;min-width:0;overflow:hidden;white-space:nowrap", "{name}" }
             span {
-                style: "font-size:13.5px;color:var(--color-neutral-400);\
-                        font-family:ui-monospace,Consolas,monospace",
+                style: "min-width:0;overflow:hidden;white-space:nowrap;font-size:13.5px;\
+                        color:var(--color-neutral-400);font-family:ui-monospace,Consolas,monospace",
                 "{elide(&server.addr, 26)}"
             }
-            span { style: "font-size:13px;color:var(--color-neutral-500)", "{server.kind}" }
+            span {
+                style: "overflow:hidden;white-space:nowrap;font-size:13px;color:var(--color-neutral-500)",
+                "{server.kind}"
+            }
             span {
                 style: "text-align:right;font-size:13.5px;\
                         font-variant-numeric:tabular-nums;color:{ping_tone(server.ping)}",
@@ -3582,32 +3658,37 @@ fn Subscriptions(frame: Frame) -> Element {
                 }
             }
 
-            div {
-                style: "flex:none;display:flex;flex-direction:column;gap:10px;padding:15px;\
-                        background-color:var(--color-surface);border-radius:8px;\
-                        box-shadow:var(--shadow-sm)",
-                span { style: "font:700 16px/1 var(--font-heading)", "Добавить подписку" }
-                span { style: "font-size:13px;line-height:1.5;color:var(--color-neutral-500)",
-                    "Адрес списка серверов от провайдера. bliss загрузит список — через туннель, \
-                     если он поднят, — и будет обновлять его раз в 12 часов. Ctrl+V в любом месте \
-                     окна тоже добавляет."
-                }
-                ImportForm { frame: frame.clone(), placeholder: "https://…" }
-            }
-
+            // The form scrolls with the cards, in one column, so it is exactly
+            // as wide as they are. Above the scrolling list it was wider by the
+            // list's scrollbar, and no card's edge lined up with it.
             div {
                 style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
-                        display:flex;flex-direction:column;gap:9px",
-                if frame.subscriptions.is_empty() {
-                    span {
-                        style: "padding:10px 2px;font-size:14px;line-height:1.5;\
-                                color:var(--color-neutral-600)",
-                        "Подписок пока нет. Серверы из подписки появятся в списке серверов \
-                         и будут обновляться сами."
+                        display:flex;flex-direction:column;gap:13px",
+                div {
+                    style: "flex:none;display:flex;flex-direction:column;gap:10px;padding:15px;\
+                            background-color:var(--color-surface);border-radius:8px;\
+                            box-shadow:var(--shadow-sm)",
+                    span { style: "font:700 16px/1 var(--font-heading)", "Добавить подписку" }
+                    span { style: "font-size:13px;line-height:1.5;color:var(--color-neutral-500)",
+                        "Адрес списка серверов от провайдера. bliss загрузит список — через туннель, \
+                         если он поднят, — и будет обновлять его раз в 12 часов. Ctrl+V в любом месте \
+                         окна тоже добавляет."
                     }
+                    ImportForm { frame: frame.clone(), placeholder: "https://…", wide: true }
                 }
-                for row in frame.subscriptions.iter() {
-                    SubscriptionCard { key: "{row.id}", row: row.clone() }
+
+                div { style: "flex:none;display:flex;flex-direction:column;gap:9px",
+                    if frame.subscriptions.is_empty() {
+                        span {
+                            style: "padding:10px 2px;font-size:14px;line-height:1.5;\
+                                    color:var(--color-neutral-600)",
+                            "Подписок пока нет. Серверы из подписки появятся в списке серверов \
+                             и будут обновляться сами."
+                        }
+                    }
+                    for row in frame.subscriptions.iter() {
+                        SubscriptionCard { key: "{row.id}", row: row.clone() }
+                    }
                 }
             }
         }
@@ -3661,7 +3742,8 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
 
     rsx! {
         div {
-            style: "flex:none;display:flex;align-items:flex-start;gap:13px;padding:14px;\
+            // The form's padding above it, so their contents start at one edge.
+            style: "flex:none;display:flex;align-items:flex-start;gap:13px;padding:15px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             onmouseleave: move |_| armed.set(false),
