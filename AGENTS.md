@@ -578,6 +578,22 @@ connection table must not move RSS at all. `mimalloc` is a default feature; take
 the 12-hour run twice, with it and with `--no-default-features`, because mimalloc
 trades RSS for speed and RSS is the criterion.
 
+**Before stage 3, look at xray-rust.** `github.com/aimalygin/xray-rust`
+(MPL-2.0) was found by the user on September 14 and deliberately set aside
+until bliss's own features are finished. It is an embeddable Rust
+implementation of the Xray client: VLESS over raw TCP, WebSocket, gRPC and
+XHTTP; TLS and REALITY with uTLS-shaped ClientHellos (61 fingerprints, through
+the author's own `shaped-rustls` fork pinned by commit); Vision; UDP and XUDP;
+and VLESS Encryption `mlkem768x25519plus` in all three modes. `xray_core_rs::Core`
+starts from an Xray config and reports its inbound's address, so it could
+replace `xray.exe` in-process behind the SOCKS seam bliss already has. Against
+it, as of that day: three and a half months old, one maintainer, pre-1.0 by its
+own account, CI on Linux only, TUN for Android and Apple only. The spike that
+decides it: build it on Windows (rustc 1.96+, CMake and clang are here;
+aws-lc-rs's `prebuilt-nasm` covers NASM), run it with the config `bliss-xray`
+generates against the user's server, and compare memory and throughput with
+xray.exe. Downloading it needs the user's go-ahead.
+
 **Stage 3 (native stack) — set up before writing code.** A REALITY
 authentication failure is silent: the server just serves the real site. Stand up
 a private Xray server with `show: true` and `loglevel: debug` first. Use the
