@@ -1,5 +1,12 @@
 //! bliss — a VLESS + REALITY client for Windows.
 
+// No console window beside the real one. A console-subsystem program gets a
+// console from Windows before `main` runs, so a double-click opened a black
+// window next to bliss that did nothing but echo a log already written to
+// bliss.log. The commands that print join the terminal they were started from
+// instead: see `attach_console`.
+#![windows_subsystem = "windows"]
+
 // Binary crates only. A `#[global_allocator]` in a library would be imposed on
 // everything that links it, which is not a library's call to make.
 #[cfg(feature = "mimalloc")]
@@ -11,6 +18,8 @@ mod engine;
 mod icons;
 mod logs;
 mod profile_file;
+mod rule_text;
+mod subscription;
 mod ui;
 
 use std::io::{Read, Write};
@@ -101,6 +110,11 @@ enum EngineCmd {
 }
 
 fn main() -> Result<()> {
+    // Before anything can print, clap's own --help and usage errors included.
+    // The window alone takes no arguments and prints nowhere.
+    if std::env::args_os().len() > 1 {
+        attach_console();
+    }
     color_eyre::install()?;
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_env("BLISS_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
@@ -669,15 +683,71 @@ fn show_message(text: &str) {
     eprintln!("{text}");
 }
 
-// The console stays. Detaching it with FreeConsole made the window look tidier
-// when launched from a shell, and broke it entirely when launched from Explorer
-// — the process kept running and serving traffic, but created no window at all.
-// A shell inherits its parent's console, so detaching there is harmless; a
-// double-click owns its console, and destroying it takes the window with it.
-// Tested the first way, shipped, and broke the second.
-//
-// The proper fix is the windows subsystem plus AttachConsole for the CLI paths,
-// which needs testing from Explorer before it goes anywhere near a release.
+/// Give a command somewhere to print.
+///
+/// bliss is a windows-subsystem program, so nothing gives it a console. A shell
+/// that hands over pipes — Git Bash, or anything capturing the output — needs
+/// nothing more, and is left alone. cmd and PowerShell hand over nothing, so
+/// their console is joined here; neither waits for a windows-subsystem program,
+/// which means the prompt comes back before the output does. Started with
+/// arguments and no terminal at all, from a shortcut say, it gets a console of
+/// its own, as it always had.
+///
+/// The first attempt at losing the console went the other way: a console
+/// program calling FreeConsole. From a shell that was harmless; from Explorer
+/// the process went on serving traffic and never showed a window. So the window
+/// path does not touch consoles at all.
+#[cfg(windows)]
+fn attach_console() {
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
+        STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    use windows::core::w;
+
+    fn usable(id: STD_HANDLE) -> bool {
+        // SAFETY: reads the process's standard handle; no preconditions.
+        unsafe { GetStdHandle(id) }.is_ok_and(|handle| !handle.is_invalid())
+    }
+
+    if usable(STD_OUTPUT_HANDLE) {
+        return;
+    }
+    // SAFETY: plain Win32 calls with no pointers of ours beyond the constant
+    // device names; a handle that fails to open is simply not installed.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() && AllocConsole().is_err() {
+            return;
+        }
+        for (id, device) in [
+            (STD_INPUT_HANDLE, w!("CONIN$")),
+            (STD_OUTPUT_HANDLE, w!("CONOUT$")),
+            (STD_ERROR_HANDLE, w!("CONOUT$")),
+        ] {
+            if usable(id) {
+                continue;
+            }
+            if let Ok(handle) = CreateFileW(
+                device,
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            ) {
+                let _ = SetStdHandle(id, handle);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
 
 fn parse_log_level(s: &str) -> Result<bliss_xray::LogLevel> {
     use bliss_xray::LogLevel::*;

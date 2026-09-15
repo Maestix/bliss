@@ -41,10 +41,16 @@ The long-form plan, in Russian, lives outside the repo at
   and close any window you open.
 - **No bliss command is entirely side-effect free.** `bliss --help`, `check` and
   `route` make no network connections, but every invocation first runs
-  `sysproxy::recover` (which rewrites the system proxy if a dead run left
-  `system-proxy-backup.txt` behind), creates the work dir, and appends to
-  `bliss.log`. None of them writes the profile: only the window does, after a
-  change made in it.
+  `sysproxy::recover`, creates the work dir, and appends to `bliss.log`. None of
+  them writes the profile: only the window does, after a change made in it.
+  `recover` acts on a `system-proxy-backup.txt` left by a run that died: it
+  writes the old settings back only while the machine still points where bliss
+  pointed it, and otherwise deletes the file and leaves the setting alone.
+  Before starting any bliss, look at that file and at `ProxyServer` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`, so you
+  know which of the two will happen. On September 14 the user's bliss had died
+  with the proxy set and v2rayN had since taken the proxy over; the probe window
+  started after that deleted the file and changed nothing.
 - **Talk to the user in Russian.** Code, comments, docs and commit messages are
   in English.
 
@@ -55,7 +61,7 @@ The long-form plan, in Russian, lives outside the repo at
 | `crates/proto` | `bliss-proto` | pure data: `vless://` parsing (`server.rs`), TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation, process supervision in a Job Object, GitHub downloader |
-| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), log ring buffer (`logs.rs`), clipboard |
+| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), log ring buffer (`logs.rs`), clipboard |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
@@ -83,8 +89,10 @@ cargo test                   # default members, ~70 tests
 cargo build -p bliss         # target/debug/bliss.exe
 ```
 
-- One test round-trips text through the **real Windows clipboard**; the xray
-  readiness tests bind loopback ports.
+- One test round-trips text through the **real Windows clipboard**, replacing
+  whatever the user had copied: run `cargo test -- --skip
+  text_survives_the_round_trip` while they may be working. The xray readiness
+  tests bind loopback ports.
 - `crates/proto/tests/links.rs` snapshots the whole `Debug` output of a parsed
   `ServerConfig`. Changing its fields or the redacting `Debug` impls fails that
   test. `cargo-insta` is **not installed**: insta writes a `.snap.new` next to the
@@ -103,6 +111,16 @@ bliss engine install [--version VERSION] [--newest] [--via ADDR]
 bliss route <TARGET> [PATH] [--process NAME]  which rule decides; no network
 bliss run [PROFILE] [--server TAG] [--engine-log ENGINE_LOG]
 ```
+
+`bliss.exe` is a **windows-subsystem** program: a double-click opens the window
+and no console beside it. A command with arguments joins the console of the
+terminal it came from (`attach_console` in `main.rs`). Git Bash, and anything
+capturing the output, hands over pipes and works as it always did; cmd and
+PowerShell do not wait for a windows-subsystem program, so their prompt comes
+back before the output does, and `$out = bliss …` captures nothing. In
+PowerShell a pipe makes it wait and capture: `bliss check | Out-String`. The first attempt at losing the console went the
+other way — a console program calling `FreeConsole` — and started from Explorer
+it served traffic with no window at all.
 
 ## 3. Environment traps (Windows + Git Bash)
 
@@ -180,16 +198,20 @@ These cost the most time on this project. None of them announce themselves.
 
 - **Anything that grows over time has a hard cap and a test that fails if the
   cap is removed**: the log buffer (400 lines, `logs.rs`), recently closed
-  connections (512, `tracker.rs`), HTTP request heads (16 KB, `http.rs`). The
-  project exists because another client's GUI reached 7.8 GB this way.
+  connections (512, `tracker.rs`), HTTP request heads (16 KB, `http.rs`), a
+  subscription's body (4 MB, read up to it and no further) and the servers one
+  list brings (2 000, `subscription.rs`), servers in a profile however they
+  arrive (5 000, `MAX_PROFILE_SERVERS`). The project exists because another
+  client's GUI reached 7.8 GB this way.
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
   supervision method nobody calls, a guard that cannot fail, a dependency with a
   purpose in a comment and no user — each has shipped here looking like
-  protection and providing none. Current example: the workspace `Cargo.toml`
-  lists `arc-swap` "to swap the routing table under live traffic", but no crate
-  uses it and live swapping does not exist.
+  protection and providing none. The last one standing was `arc-swap` in the
+  workspace `Cargo.toml`, "to swap the routing table under live traffic", which
+  no crate used while nothing swapped. The swap exists now, as a lock
+  (`Serving::set_router`), and the dependency is gone.
 - **A comment that contradicts the code beside it is a bug.** `pump` half-closed
   because "the peer may still have something to send", while the `select!` in
   `relay` returned as soon as either direction ended and dropped both sockets; a
@@ -247,12 +269,18 @@ These cost the most time on this project. None of them announce themselves.
   hand-made profile's comments survive. The engine changes a clone of the
   profile and takes it only when the save worked (`save_profile`), so the
   window and the file cannot drift apart. Never write the profile any other way.
-- **A link is a credential in the window too.** `Command::AddServer` carries a
+- **A link is a credential in the window too.** `Command::Import` carries a
   `Link` whose `Debug` hides it; the log gets only the server's name; a refused
   link is explained by `LinkError` variant, never by echoing a value — `BadValue`
   holds the rejected text, which can be most of a key. A TOML error shown on
   screen is `ProfileError::brief`, because the full error quotes the offending
   line, and in a profile that line can be a link.
+- **So is a subscription's address**: its token is in the path. `Subscription`'s
+  `Debug` and the window show `shown_url` (scheme, host, port), and the log
+  names a subscription by its name. reqwest writes the URL into its own error
+  messages, so a failed fetch is described by kind after `without_url` and never
+  shown as reqwest wrote it (`subscription::describe`). A finished fetch goes
+  back to the engine loop as `FetchDone`, whose `Debug` shows the id alone.
 - **Assume another bliss shares the work dir** — a test run, a stray copy, the
   user's own instance. `bliss.log` is appended, and trimmed only if an open with
   `share_mode(0)` succeeds, because Rust opens files with `FILE_SHARE_DELETE` and
@@ -267,10 +295,18 @@ These cost the most time on this project. None of them announce themselves.
 - **On Windows `std::fs::rename` replaces an existing file**
   (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`); never `remove_file` first.
   Replacing a running `xray.exe` fails with a sharing violation, as intended.
-- **Changing rules or server restarts the tunnel**: inbounds capture the routing
-  table when they start. `parts.stop().await` must finish before `start`, or the
-  new xray finds the bridge port taken and fails for a reason unrelated to the
-  server.
+- **Changing a server restarts the tunnel; changing rules does not.** A rule
+  change goes through `commit_routing`: save the profile, compile the table, hand
+  it to `Serving::set_router`. The next connection is decided by it and those
+  already open keep their route. It used to restart the tunnel, which dropped
+  every connection for the sake of one rule. A restart for a server must let
+  `parts.stop().await` finish before `start`, or the new xray finds the bridge
+  port taken and fails for a reason unrelated to the server.
+- **Slow work leaves the engine loop and comes back through it.** A
+  subscription fetch runs in a task of its own and returns as
+  `Command::Fetched` through a *weak* sender: a strong one, held by the loop
+  itself, would keep the command channel open forever, and the loop would never
+  see the window go.
 
 **Style**
 
@@ -379,6 +415,39 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     (`the_font_is_inlined_and_licensed`). Its Cyrillic uses Latin-like shapes
     (д like g, т like m); the user chose it over Nunito, whose Cyrillic is
     conventional, after seeing both in the window.
+12. **An inline property outranks every class rule, `:hover` and `:focus`
+    included.** The action cards carried their resting tint inline, so hovering
+    them changed nothing, and an inline `cursor:default` kept the arrow over
+    them; the text boxes carried their hairline inline, so `.field:focus` never
+    showed. A look that a state changes lives in a class (`.act-card`, `.field`,
+    `.search`), and clickable things get `cursor: pointer` from `app.css`:
+    `only_the_window_chrome_sets_a_cursor_inline` allows the two inline cursors
+    of the title bar and its buttons, and nothing else.
+13. **rsx builds handlers in its own order, not the order they are written.** A
+    closure cloned inside one handler's block can be cloned after another
+    handler has already moved it (E0382). Clone before `rsx!` (`save_on_key` in
+    `RuleEditor`, the clones in `ImportForm`).
+14. **Keys that work anywhere are heard by the page itself.** A key goes to the
+    focused element, and with nothing focused that is the document, outside
+    every element rsx can attach a handler to. `KEY_LISTENER`, installed once
+    through `document::eval`, sends `paste` (Ctrl+V or Shift+Insert, matched by
+    `code` so a Russian layout works) and `escape` back to `App`; it leaves text
+    boxes alone and does nothing while a `[data-modal]` element is open. Blitz
+    runs no script, so a Blitz build would need another way. What Esc closes
+    lives in global signals (`ROW_MENU`, `DRAFT`), cleared in `use_drop` by the
+    screen that owns them, or they reopen on its next visit.
+15. **A dialog is never taller than the window.** `.dialog-card` has a
+    `max-height` and only `.dialog-body` scrolls. The first rule editor grew
+    with its hints, and in the default window the geoip note pushed Save and
+    Cancel below the edge: the probe's click there reached nothing, and a
+    person would have had no way to save.
+16. **The page grows with the window past the default size.** `WindowZoom`
+    sets WebView2's zoom (`set_zoom_level`) from `zoom_for` on every resize:
+    half of how far the smaller of width/1040 and height/660 is past 1, in 5%
+    steps, at most 1.6. Layouts still adapt inside that (the action cards are an
+    `auto-fill` grid). CSS pixels are then larger than logical ones, so
+    `viewport()` gives the page's own size for placing menus. In DevTools the
+    zoom shows as `devicePixelRatio`.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -409,10 +478,24 @@ build under another name (`bliss-probe.exe`), or ask the user to close theirs.
 
 From Python with `websocket-client` (installed), after removing the proxy
 variables and with `suppress_origin=True`: `Runtime.evaluate` to read classes,
-inline styles and `getComputedStyle`; `Input.dispatchMouseEvent` for real clicks
-and hover; `Page.captureScreenshot` for images. Record state after every step and
-once with the pointer moved away. Close the window afterwards. It still opens
-when 10808 is taken, which is fine for UI work.
+inline styles and `getComputedStyle`; `Input.dispatchMouseEvent` for real clicks,
+right clicks (`button: "right"`) and hover; `Input.dispatchKeyEvent` for keys
+(Ctrl+V is `code: "KeyV"` with `modifiers: 2`); `Input.insertText` to type into
+the focused box, which Dioxus sees as input; `Page.captureScreenshot` for images.
+Record state after every step and once with the pointer moved away. Close the
+window afterwards. It still opens when 10808 is taken, which is fine for UI work.
+Check that a script's page expressions did not throw: `Runtime.evaluate` returns
+`exceptionDetails` rather than failing, and a helper that reads only the value
+turns every broken selector into a silent `None`.
+
+Give `BLISS_PROFILE` an **absolute** path. The window runs with its own working
+directory, and a relative path there names no file: the window opens with no
+servers, and every check after that fails for the wrong reason. A check that
+needs rows in the connections table has to start the managed engine, on ports
+of its own (`[inbound] socks/http`, `[engine] bridge_port`), against a fake
+server and a local HTTP server reached through a `direct` rule; that start
+writes `xray.json` in the shared work dir, which the next real start rewrites.
+Ctrl+V needs the real clipboard: put fake data on it and empty it afterwards.
 
 Two more probes that worked:
 
@@ -473,13 +556,19 @@ restore); routing (proxy / direct / block by domain, address, port, process,
 geosite/geoip) and its screen; server list with ping; copy to clipboard; the
 application icon and the status card's picture; starting with no profile, no
 server and no engine, and adding a server from the window; the profile written
-by bliss itself, with the system-proxy choice remembered. The
-tunnel already starts with the window (`Setup.autostart`).
+by bliss itself, with the system-proxy choice remembered; the rule editor (add,
+change, reorder, delete, the fallback) with rules applied under live traffic,
+and rules from a right-click on a connection; search and sorting in the
+connections table and a resizable log; Ctrl+V for links, lists and
+subscriptions; subscriptions (1.6: base64 or plain lists, `subscription-userinfo`
+and `profile-title`, a refresh every 12 hours, through the tunnel when it is
+up); zoom with the window size; no console window. The tunnel already starts
+with the window (`Setup.autostart`).
 
-**Open:** subscriptions (1.6); UDP ASSOCIATE; an idle timeout for half-open
+**Open:** deleting and renaming servers; a settings screen (ports, the engine,
+installing it with a button); UDP ASSOCIATE; an idle timeout for half-open
 connections; tray and start-with-Windows via Task Scheduler (1.8); the 12-hour
-memory run; the console window that appears next to the GUI (the fix needs
-testing from Explorer — an earlier attempt broke double-click launch).
+memory run.
 
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes

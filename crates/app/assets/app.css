@@ -147,3 +147,174 @@ body { font-size: 16px; user-select: none; cursor: default; }
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(239, 232, 245, .28); }
+
+/* --- What can be clicked says so -------------------------------------------
+   The pointer changes over everything that does something when clicked. The
+   desktop habit of keeping the arrow everywhere made the action cards feel
+   dead: nothing changed under the mouse, not even the cursor. No inline style
+   in ui.rs sets a cursor, because an inline one beats any class. */
+.act, .tab, .nav-item, .srv, .row, .logline, .ring, .choice, .seg-choice,
+.pill-choice, .menu-item, .icon-btn, .sort { cursor: pointer; }
+.act.disabled, .nav-item.disabled, .icon-btn.disabled { cursor: default; }
+.act:not(.disabled):active { background-color: rgba(239, 232, 245, .12); }
+
+/* Action cards keep their resting tint here rather than inline. Inline, it
+   outranked every :hover rule, which is why hovering one did nothing. */
+.act-card {
+  background-color: rgba(239, 232, 245, .03);
+  transition: background-color .14s ease, box-shadow .14s ease, transform .08s ease;
+}
+.act-card:not(.disabled):hover {
+  background-color: rgba(238, 130, 196, .08);
+  box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .30);
+}
+.act-card:not(.disabled):active { transform: scale(.985); }
+
+/* The ring's border is inline — its colour is the state — so its hover works
+   on brightness and size instead. */
+.ring { transition: box-shadow .24s ease, border-color .24s ease, filter .14s ease, transform .08s ease; }
+.ring:hover { filter: brightness(1.22); }
+.ring:active { transform: scale(.96); }
+
+/* --- A line about what just happened, on any screen ------------------------ */
+.toast {
+  position: fixed; left: 50%; bottom: 22px; z-index: 40;
+  max-width: min(680px, calc(100vw - 80px));
+  padding: 10px 16px; border-radius: 8px;
+  font-size: 14px; line-height: 1.45; color: var(--color-text);
+  background-color: #2a2036;
+  box-shadow: 0 0 0 1px rgba(238, 130, 196, .30), 0 10px 30px rgba(0, 0, 0, .45);
+  transform: translateX(-50%);
+  animation: bliss-toast .2s ease-out;
+  /* It reports, it does not take clicks from whatever is under it. */
+  pointer-events: none;
+}
+.toast.bad {
+  color: #f6c3c6;
+  box-shadow: 0 0 0 1px rgba(229, 107, 111, .50), 0 10px 30px rgba(0, 0, 0, .45);
+}
+@keyframes bliss-toast {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* --- The right-click menu on a connection ---------------------------------- */
+/* The veil catches the click that closes the menu, wherever it lands. */
+.menu-veil { position: fixed; inset: 0; z-index: 30; }
+.menu {
+  position: fixed; z-index: 31; width: 250px; padding: 6px;
+  border-radius: 8px; background-color: #251c31;
+  box-shadow: 0 0 0 1px #3f374d, 0 14px 34px rgba(0, 0, 0, .55);
+  animation: bliss-pop .12s ease-out;
+}
+.menu-title {
+  padding: 7px 10px 3px; font-size: 12px; letter-spacing: .06em;
+  color: var(--color-neutral-500); white-space: nowrap; overflow: hidden;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 9px; padding: 6px 10px;
+  border-radius: 4px; font-size: 14px; color: var(--color-neutral-200);
+  transition: background-color .1s ease;
+}
+.menu-item:hover { background-color: rgba(238, 130, 196, .13); color: #fff; }
+.menu-sep { height: 1px; margin: 5px 4px; background-color: rgba(239, 232, 245, .08); }
+.menu-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; }
+.menu-dot.proxy { background-color: #ee82c4; }
+.menu-dot.direct { background-color: #72cf9e; }
+.menu-dot.block { background-color: #e56b6f; }
+@keyframes bliss-pop {
+  from { opacity: 0; transform: scale(.97); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* --- The rule editor ------------------------------------------------------- */
+.veil {
+  position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+  padding: 24px; background-color: rgba(10, 6, 16, .64);
+  animation: bliss-fade .14s ease-out;
+}
+@keyframes bliss-fade { from { opacity: 0; } to { opacity: 1; } }
+/* Never taller than the window, with its heading and its buttons always in
+   view and only the middle scrolling. The first version grew with its hints
+   and notes, and in the default window the geoip note pushed Save and Cancel
+   below the window's edge, where nothing could reach them. */
+.dialog-card {
+  width: min(600px, 100%); max-height: calc(100vh - 48px);
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 20px 22px; border-radius: 14px; background-color: var(--color-surface);
+  box-shadow: 0 0 0 1px #3f374d, 0 20px 50px rgba(0, 0, 0, .6);
+  animation: bliss-pop .16s ease-out;
+}
+.dialog-body {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px;
+  overflow-y: scroll; overflow-x: hidden; margin-right: -12px; padding-right: 12px;
+}
+
+/* Three actions to pick one of. The chosen one takes its action's colour, the
+   same three colours the rule list uses. */
+.seg-choice {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 10px; border-radius: 8px; font-size: 14px; white-space: nowrap;
+  color: var(--color-neutral-400); background-color: rgba(239, 232, 245, .04);
+  box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .09);
+  transition: background-color .14s ease, color .14s ease, box-shadow .14s ease;
+}
+.seg-choice:not(.on):hover { background-color: rgba(239, 232, 245, .08); color: var(--color-neutral-200); }
+.seg-choice.on.proxy  { color: #ee82c4; background-color: rgba(238, 130, 196, .12); box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .55); }
+.seg-choice.on.direct { color: #72cf9e; background-color: rgba(114, 207, 158, .12); box-shadow: inset 0 0 0 1px rgba(114, 207, 158, .55); }
+.seg-choice.on.block  { color: #e56b6f; background-color: rgba(229, 107, 111, .12); box-shadow: inset 0 0 0 1px rgba(229, 107, 111, .55); }
+
+/* The same choice, small, for "everything else" under the list. */
+.pill-choice {
+  padding: 3px 10px; border-radius: 11px; font-size: 12.5px; white-space: nowrap;
+  color: var(--color-neutral-500); box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10);
+  transition: background-color .14s ease, color .14s ease;
+}
+.pill-choice:not(.on):hover { color: var(--color-neutral-200); background-color: rgba(239, 232, 245, .06); }
+.pill-choice.on.proxy  { color: #ee82c4; background-color: rgba(238, 130, 196, .14); box-shadow: none; }
+.pill-choice.on.direct { color: #72cf9e; background-color: rgba(114, 207, 158, .14); box-shadow: none; }
+.pill-choice.on.block  { color: #e56b6f; background-color: rgba(229, 107, 111, .14); box-shadow: none; }
+
+.rule-row { background-color: rgba(239, 232, 245, .03); transition: background-color .14s ease; }
+.rule-row:hover { background-color: rgba(239, 232, 245, .065); }
+/* Always there, so nobody has to discover them, and quiet until the row is
+   under the pointer. */
+.rule-tools { display: flex; gap: 2px; opacity: .5; transition: opacity .14s ease; }
+.rule-row:hover .rule-tools { opacity: 1; }
+.icon-btn {
+  width: 28px; height: 28px; flex: none; display: grid; place-items: center;
+  border-radius: 4px; transition: background-color .12s ease;
+}
+.icon-btn:not(.disabled):hover { background-color: rgba(239, 232, 245, .10); }
+.icon-btn.danger:not(.disabled):hover { background-color: rgba(229, 107, 111, .18); }
+.icon-btn.disabled { opacity: .3; }
+
+/* --- The connections table ------------------------------------------------- */
+.sort { transition: color .14s ease; white-space: nowrap; }
+.sort:hover { color: var(--color-neutral-200); }
+.sort.on { color: var(--color-accent); }
+
+/* The bar between the table and the log, dragged to share the height between
+   them. The veil exists only during a drag, so the pointer keeps its shape
+   and the moves keep arriving however fast the mouse goes. */
+.splitter { flex: none; height: 14px; margin: -5px 0; display: grid; place-items: center; cursor: row-resize; }
+.splitter::before {
+  content: ""; width: 46px; height: 4px; border-radius: 2px;
+  background-color: rgba(239, 232, 245, .14);
+  transition: background-color .14s ease, width .14s ease;
+}
+.splitter:hover::before, .splitter.dragging::before { width: 76px; background-color: rgba(238, 130, 196, .65); }
+.drag-veil { position: fixed; inset: 0; z-index: 50; cursor: row-resize; }
+
+/* Text boxes keep their ground and hairline here rather than inline, so the
+   focus rule can change the hairline: inline, it outranked `.field:focus`, and
+   a focused box looked like every other. */
+.field { background-color: #120c1a; box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10); }
+.field.bare, .field.bare:focus { background-color: transparent; box-shadow: none; }
+/* The search over the connections table: the frame belongs to the wrapper, so
+   the icon sits inside it and the whole box lights up on focus. */
+.search {
+  display: flex; align-items: center; gap: 8px; padding: 0 4px 0 10px; border-radius: 4px;
+  background-color: #120c1a; box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10);
+}
+.search:focus-within { box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .45); }

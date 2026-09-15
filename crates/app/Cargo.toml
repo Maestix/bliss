@@ -24,8 +24,10 @@ clap = { workspace = true, features = ["derive"] }
 dioxus = { workspace = true, features = ["desktop"] }
 color-eyre.workspace = true
 directories.workspace = true
+futures-util.workspace = true                          # reading a subscription up to a size cap
 jiff.workspace = true
 mimalloc = { workspace = true, optional = true }
+reqwest.workspace = true                               # fetching subscriptions, as bliss-xray fetches the engine
 tokio = { workspace = true }
 toml.workspace = true
 tracing.workspace = true
@@ -35,6 +37,9 @@ tracing-subscriber.workspace = true
 [target."cfg(windows)".dependencies]
 windows = { workspace = true, features = [
     "Win32_System_Console",
+    # CONOUT$ and CONIN$, for a command run from cmd or PowerShell: see
+    # attach_console in main.rs.
+    "Win32_Storage_FileSystem",
     "Win32_UI_WindowsAndMessaging",
     # Copying a log line out. Through the Win32 clipboard rather than
     # navigator.clipboard, which wants a secure context this window does not

@@ -6,7 +6,7 @@
 //! two ports for two protocols is a setting nobody wants to think about.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
@@ -57,7 +57,35 @@ impl Inbound {
 pub struct Serving {
     pub outbound: Arc<dyn Outbound>,
     pub tracker: Arc<Tracker>,
-    pub router: Arc<Router>,
+    /// Behind a lock so the rules can change under live traffic; see
+    /// `set_router`.
+    router: RwLock<Arc<Router>>,
+}
+
+impl Serving {
+    pub fn new(outbound: Arc<dyn Outbound>, tracker: Arc<Tracker>, router: Arc<Router>) -> Self {
+        Self {
+            outbound,
+            tracker,
+            router: RwLock::new(router),
+        }
+    }
+
+    /// The table the next connection is decided by.
+    pub fn router(&self) -> Arc<Router> {
+        Arc::clone(&self.router.read().expect("router lock"))
+    }
+
+    /// Decide new connections by `router` from now on.
+    ///
+    /// Connections already open keep the route they were given. Until this
+    /// existed every inbound held the table it started with, so changing one
+    /// rule restarted the whole tunnel and dropped every connection through it.
+    /// A lock rather than a lock-free swap: it is taken once per connection,
+    /// not per packet, for as long as cloning an `Arc` takes.
+    pub fn set_router(&self, router: Arc<Router>) {
+        *self.router.write().expect("router lock") = router;
+    }
 }
 
 /// Accept connections until the future is dropped.
@@ -135,10 +163,11 @@ async fn dial_and_relay(
     serving: Arc<Serving>,
 ) -> std::io::Result<()> {
     let Serving {
-        outbound,
-        tracker,
-        router,
+        outbound, tracker, ..
     } = &*serving;
+    // Read once: this connection is decided by one table, whatever changes
+    // while it is open.
+    let router = serving.router();
     // The process is looked up before the decision rather than after, because a
     // rule may be about the program rather than the destination.
     let process = crate::process::name_for_port(peer.port());
@@ -243,5 +272,60 @@ async fn dial_direct(target: &Target) -> std::io::Result<crate::outbound::BoxedS
                 crate::outbound::DIAL_TIMEOUT
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bliss_proto::{Action, Routing, Rule};
+
+    use super::*;
+    use crate::outbound::{EngineInfo, SocksOutbound};
+
+    /// A rule changed in the window decides the next connection, with the
+    /// tunnel left up. Before `set_router` the inbounds kept the table they
+    /// started with, and the only way to a new one was a restart.
+    #[test]
+    fn the_next_connection_is_decided_by_the_newest_rules() {
+        let outbound = Arc::new(SocksOutbound::new(
+            "127.0.0.1:1".parse().expect("an address"),
+            EngineInfo {
+                kind: "test",
+                version: String::new(),
+                external: true,
+            },
+        ));
+        let serving = Serving::new(
+            outbound,
+            Arc::new(Tracker::new()),
+            Arc::new(Router::proxy_everything()),
+        );
+        let target = Target::domain("a.example", 443);
+        let before = serving.router();
+        assert_eq!(before.decide(&target, None).route, Route::Proxy);
+
+        let block = Rule {
+            name: Some("no".to_owned()),
+            action: Action::Block,
+            domain: vec!["a.example".to_owned()],
+            ip: Vec::new(),
+            port: Vec::new(),
+            process: Vec::new(),
+            geosite: Vec::new(),
+            geoip: Vec::new(),
+        };
+        let routing = Routing {
+            fallback: Action::Proxy,
+            geo_dir: None,
+            rules: vec![block],
+        };
+        serving.set_router(Arc::new(Router::build(
+            &routing,
+            std::path::Path::new("nonexistent"),
+        )));
+
+        assert_eq!(serving.router().decide(&target, None).route, Route::Blocked);
+        // A connection that read the table before the change keeps its answer.
+        assert_eq!(before.decide(&target, None).route, Route::Proxy);
     }
 }

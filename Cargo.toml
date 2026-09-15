@@ -55,8 +55,6 @@ async-trait = "0.1"                                    # Outbound must be dyn-co
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }    # CancellationToken: one clean shutdown path
 bytes = "1"                                            # relay buffers without copying
-arc-swap = "1"                                         # swap the routing table under live traffic
-                                                       # without a lock on the per-connection path
 
 # --- allocator ------------------------------------------------------------
 # Windows' system heap is the weak one under multithreaded churn, and a proxy

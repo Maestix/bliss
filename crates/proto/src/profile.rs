@@ -22,8 +22,85 @@ pub struct Profile {
     pub inbound: Inbound,
     #[serde(default)]
     pub routing: crate::Routing,
+    /// Server lists a provider publishes at an address. Their servers are the
+    /// `[[server]]` entries whose `group` is the subscription's `id`.
+    #[serde(
+        default,
+        rename = "subscription",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub subscriptions: Vec<Subscription>,
     #[serde(default, rename = "server")]
     pub servers: Vec<ServerEntry>,
+}
+
+/// A provider's server list, fetched from an address and kept up to date.
+///
+/// The servers it brought are ordinary `[[server]]` entries tagged with this
+/// subscription's `id` in their `group`, so everything that reads servers keeps
+/// working unchanged, and an update replaces exactly the servers that came
+/// from here and nothing a user added by hand.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subscription {
+    /// Ties its servers to it. Never shown, never changed.
+    pub id: String,
+    /// What the window calls it: the provider's title, or the address's host.
+    pub name: String,
+    /// Where the list is fetched from. It nearly always carries a personal
+    /// token, so it is a credential like a link: `Debug` shows the host only.
+    pub url: String,
+    /// When the list last arrived, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<i64>,
+    /// Traffic used and the expiry date, as the provider last reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+impl Subscription {
+    /// The address with everything after the host left out, which is where
+    /// the token lives: `https://sub.example/…`.
+    pub fn shown_url(&self) -> String {
+        match url::Url::parse(&self.url) {
+            Ok(url) => match (url.host_str(), url.port()) {
+                (Some(host), Some(port)) => format!("{}://{host}:{port}/…", url.scheme()),
+                (Some(host), None) => format!("{}://{host}/…", url.scheme()),
+                (None, _) => "…".to_owned(),
+            },
+            Err(_) => "…".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subscription")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("url", &self.shown_url())
+            .field("updated", &self.updated)
+            .field("usage", &self.usage)
+            .finish()
+    }
+}
+
+/// The `subscription-userinfo` a provider sends with the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Usage {
+    /// Bytes.
+    #[serde(default)]
+    pub upload: u64,
+    /// Bytes.
+    #[serde(default)]
+    pub download: u64,
+    /// Bytes allowed in all; 0 when there is no limit.
+    #[serde(default)]
+    pub total: u64,
+    /// When it runs out, in Unix seconds; absent when it does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,5 +231,32 @@ impl Profile {
             }
         }
         (parsed, failed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A subscription address is a token with a host in front of it, and
+    /// `Profile` is `Debug`.
+    #[test]
+    fn debug_does_not_show_a_subscription_token() {
+        let subscription = Subscription {
+            id: "a1".to_owned(),
+            name: "provider".to_owned(),
+            url: "https://sub.example:2096/api/sub/SECRETTOKEN?x=SECRETQUERY".to_owned(),
+            updated: None,
+            usage: None,
+        };
+        let shown = format!("{subscription:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("https://sub.example:2096/…"), "{shown}");
+
+        let profile = Profile {
+            subscriptions: vec![subscription],
+            ..Profile::default()
+        };
+        assert!(!format!("{profile:?}").contains("SECRET"));
     }
 }

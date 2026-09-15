@@ -12,7 +12,7 @@ mod server;
 
 pub use encryption::{AppearanceMode, Encryption, EncryptionKey, RttMode, VlessEncryption};
 pub use error::LinkError;
-pub use profile::{Engine, Inbound, Profile, ProxyMode};
+pub use profile::{Engine, Inbound, Profile, ProxyMode, Subscription, Usage};
 pub use routing::{Action, Routing, Rule};
 pub use server::{
     Address, Fingerprint, Flow, PublicKey, Reality, Security, ServerConfig, ServerEntry, ShortId,

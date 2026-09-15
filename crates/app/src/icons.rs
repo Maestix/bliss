@@ -166,6 +166,83 @@ pub fn Copy(size: u32, color: String) -> Element {
     }
 }
 
+/// Moving a rule earlier.
+#[component]
+pub fn ChevronUp(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M6.6 14.8 12 9.4 17.4 14.8" }
+        }
+    }
+}
+
+/// Moving a rule later.
+#[component]
+pub fn ChevronDown(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M6.6 9.2 12 14.6 17.4 9.2" }
+        }
+    }
+}
+
+#[component]
+pub fn Pencil(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M15.2 4.8 19.2 8.8 8.6 19.4 4 20 4.6 15.4 Z" }
+            path { d: "M13.2 6.8 17.2 10.8" }
+        }
+    }
+}
+
+#[component]
+pub fn Trash(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M4.6 6.8 H19.4" }
+            path { d: "M9.4 6.8 V4.8 a1 1 0 0 1 1-1 H13.6 a1 1 0 0 1 1 1 V6.8" }
+            path { d: "M6.4 6.8 7.4 19 a1.6 1.6 0 0 0 1.6 1.4 H15 a1.6 1.6 0 0 0 1.6-1.4 L17.6 6.8" }
+        }
+    }
+}
+
+#[component]
+pub fn Search(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            circle { cx: "10.6", cy: "10.6", r: "6.2" }
+            path { d: "M15.2 15.2 20 20" }
+        }
+    }
+}
+
+#[component]
+pub fn Check(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: "1.8", stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M5.4 12.6 9.8 17 18.6 7.6" }
+        }
+    }
+}
+
 // --- window buttons -------------------------------------------------------
 //
 // Drawn rather than typed. The Unicode glyphs for these (–, □, ×) come out thin

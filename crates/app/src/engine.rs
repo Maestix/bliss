@@ -6,15 +6,19 @@
 //! needs no timer and no reactor, so the UI works whatever executor renders it
 //! — which also means swapping WebView2 for Blitz changes nothing here.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bliss_core::{EngineInfo, Inbound, Router, Serving, SocksOutbound, Tracker};
-use bliss_proto::{Action, Flow, Profile, ProxyMode, Security, ServerConfig};
+use bliss_proto::{Action, Flow, Profile, ProxyMode, Rule, Security, ServerConfig, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+
+use crate::profile_file::{Store, Subject};
+use crate::ui::plural;
 
 /// How often the UI gets a new frame. Fast enough that a speed readout looks
 /// live, slow enough that it costs nothing.
@@ -71,6 +75,8 @@ pub struct ServerRow {
     pub ping: Ping,
     /// True for the one the engine is set to use.
     pub current: bool,
+    /// The subscription it came from, by name; `None` for one added by hand.
+    pub group: Option<String>,
 }
 
 /// One rule, as the routing screen shows it.
@@ -90,6 +96,8 @@ pub struct RuleView {
 pub struct RoutingView {
     pub fallback: Action,
     pub rules: Vec<RuleView>,
+    /// The same rules as the profile holds them, for the editor to start from.
+    pub source: Vec<Rule>,
     /// Rules that cannot work, said out loud. See `Router::warnings`.
     pub warnings: Vec<String>,
 }
@@ -151,6 +159,54 @@ pub struct Frame {
     pub scale: u64,
     /// What became of the last pasted link.
     pub added: Option<Added>,
+    /// Every subscription, in profile order.
+    pub subscriptions: Vec<SubscriptionRow>,
+    /// A line about what the last action did, on any screen, for a few seconds.
+    pub toast: Option<Toast>,
+}
+
+/// One subscription, as its screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionRow {
+    pub id: String,
+    pub name: String,
+    /// The address with the token left out.
+    pub shown_url: String,
+    pub servers: usize,
+    /// Unix seconds.
+    pub updated: Option<i64>,
+    pub usage: Option<Usage>,
+    pub fetching: bool,
+    /// Why the last fetch failed, until one works.
+    pub problem: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toast {
+    /// Counts up, so the window replays its fade for a new line.
+    pub id: u64,
+    pub text: String,
+    pub bad: bool,
+}
+
+/// A finished fetch, on its way back to the engine loop.
+///
+/// Its links are credentials, and `Command` is `Debug`: this shows the id alone.
+pub struct FetchDone {
+    id: String,
+    result: Result<crate::subscription::Fetched, String>,
+    /// Asked for in the window, rather than a background refresh: only then is
+    /// the outcome worth interrupting anyone with.
+    asked: bool,
+}
+
+impl std::fmt::Debug for FetchDone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchDone")
+            .field("id", &self.id)
+            .field("ok", &self.result.is_ok())
+            .finish()
+    }
 }
 
 /// The answer to "add this server".
@@ -193,7 +249,9 @@ pub enum Command {
     /// have been read against is gone. Deciding from `running.is_none()` at
     /// that moment turned "cancel this" into "start another one", and a second
     /// impatient click into a third attempt.
-    Toggle { was_on: bool },
+    Toggle {
+        was_on: bool,
+    },
     /// Tear the tunnel down and bring it back on the same server.
     Restart,
     /// Use the server at this index from now on, restarting if the tunnel is up.
@@ -206,8 +264,38 @@ pub enum Command {
     Check(String),
     /// Put the starting set of rules in a profile that has none, and save it.
     SeedRules,
-    /// Add a server from a pasted link, and save the profile.
-    AddServer(Link),
+    /// Pasted text: a server link, several, a base64 list, or the address of a
+    /// subscription. `from_form` answers in the form's `added`; the hotkey,
+    /// which has no form, gets a toast.
+    Import {
+        text: Link,
+        from_form: bool,
+    },
+    /// Put a rule in place of the one at `at`, or after the others.
+    SaveRule {
+        at: Option<usize>,
+        rule: Rule,
+    },
+    DeleteRule(usize),
+    MoveRule {
+        from: usize,
+        to: usize,
+    },
+    /// What happens to a connection no rule matched.
+    Fallback(Action),
+    /// Send one program, site or address somewhere, from a row of the
+    /// connections table, which is `target` from `process`.
+    RouteOne {
+        subject: Subject,
+        action: Action,
+        target: String,
+        process: Option<String>,
+    },
+    /// Fetch one subscription again, or every one.
+    Refresh(Option<String>),
+    DeleteSubscription(String),
+    /// A fetch finished. Only the engine sends this, to itself.
+    Fetched(FetchDone),
     /// Show one of bliss's own folders to the user.
     Reveal(Reveal),
 }
@@ -295,6 +383,8 @@ pub fn engine_path(setup: &Setup) -> Result<PathBuf, String> {
 pub fn spawn(setup: Setup) -> std::io::Result<Controller> {
     let (frame_tx, frame_rx) = watch::channel(initial_frame(&setup));
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    // Weak, so the loop still ends when the window lets go of its controller.
+    let own = cmd_tx.downgrade();
 
     std::thread::Builder::new()
         .name("bliss-engine".into())
@@ -312,7 +402,7 @@ pub fn spawn(setup: Setup) -> std::io::Result<Controller> {
                     return;
                 }
             };
-            runtime.block_on(drive(setup, frame_tx, cmd_rx));
+            runtime.block_on(drive(setup, frame_tx, cmd_rx, own));
         })?;
 
     Ok(Controller {
@@ -331,12 +421,8 @@ fn initial_frame(setup: &Setup) -> Frame {
         ),
         history: vec![0; 40],
         proxy_mode: setup.profile.inbound.system_proxy,
-        servers: setup
-            .servers
-            .iter()
-            .enumerate()
-            .map(|(i, server)| server_row(server, i == setup.selected))
-            .collect(),
+        servers: server_rows(&setup.profile, &setup.servers, setup.selected),
+        subscriptions: subscription_rows(&setup.profile, &HashSet::new(), &HashMap::new()),
         ..Frame::default()
     };
     if let Some(server) = setup.server(setup.selected) {
@@ -345,14 +431,70 @@ fn initial_frame(setup: &Setup) -> Frame {
     frame
 }
 
-fn server_row(server: &ServerConfig, current: bool) -> ServerRow {
-    ServerRow {
-        tag: server.tag.clone(),
-        addr: format!("{}:{}", server.address, server.port),
-        kind: how_it_hides(server),
-        ping: Ping::Unknown,
-        current,
-    }
+/// The server list's rows: every server that parsed, marked with the
+/// subscription it came from.
+fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> Vec<ServerRow> {
+    // In step with `servers`, which holds the entries that parse, in order.
+    let groups: Vec<Option<String>> = profile
+        .servers
+        .iter()
+        .filter(|entry| entry.parse().is_ok())
+        .map(|entry| {
+            let id = entry.group.as_deref()?;
+            profile
+                .subscriptions
+                .iter()
+                .find(|subscription| subscription.id == id)
+                .map(|subscription| subscription.name.clone())
+        })
+        .collect();
+    servers
+        .iter()
+        .enumerate()
+        .map(|(i, server)| ServerRow {
+            tag: server.tag.clone(),
+            addr: format!("{}:{}", server.address, server.port),
+            kind: how_it_hides(server),
+            ping: Ping::Unknown,
+            current: i == selected,
+            group: groups.get(i).cloned().flatten(),
+        })
+        .collect()
+}
+
+/// The links of the servers that parse, in the order `parse_servers` keeps.
+fn links_of(profile: &Profile) -> Vec<String> {
+    profile
+        .servers
+        .iter()
+        .filter(|entry| entry.parse().is_ok())
+        .map(|entry| entry.link.clone())
+        .collect()
+}
+
+fn subscription_rows(
+    profile: &Profile,
+    fetching: &HashSet<String>,
+    problems: &HashMap<String, String>,
+) -> Vec<SubscriptionRow> {
+    profile
+        .subscriptions
+        .iter()
+        .map(|subscription| SubscriptionRow {
+            id: subscription.id.clone(),
+            name: subscription.name.clone(),
+            shown_url: subscription.shown_url(),
+            servers: profile
+                .servers
+                .iter()
+                .filter(|entry| entry.group.as_deref() == Some(subscription.id.as_str()))
+                .count(),
+            updated: subscription.updated,
+            usage: subscription.usage,
+            fetching: fetching.contains(&subscription.id),
+            problem: problems.get(&subscription.id).cloned(),
+        })
+        .collect()
 }
 
 /// The fields that describe whichever server is in use.
@@ -393,8 +535,20 @@ async fn drive(
     mut setup: Setup,
     frames: watch::Sender<Frame>,
     mut commands: mpsc::UnboundedReceiver<Command>,
+    // The loop's own address, for work finished elsewhere — a subscription
+    // fetched — to come back through, in order with everything else.
+    own: mpsc::WeakUnboundedSender<Command>,
 ) {
     let tracker = Arc::new(Tracker::new());
+    let mut toaster = Toaster::default();
+    // Subscriptions with a fetch on its way, and why the last one failed.
+    let mut fetching: HashSet<String> = HashSet::new();
+    let mut problems: HashMap<String, String> = HashMap::new();
+    // Its first tick is immediate, and comes after the tunnel has had its
+    // chance to start: lists gone stale while bliss was closed are fetched
+    // through it. Then once an hour.
+    let mut refresher = tokio::time::interval(Duration::from_secs(3600));
+    refresher.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut running: Option<Running> = None;
     let mut selected = setup.selected;
     let mut ticker = tokio::time::interval(TICK);
@@ -519,75 +673,261 @@ async fn drive(
                     }
                     Command::SeedRules => {
                         let mut next = setup.profile.clone();
-                        let saved = crate::profile_file::add_starting_rules(&mut next)
-                            .and_then(|()| save_profile(&mut store, &next));
+                        let saved = crate::profile_file::add_starting_rules(&mut next).and_then(|()| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                        });
                         match saved {
+                            Ok(()) => tracing::info!("routing: the starting rules are in the profile"),
+                            Err(e) => toaster.show(&frames, format!("не удалось сохранить правила: {e}"), true),
+                        }
+                    }
+                    Command::SaveRule { at, rule } => {
+                        let mut next = setup.profile.clone();
+                        let saved = crate::profile_file::save_rule(&mut next, at, rule).and_then(|()| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                        });
+                        match saved {
+                            Ok(()) => toaster.show(
+                                &frames,
+                                if at.is_some() { "Правило сохранено" } else { "Правило добавлено" },
+                                false,
+                            ),
+                            Err(e) => toaster.show(&frames, format!("правило не сохранилось: {e}"), true),
+                        }
+                    }
+                    Command::DeleteRule(at) => {
+                        let mut next = setup.profile.clone();
+                        let deleted = crate::profile_file::delete_rule(&mut next, at).and_then(|rule| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                                .map(|()| rule)
+                        });
+                        match deleted {
+                            Ok(rule) => toaster.show(
+                                &frames,
+                                format!("Правило «{}» удалено", rule.display_name()),
+                                false,
+                            ),
+                            Err(e) => toaster.show(&frames, format!("правило не удалилось: {e}"), true),
+                        }
+                    }
+                    Command::MoveRule { from, to } => {
+                        let mut next = setup.profile.clone();
+                        let moved = crate::profile_file::move_rule(&mut next, from, to).and_then(|()| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                        });
+                        if let Err(e) = moved {
+                            toaster.show(&frames, format!("порядок не сохранился: {e}"), true);
+                        }
+                    }
+                    Command::Fallback(action) => {
+                        if setup.profile.routing.fallback != action {
+                            let mut next = setup.profile.clone();
+                            next.routing.fallback = action;
+                            if let Err(e) =
+                                commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                            {
+                                toaster.show(&frames, format!("выбор не сохранился: {e}"), true);
+                            }
+                        }
+                    }
+                    Command::RouteOne { subject, action, target, process } => {
+                        let mut next = setup.profile.clone();
+                        crate::profile_file::route_one(&mut next, &subject, action);
+                        match commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames) {
                             Ok(()) => {
-                                tracing::info!("routing: the starting rules are in the profile");
+                                tracing::info!("routing: {} now {}", subject.value(), action.label());
+                                let mut text = format!("{} — {}", subject.value(), action.label());
+                                // The new rule went last, so a rule above it can
+                                // still claim this connection. Said out loud, or
+                                // the choice looks ignored.
+                                if let Ok(parsed) = bliss_core::Target::parse_authority(&target) {
+                                    let decision = rules.router.decide(&parsed, process.as_deref());
+                                    if decision.route != bliss_core::Route::from(action) {
+                                        text.push_str(&format!(
+                                            ". Это соединение по-прежнему решает «{}» — это правило выше в списке",
+                                            decision.rule
+                                        ));
+                                    }
+                                }
+                                toaster.show(&frames, text, false);
+                            }
+                            Err(e) => toaster.show(&frames, format!("правило не сохранилось: {e}"), true),
+                        }
+                    }
+                    Command::Import { text, from_form } => {
+                        attempts += 1;
+                        let attempt = attempts;
+                        let first = setup.servers.is_empty();
+                        let was = links_of(&setup.profile).get(selected).cloned();
+                        let mut next = setup.profile.clone();
+                        let mut servers_came = false;
+
+                        let outcome = if let Some(url) = crate::profile_file::subscription_address(&text.0) {
+                            let seed = jiff::Timestamp::now().as_millisecond().unsigned_abs();
+                            crate::profile_file::add_subscription(&mut next, &url, seed)
+                                .and_then(|added| save_profile(&mut store, &next).map(|()| added))
+                                .map(|added| {
+                                    // The host alone: the rest of the address is a token.
+                                    tracing::info!("subscription added: {}", added.name);
+                                    setup.profile = next;
+                                    forget_problem(&mut setup, &frames);
+                                    fetching.insert(added.id.clone());
+                                    fetch_subscription(added.id, added.url, via(running.as_ref()), true, own.clone());
+                                    publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                                    format!("Подписка «{}» добавлена, загружаю список…", added.name)
+                                })
+                        } else {
+                            crate::profile_file::import_servers(&mut next, &text.0)
+                                .and_then(|imported| save_profile(&mut store, &next).map(|()| imported))
+                                .map(|imported| {
+                                    for server in &imported.added {
+                                        // Names alone: a link is a credential.
+                                        tracing::info!("server added: {}", server.tag);
+                                    }
+                                    setup.profile = next;
+                                    forget_problem(&mut setup, &frames);
+                                    reload_servers(&mut setup, &mut selected, was, &frames);
+                                    servers_came = true;
+                                    imported.summary()
+                                })
+                        };
+
+                        // Before any start, which holds this loop for seconds:
+                        // whoever pasted should hear back the moment it is saved.
+                        if outcome.is_err() {
+                            tracing::info!("pasted text added nothing");
+                        }
+                        // Ctrl+V takes whatever the clipboard holds, which is
+                        // mostly not a link at all: say that, rather than what
+                        // is wrong with the text as a link.
+                        let outcome = outcome.map_err(|why| {
+                            if from_form || text.0.contains("://") {
+                                why
+                            } else {
+                                "в буфере обмена нет ссылки vless:// или адреса подписки".to_owned()
+                            }
+                        });
+                        if from_form {
+                            frames.send_modify(|f| f.added = Some(Added { attempt, outcome }));
+                        } else {
+                            match outcome {
+                                Ok(text) => toaster.show(&frames, text, false),
+                                Err(why) => toaster.show(&frames, why, true),
+                            }
+                        }
+                        if servers_came {
+                            ping_all(&setup.servers, &frames, &probes);
+                            // The first server is what the window was waiting
+                            // for. Connect, as opening it with one already would.
+                            if first && setup.autostart && running.is_none() {
+                                running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                apply_proxy(proxy, &setup, running.is_some(), &frames);
+                            }
+                        }
+                    }
+                    Command::Refresh(only) => {
+                        let started = refresh(
+                            &setup.profile,
+                            only.as_deref(),
+                            false,
+                            true,
+                            &mut fetching,
+                            via(running.as_ref()),
+                            &own,
+                        );
+                        if started > 0 {
+                            publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                        }
+                    }
+                    Command::DeleteSubscription(id) => {
+                        let was = links_of(&setup.profile).get(selected).cloned();
+                        let servers = setup
+                            .profile
+                            .servers
+                            .iter()
+                            .filter(|entry| entry.group.as_deref() == Some(id.as_str()))
+                            .count();
+                        let mut next = setup.profile.clone();
+                        let deleted = crate::profile_file::delete_subscription(&mut next, &id)
+                            .and_then(|gone| save_profile(&mut store, &next).map(|()| gone));
+                        match deleted {
+                            Ok(gone) => {
+                                tracing::info!("subscription removed: {}", gone.name);
                                 setup.profile = next;
                                 forget_problem(&mut setup, &frames);
-                                rules = Rules::compile(setup.profile.routing.clone(), &setup.work_dir);
-                                publish_routing(&frames, &rules);
-                                // The inbounds hold the table they started with,
-                                // so new rules apply once the tunnel comes back.
-                                if let Some(parts) = running.take() {
-                                    parts.stop().await;
-                                    running =
-                                        start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                fetching.remove(&id);
+                                problems.remove(&id);
+                                let lost = reload_servers(&mut setup, &mut selected, was, &frames);
+                                publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                                toaster.show(
+                                    &frames,
+                                    format!(
+                                        "Подписка «{}» удалена вместе с {}",
+                                        gone.name,
+                                        plural(servers as u64, "сервером", "серверами", "серверами")
+                                    ),
+                                    false,
+                                );
+                                if lost {
+                                    follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
+                                        .await;
+                                }
+                            }
+                            Err(e) => toaster.show(&frames, e, true),
+                        }
+                    }
+                    Command::Fetched(done) => {
+                        fetching.remove(&done.id);
+                        let Some(name) = setup
+                            .profile
+                            .subscriptions
+                            .iter()
+                            .find(|subscription| subscription.id == done.id)
+                            .map(|subscription| subscription.name.clone())
+                        else {
+                            // Deleted while the fetch was on its way.
+                            continue;
+                        };
+                        let outcome = done.result.and_then(|fetched| {
+                            let mut next = setup.profile.clone();
+                            let now = jiff::Timestamp::now().as_second();
+                            crate::profile_file::apply_subscription(&mut next, &done.id, &fetched, now)
+                                .and_then(|refreshed| save_profile(&mut store, &next).map(|()| (refreshed, next)))
+                        });
+                        match outcome {
+                            Ok((refreshed, next)) => {
+                                problems.remove(&done.id);
+                                tracing::info!(
+                                    "subscription {}: {} server(s), {} new, {} gone",
+                                    refreshed.name, refreshed.servers, refreshed.added, refreshed.removed
+                                );
+                                let first = setup.servers.is_empty();
+                                let was = links_of(&setup.profile).get(selected).cloned();
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                let lost = reload_servers(&mut setup, &mut selected, was, &frames);
+                                if done.asked {
+                                    toaster.show(&frames, refreshed_text(&refreshed), false);
+                                }
+                                // The rows came back without their numbers.
+                                ping_all(&setup.servers, &frames, &probes);
+                                if lost {
+                                    follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
+                                        .await;
+                                } else if first && setup.autostart && running.is_none() && !setup.servers.is_empty() {
+                                    running = start(&setup, selected, &tracker, &rules.router, &frames).await;
                                     apply_proxy(proxy, &setup, running.is_some(), &frames);
                                 }
                             }
-                            Err(e) => frames.send_modify(|f| {
-                                f.error = Some(format!("не удалось сохранить правила: {e}"));
-                            }),
-                        }
-                    }
-                    Command::AddServer(link) => {
-                        attempts += 1;
-                        let first = setup.servers.is_empty();
-                        let mut next = setup.profile.clone();
-                        let saved = crate::profile_file::add_server(&mut next, &link.0)
-                            .and_then(|server| save_profile(&mut store, &next).map(|()| server));
-                        let outcome = match saved {
-                            Ok(server) => {
-                                // The name only: the link is a credential.
-                                tracing::info!("server added: {}", server.tag);
-                                let tag = server.tag.clone();
-                                let row = server_row(&server, first);
-                                frames.send_modify(|f| {
-                                    if first {
-                                        describe_selection(f, &server);
-                                    }
-                                    f.servers.push(row);
-                                });
-                                setup.profile = next;
-                                setup.servers.push(server);
-                                forget_problem(&mut setup, &frames);
-                                Ok(tag)
-                            }
                             Err(why) => {
-                                tracing::info!("a pasted link was not added");
-                                Err(why)
+                                tracing::info!("subscription {name}: not updated");
+                                if done.asked {
+                                    toaster.show(&frames, format!("«{name}»: {why}"), true);
+                                }
+                                problems.insert(done.id.clone(), why);
                             }
-                        };
-                        let added = outcome.is_ok();
-                        // Before any start, which holds this loop for seconds:
-                        // the form should hear back the moment it is saved.
-                        frames.send_modify(|f| {
-                            f.added = Some(Added {
-                                attempt: attempts,
-                                outcome,
-                            });
-                        });
-                        if added {
-                            ping_all(&setup.servers, &frames, &probes);
                         }
-                        // The first server is what the window was waiting for.
-                        // Connect, as opening the window with one already would.
-                        if added && first && setup.autostart && running.is_none() {
-                            running = start(&setup, selected, &tracker, &rules.router, &frames).await;
-                            apply_proxy(proxy, &setup, running.is_some(), &frames);
-                        }
+                        publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
                     }
                     Command::Proxy(mode) => {
                         proxy = mode;
@@ -629,10 +969,17 @@ async fn drive(
                     apply_proxy(proxy, &setup, false, &frames);
                 }
                 publish(&frames, &tracker, &mut last, running.as_ref());
+                toaster.expire(&frames);
+            }
+            _ = refresher.tick() => {
+                let route = via(running.as_ref());
+                if refresh(&setup.profile, None, true, false, &mut fetching, route, &own) > 0 {
+                    publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                }
             }
             _ = probe.tick() => {
                 if let Some(parts) = running.as_ref() {
-                    let outbound = Arc::clone(&parts.outbound);
+                    let outbound = Arc::clone(&parts.serving.outbound);
                     let frames = frames.clone();
                     tokio::spawn(async move {
                         let measured = measure_latency(outbound.as_ref()).await;
@@ -691,8 +1038,12 @@ struct Running {
     xray: bliss_xray::Xray,
     inbounds: Vec<JoinHandle<()>>,
     since: Instant,
-    /// Kept so the latency probe can dial the same way traffic does.
-    outbound: Arc<dyn bliss_core::Outbound>,
+    /// What the inbounds share: the dialer, which the latency probe uses too,
+    /// and the rule table a routing change swaps under live traffic.
+    serving: Arc<Serving>,
+    /// The engine's own SOCKS port, for fetching a subscription through the
+    /// tunnel without the rules getting a say.
+    bridge: SocketAddr,
 }
 
 impl Running {
@@ -759,6 +1110,7 @@ impl Rules {
                     conditions: describe_conditions(rule),
                 })
                 .collect(),
+            source: self.config.rules.clone(),
             warnings: self.router.warnings.clone(),
         }
     }
@@ -797,6 +1149,211 @@ fn forget_problem(setup: &mut Setup, frames: &watch::Sender<Frame>) {
     }
 }
 
+/// Save a routing change made on a copy of the profile, and put it to work: on
+/// screen, and under the traffic already flowing.
+///
+/// Nothing restarts. The inbounds read the table for every new connection
+/// (`Serving::set_router`), so connections already open keep their route and
+/// the next one gets the new rules. A change used to stop and start the whole
+/// tunnel, which dropped every connection for the sake of one rule.
+fn commit_routing(
+    next: Profile,
+    store: &mut Store,
+    setup: &mut Setup,
+    rules: &mut Rules,
+    running: Option<&Running>,
+    frames: &watch::Sender<Frame>,
+) -> Result<(), String> {
+    save_profile(store, &next)?;
+    setup.profile = next;
+    forget_problem(setup, frames);
+    *rules = Rules::compile(setup.profile.routing.clone(), &setup.work_dir);
+    publish_routing(frames, rules);
+    if let Some(parts) = running {
+        parts.serving.set_router(Arc::clone(&rules.router));
+    }
+    Ok(())
+}
+
+/// Take a changed server list from the profile: parse it again, keep the
+/// server in use selected while it is still listed, and redraw the rows.
+///
+/// `was` is the link of the server in use before the change. Returns true when
+/// that server has gone, so the tunnel can follow the new selection.
+fn reload_servers(
+    setup: &mut Setup,
+    selected: &mut usize,
+    was: Option<String>,
+    frames: &watch::Sender<Frame>,
+) -> bool {
+    let (servers, _) = setup.profile.parse_servers();
+    let found = was
+        .as_ref()
+        .and_then(|link| links_of(&setup.profile).iter().position(|l| l == link));
+    let lost = was.is_some() && found.is_none();
+    *selected = found.unwrap_or(0);
+    setup.servers = servers;
+    let rows = server_rows(&setup.profile, &setup.servers, *selected);
+    let server = setup.server(*selected);
+    frames.send_modify(|f| {
+        f.servers = rows;
+        match server {
+            Some(server) => describe_selection(f, server),
+            None => {
+                f.server_tag.clear();
+                f.server_addr.clear();
+                f.sni.clear();
+                f.flow.clear();
+                f.fingerprint.clear();
+            }
+        }
+    });
+    lost
+}
+
+/// After the server in use left the list: carry the tunnel over to what is
+/// selected now, or stop it when nothing is left to carry it to.
+async fn follow_selection(
+    running: &mut Option<Running>,
+    setup: &Setup,
+    selected: usize,
+    tracker: &Arc<Tracker>,
+    router: &Arc<Router>,
+    frames: &watch::Sender<Frame>,
+    proxy: ProxyMode,
+) {
+    let Some(parts) = running.take() else {
+        return;
+    };
+    parts.stop().await;
+    if setup.servers.is_empty() {
+        stop_now(running, frames).await;
+    } else {
+        *running = start(setup, selected, tracker, router, frames).await;
+    }
+    apply_proxy(proxy, setup, running.is_some(), frames);
+}
+
+fn publish_subscriptions(
+    frames: &watch::Sender<Frame>,
+    profile: &Profile,
+    fetching: &HashSet<String>,
+    problems: &HashMap<String, String>,
+) {
+    let rows = subscription_rows(profile, fetching, problems);
+    frames.send_modify(|f| f.subscriptions = rows);
+}
+
+/// The engine's SOCKS port while the tunnel is up.
+fn via(running: Option<&Running>) -> Option<SocketAddr> {
+    running.map(|parts| parts.bridge)
+}
+
+/// Start fetching subscriptions: `only` the one named, or all of them; with
+/// `stale_only`, just those not fetched for `REFRESH_AFTER`. One already on
+/// its way is not fetched twice. Returns how many were started.
+fn refresh(
+    profile: &Profile,
+    only: Option<&str>,
+    stale_only: bool,
+    asked: bool,
+    fetching: &mut HashSet<String>,
+    via: Option<SocketAddr>,
+    own: &mpsc::WeakUnboundedSender<Command>,
+) -> usize {
+    let now = jiff::Timestamp::now().as_second();
+    let stale_after = crate::subscription::REFRESH_AFTER.as_secs() as i64;
+    let mut started = 0;
+    for subscription in &profile.subscriptions {
+        if only.is_some_and(|id| id != subscription.id) {
+            continue;
+        }
+        let stale = subscription
+            .updated
+            .is_none_or(|at| now.saturating_sub(at) >= stale_after);
+        if (stale_only && !stale) || !fetching.insert(subscription.id.clone()) {
+            continue;
+        }
+        fetch_subscription(
+            subscription.id.clone(),
+            subscription.url.clone(),
+            via,
+            asked,
+            own.clone(),
+        );
+        started += 1;
+    }
+    started
+}
+
+/// Fetch a list off the engine loop and hand the result back to it as a
+/// command, so a slow provider holds nothing else up.
+///
+/// Through the tunnel first when it is up, then straight: a provider's address
+/// can be blocked on this network, or unreachable from the server's.
+fn fetch_subscription(
+    id: String,
+    url: String,
+    via: Option<SocketAddr>,
+    asked: bool,
+    own: mpsc::WeakUnboundedSender<Command>,
+) {
+    tokio::spawn(async move {
+        let mut result = crate::subscription::fetch(&url, via).await;
+        if result.is_err() && via.is_some() {
+            result = crate::subscription::fetch(&url, None).await;
+        }
+        if let Some(own) = own.upgrade() {
+            let _ = own.send(Command::Fetched(FetchDone { id, result, asked }));
+        }
+    });
+}
+
+fn refreshed_text(refreshed: &crate::profile_file::Refreshed) -> String {
+    let mut text = format!(
+        "«{}»: {}",
+        refreshed.name,
+        plural(refreshed.servers as u64, "сервер", "сервера", "серверов")
+    );
+    if refreshed.added > 0 || refreshed.removed > 0 {
+        text.push_str(&format!(
+            " — новых {}, убрано {}",
+            refreshed.added, refreshed.removed
+        ));
+    }
+    text
+}
+
+/// Short lines about what the last action did, taken down after a while.
+#[derive(Default)]
+struct Toaster {
+    shown: u64,
+    until: Option<Instant>,
+}
+
+impl Toaster {
+    fn show(&mut self, frames: &watch::Sender<Frame>, text: impl Into<String>, bad: bool) {
+        // Long enough to read a sentence twice; a failure stays a little longer.
+        let lasts = Duration::from_secs(if bad { 9 } else { 5 });
+        self.shown += 1;
+        self.until = Some(Instant::now() + lasts);
+        let toast = Toast {
+            id: self.shown,
+            text: text.into(),
+            bad,
+        };
+        frames.send_modify(|f| f.toast = Some(toast));
+    }
+
+    /// On the tick: take the line down once its time is up.
+    fn expire(&mut self, frames: &watch::Sender<Frame>) {
+        if self.until.is_some_and(|until| Instant::now() >= until) {
+            self.until = None;
+            frames.send_modify(|f| f.toast = None);
+        }
+    }
+}
+
 /// One line per condition, in the words the profile used.
 fn describe_conditions(rule: &bliss_proto::Rule) -> Vec<String> {
     let mut out = Vec::new();
@@ -828,16 +1385,36 @@ fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
     if text.is_empty() {
         return None;
     }
-    let target = if let Ok(ip) = text.parse::<std::net::IpAddr>() {
-        bliss_core::Target::Socket(SocketAddr::new(ip, 443))
+    // The address of a page, pasted whole: the site in it is the question.
+    let from_url = reqwest::Url::parse(text)
+        .ok()
+        .filter(|_| text.contains("://"))
+        .and_then(|url| {
+            let host = url.host_str()?.to_owned();
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host,
+            })
+        });
+    let text = from_url.as_deref().unwrap_or(text);
+    let (target, typed_port) = if let Ok(ip) = text.parse::<std::net::IpAddr>() {
+        (bliss_core::Target::Socket(SocketAddr::new(ip, 443)), false)
     } else {
-        bliss_core::Target::parse_authority(text)
-            .unwrap_or_else(|_| bliss_core::Target::domain(text, 443))
+        match bliss_core::Target::parse_authority(text) {
+            Ok(target) => (target, true),
+            Err(_) => (bliss_core::Target::domain(text, 443), false),
+        }
     };
 
     let decision = router.decide(&target, None);
     Some(CheckResult {
-        target: target.to_string(),
+        // The port only when it was typed. Assumed, it read as part of the
+        // answer: `geoip:ru` came back as `geoip:ru:443`.
+        target: if typed_port {
+            target.to_string()
+        } else {
+            target.host()
+        },
         action: match decision.route {
             bliss_core::Route::Proxy => Action::Proxy,
             bliss_core::Route::Direct => Action::Direct,
@@ -941,11 +1518,11 @@ async fn start(
         }
     }
 
-    let serving = Arc::new(Serving {
-        outbound: Arc::clone(&outbound),
-        tracker: Arc::clone(tracker),
-        router: Arc::clone(router),
-    });
+    let serving = Arc::new(Serving::new(
+        Arc::clone(&outbound),
+        Arc::clone(tracker),
+        Arc::clone(router),
+    ));
 
     let mut inbounds = Vec::new();
     for listener in bound {
@@ -963,11 +1540,13 @@ async fn start(
         f.error = None;
     });
 
+    let bridge = xray.socks_addr();
     Some(Running {
         xray,
         inbounds,
         since: Instant::now(),
-        outbound,
+        serving,
+        bridge,
     })
 }
 
@@ -1422,9 +2001,13 @@ mod tests {
     /// log line is one careless edit away.
     #[test]
     fn a_pasted_link_does_not_show_in_debug_output() {
-        let command = Command::AddServer(Link(
-            "vless://11111111-2222-3333-4444-555555555555@a.example:443?encryption=none".to_owned(),
-        ));
+        let command = Command::Import {
+            text: Link(
+                "vless://11111111-2222-3333-4444-555555555555@a.example:443?encryption=none"
+                    .to_owned(),
+            ),
+            from_form: true,
+        };
         let shown = format!("{command:?}");
         assert!(
             !shown.contains("11111111") && !shown.contains("a.example"),
