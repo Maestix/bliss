@@ -297,7 +297,7 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
 
    Inline radii are therefore literals. 4px, 8px and 14px mirror `--radius-sm`,
    `--radius-md` and `--radius-lg`; 11px, 3px, `1px 1px 0 0` and 50% have no
-   token. `radius_literals_match_the_design_tokens` asserts `nocturne.css` still
+   token. `radius_literals_match_the_design_tokens` asserts `theme.css` still
    declares those three values, and scans all of `ui.rs` except `//` comment
    lines, whitespace-insensitive, for a `var(` inside any of the unstable
    shorthands. Comments are skipped because prose about the rule once tripped it.
@@ -315,7 +315,7 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
    `text-transform: uppercase`, does not paint blurred `box-shadow`, does not size
    flex columns to content, and drops whitespace before a nested span. The code
    already relies on some of these (`text-transform:uppercase` inline; `color-mix`
-   in `nocturne.css`), so a Blitz build is not free today. Do not add more.
+   in `theme.css`), so a Blitz build is not free today. Do not add more.
 6. A text input fed from the frame (republished twice a second) fights the user
    typing; keep the typed text in a local signal.
 7. The window never touches tokio. The engine thread publishes a `Frame` on a
@@ -344,10 +344,20 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
    the icon at some size cannot tell which frames exist.
 10. **The status card's scene** (`assets/status-card.jpg`) is the right-hand part
     of a generated night picture: its flat sky (#141423) shifted to
-    `--color-surface`, faded to exactly that colour along the left and top
+    `--color-surface`, everything else nudged toward pink (hue +14 of 255,
+    saturation ×1.25), faded to exactly the card colour along the left and top
     edges, saved as JPEG q90 without chroma subsampling. A new surface colour
-    means remaking the file, or its edge shows as a rectangle. The generated
+    means remaking the file, or its edge shows as a rectangle;
+    `the_scene_matches_the_card_surface` checks the edge pixels. The generated
     originals are not in git.
+11. **The theme is `theme.css`**: a calm neon — plum grounds, a soft pink accent,
+    violet for what is on its way, mint for "fine" and "direct", a soft red for
+    failures. It replaced Nocturne, whose token names it kept. Colours that
+    cannot be a `var()` — SVG attributes, state tones, `rgba()` tints — are
+    literals in `ui.rs` (`ACCENT`, `MUTED`, `GOOD`, `BAD`, `ON`, `BUSY`, `IDLE`,
+    `FAILED`, and tints of the accent `rgba(238,130,196,…)`) and `app.css`;
+    they mirror the tokens, so change both together. Connected and "through the
+    proxy" are both pink, which is why "direct" must never borrow `ON`.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -384,7 +394,7 @@ Two more probes that worked:
   may not paint while Claude's window is behind others. Headless Edge takes the
   picture without stealing focus:
   `msedge.exe --headless=new --no-proxy-server --user-data-dir=<scratch dir> --window-size=W,H --screenshot=<png> <url>`.
-  `nocturne.css` has its own `.card` class, so name replica classes differently.
+  `theme.css` has its own `.card` class, so name replica classes differently.
 
 ## 8. Debugging discipline
 

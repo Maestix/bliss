@@ -1,4 +1,4 @@
-/* Rules specific to the window shell, on top of the Nocturne design system.
+/* Rules specific to the window shell, on top of the tokens in theme.css.
    They live in a file rather than inline in rsx! because braces inside an rsx!
    string are format placeholders — CSS and format strings do not mix. */
 
@@ -11,8 +11,8 @@ body { font-size: 16px; user-select: none; cursor: default; }
 /* Except a text box, which is the one place typing and selecting are the
    point. Without this the caret lands but a double-click selects nothing. */
 .field { user-select: text; cursor: text; outline: none; }
-.field::placeholder { color: #595d6c; }
-.field:focus { box-shadow: inset 0 0 0 1px rgba(145, 132, 217, .45); }
+.field::placeholder { color: #5a506a; }
+.field:focus { box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .45); }
 * { -webkit-tap-highlight-color: transparent; }
 :focus { outline: none; }
 
@@ -39,7 +39,7 @@ body { font-size: 16px; user-select: none; cursor: default; }
    leaves the hover tint stacked on top of the active tint, and because the
    pointer does not move afterwards it stays that way — which looks exactly
    like a highlight that got stuck. */
-.nav-item:not(.active):not(.disabled):hover { background-color: rgba(233, 233, 237, .06); }
+.nav-item:not(.active):not(.disabled):hover { background-color: rgba(239, 232, 245, .06); }
 
 /* The rail's and the server list's state lives here rather than in an inline
    style, and that is not a matter of taste. Dioxus writes a new `style`
@@ -52,37 +52,38 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .nav-item.disabled { color: var(--color-neutral-700); }
 .nav-item.active {
   color: var(--color-accent);
-  background-color: rgba(145, 132, 217, .10);
-  box-shadow: inset 2px 0 0 var(--color-accent);
+  background-color: rgba(238, 130, 196, .13);
+  /* The accent bar, and a glow faint enough to read as light rather than neon. */
+  box-shadow: inset 2px 0 0 var(--color-accent), 0 0 18px rgba(238, 130, 196, .10);
 }
 .srv.current {
-  background-color: rgba(145, 132, 217, .10);
+  background-color: rgba(238, 130, 196, .10);
   box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
-.row:hover { background-color: rgba(233, 233, 237, .045); }
+.row:hover { background-color: rgba(239, 232, 245, .045); }
 
 /* Both are click-to-copy, so both have to look clickable. Nothing else in the
    log moves, which makes a faint tint enough of a hint. */
 .logline { transition: background-color .12s ease; }
-.logline:hover { background-color: rgba(233, 233, 237, .07); }
+.logline:hover { background-color: rgba(239, 232, 245, .07); }
 
 /* Tabs inside a card, and the clickable things the tabs contain. Same rule as
    the rail: hover is scoped away from whatever is already marked, or the two
    tints stack and the pointer has nowhere to move to clear it. */
 .tab, .act, .srv { transition: background-color .14s ease, color .14s ease; }
 .tab { color: var(--color-neutral-500); }
-.tab:not(.active):hover { background-color: rgba(233, 233, 237, .06); color: #e9e9ed; }
-.tab.active { color: var(--color-accent); background-color: rgba(145, 132, 217, .12); }
-.act:not(.disabled):hover { background-color: rgba(233, 233, 237, .07); }
+.tab:not(.active):hover { background-color: rgba(239, 232, 245, .06); color: #efe8f5; }
+.tab.active { color: var(--color-accent); background-color: rgba(238, 130, 196, .12); }
+.act:not(.disabled):hover { background-color: rgba(239, 232, 245, .07); }
 /* One of three, so the chosen row keeps its tint and the hover stays off it —
    the same rule as the rail, for the same reason. */
-.choice.on { background-color: rgba(145, 132, 217, .10); }
-.choice.on:hover { background-color: rgba(145, 132, 217, .10); }
-.srv:not(.current):hover { background-color: rgba(233, 233, 237, .05); }
-.wbtn:hover { background-color: rgba(233, 233, 237, .07); color: #e9e9ed; }
-.wbtn-close:hover { background-color: #8c3b44; color: #fff; }
-.ring:hover { border-color: #b5abfc; }
+.choice.on { background-color: rgba(238, 130, 196, .10); }
+.choice.on:hover { background-color: rgba(238, 130, 196, .10); }
+.srv:not(.current):hover { background-color: rgba(239, 232, 245, .05); }
+.wbtn:hover { background-color: rgba(239, 232, 245, .07); color: #efe8f5; }
+.wbtn-close:hover { background-color: #a8435a; color: #fff; }
+.ring:hover { border-color: #f5b8dc; }
 
 /* The night scene on the status card.
    - The picture's sky was shifted to --color-surface when the file was made,
@@ -120,12 +121,12 @@ body { font-size: 16px; user-select: none; cursor: default; }
    wanted where something actually scrolls — `overflow: scroll` was chosen
    originally because Blitz has no `auto`, but a permanent empty track is worse
    than the portability it buys, so panes that fit their content use `hidden`. */
-* { scrollbar-width: thin; scrollbar-color: rgba(233, 233, 237, .16) transparent; }
+* { scrollbar-width: thin; scrollbar-color: rgba(239, 232, 245, .16) transparent; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(233, 233, 237, .16);
+  background: rgba(239, 232, 245, .16);
   border-radius: 5px;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(233, 233, 237, .28); }
+::-webkit-scrollbar-thumb:hover { background: rgba(239, 232, 245, .28); }
