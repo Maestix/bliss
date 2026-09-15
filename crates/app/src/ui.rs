@@ -50,7 +50,8 @@ use dioxus::prelude::*;
 use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, State, bytes, rate};
 use bliss_proto::ProxyMode;
 
-const NOCTURNE: &str = include_str!("../assets/nocturne.css");
+/// The window's palette, type and radii — a calm neon; see theme.css.
+const THEME: &str = include_str!("../assets/theme.css");
 const APP_CSS: &str = include_str!("../assets/app.css");
 /// The status card's night scene; see `.status-card` in app.css.
 const SCENE: &[u8] = include_bytes!("../assets/status-card.jpg");
@@ -72,18 +73,26 @@ const SOURCE: &str = include_str!("ui.rs");
 
 /// The wrapper every screen sits in, so the fade-in has something to animate.
 const SCREEN: &str = "flex:1;min-height:0;display:flex;flex-direction:column";
-const ACCENT: &str = "#9184d9";
+/// Soft pink, `--color-accent` in theme.css: what is on, chosen or clickable.
+const ACCENT: &str = "#ee82c4";
 /// Neutral-400: window controls and anything else that should recede.
-const MUTED: &str = "#b2b6ca";
+const MUTED: &str = "#b5a9c4";
+/// `--color-good`: a quick server, a rule that sends traffic direct.
+const GOOD: &str = "#72cf9e";
+/// `--color-bad`: a failure, a server that did not answer, a blocking rule.
+const BAD: &str = "#e56b6f";
 
-// Status is carried by colour rather than by a word, so these three are the
-// only place the state is spelled out. Muted on purpose: a saturated green
-// against this ground would read as a different product.
-const ON: (&str, &str, &str) = ("#5aa87f", "rgba(90,168,127,.24)", "rgba(90,168,127,.12)");
-const OFF: (&str, &str, &str) = ("#a8505c", "rgba(168,80,92,.20)", "rgba(168,80,92,.10)");
-// Starting gets the accent rather than a premature green: it is not connected
-// yet, and saying so for the second it lasts costs nothing.
-const BUSY: (&str, &str, &str) = (ACCENT, "rgba(145,132,217,.20)", "rgba(145,132,217,.10)");
+// Status is carried by colour rather than by a word, so these are the only
+// place the state is spelled out: border, outer glow, inner bloom. Connected is
+// the accent with a soft glow, as in the mockup the theme came from; the glow
+// is the whole "calm neon", and it stays faint on purpose.
+const ON: (&str, &str, &str) = (ACCENT, "rgba(238,130,196,.34)", "rgba(238,130,196,.14)");
+// Starting gets violet rather than a premature pink: it is not connected yet.
+const BUSY: (&str, &str, &str) = ("#a98ce8", "rgba(169,140,232,.26)", "rgba(169,140,232,.12)");
+// Off is quiet rather than alarming: a tunnel someone turned off is not a problem.
+const IDLE: (&str, &str, &str) = ("#766a88", "rgba(118,106,136,.16)", "rgba(118,106,136,.08)");
+// A failure is the one state that asks to be looked at.
+const FAILED: (&str, &str, &str) = (BAD, "rgba(229,107,111,.26)", "rgba(229,107,111,.12)");
 
 pub fn launch(controller: Controller) {
     dioxus::LaunchBuilder::desktop()
@@ -280,7 +289,7 @@ fn App() -> Element {
 #[component]
 fn Styles() -> Element {
     rsx! {
-        style { dangerous_inner_html: NOCTURNE }
+        style { dangerous_inner_html: THEME }
         style { dangerous_inner_html: STYLES.as_str() }
     }
 }
@@ -483,7 +492,7 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                 // A faint tint rather than the surface colour: the rail is that
                 // colour now, and the box would vanish into it.
                 style: "margin-top:auto;padding:12px;display:flex;flex-direction:column;gap:5px;\
-                        border-radius:8px;background-color:rgba(233,233,237,.03)",
+                        border-radius:8px;background-color:rgba(239,232,245,.03)",
                 span {
                     style: "font-size:12px;letter-spacing:.1em;text-transform:uppercase;\
                             color:var(--color-neutral-500)",
@@ -544,8 +553,8 @@ fn NavItem(
 fn nav_tint(active: bool, enabled: bool) -> &'static str {
     match (active, enabled) {
         (true, _) => ACCENT,
-        (false, true) => "#b2b6ca",
-        (false, false) => "#595d6c",
+        (false, true) => "#b5a9c4",
+        (false, false) => "#5a506a",
     }
 }
 
@@ -576,10 +585,10 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 div {
                     style: "flex:none;display:flex;align-items:flex-start;gap:9px;\
                             padding:10px 13px;border-radius:8px;\
-                            background-color:rgba(168,80,92,.10);\
-                            box-shadow:inset 0 0 0 1px rgba(168,80,92,.26)",
+                            background-color:rgba(229,107,111,.10);\
+                            box-shadow:inset 0 0 0 1px rgba(229,107,111,.26)",
                     span {
-                        style: "font-size:13.5px;line-height:1.45;color:#d9a2a9;\
+                        style: "font-size:13.5px;line-height:1.45;color:#f2a7ad;\
                                 min-width:0;word-break:break-word",
                         "{reason}"
                     }
@@ -798,9 +807,9 @@ fn AddServerForm(frame: Frame) -> Element {
                     autocomplete: "off",
                     spellcheck: "false",
                     style: "flex:1;min-width:0;padding:8px 10px;border-radius:4px;border:none;\
-                            background-color:#12131d;color:var(--color-text);font-size:14px;\
+                            background-color:#120c1a;color:var(--color-text);font-size:14px;\
                             font-family:ui-monospace,Consolas,monospace;\
-                            box-shadow:inset 0 0 0 1px rgba(233,233,237,.10)",
+                            box-shadow:inset 0 0 0 1px rgba(239,232,245,.10)",
                     oninput: move |e| link.set(e.value()),
                     onkeydown: {
                         let submit = submit.clone();
@@ -842,11 +851,11 @@ fn AddServerForm(frame: Frame) -> Element {
             }
             match fresh.map(|added| added.outcome) {
                 Some(Ok(tag)) => rsx! {
-                    span { style: "font-size:13px;color:#5aa87f", "Добавлен «{elide(&tag, 40)}»" }
+                    span { style: "font-size:13px;color:#72cf9e", "Добавлен «{elide(&tag, 40)}»" }
                 },
                 Some(Err(why)) => rsx! {
                     span {
-                        style: "font-size:13px;line-height:1.45;color:#d9a2a9;word-break:break-word",
+                        style: "font-size:13px;line-height:1.45;color:#f2a7ad;word-break:break-word",
                         "{why}"
                     }
                 },
@@ -1057,7 +1066,7 @@ fn SystemProxy(frame: Frame) -> Element {
         div {
             style: "grid-column:1 / -1;display:flex;flex-direction:column;gap:8px;\
                     padding:12px 13px;border-radius:8px;\
-                    background-color:rgba(233,233,237,.03)",
+                    background-color:rgba(239,232,245,.03)",
             div { style: "display:flex;align-items:center;gap:11px",
                 crate::icons::Shield { size: 17, color: ACCENT }
                 span { style: "font-size:14.5px", "Системный прокси" }
@@ -1115,7 +1124,7 @@ fn choice_ring(chosen: bool) -> &'static str {
     if chosen {
         "var(--color-accent)"
     } else {
-        "rgba(233,233,237,.22)"
+        "rgba(239,232,245,.22)"
     }
 }
 
@@ -1154,7 +1163,7 @@ fn ActionCard(
         div {
             class: if enabled { "act" } else { "act disabled" },
             style: "display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:default;border-radius:8px;\
-                    background-color:rgba(233,233,237,.03);{tone}",
+                    background-color:rgba(239,232,245,.03);{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             div { style: "display:flex;flex-direction:column;gap:2px;min-width:0",
@@ -1174,9 +1183,9 @@ fn Button(
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
     let tone = if enabled {
-        "color:var(--color-neutral-200);box-shadow:inset 0 0 0 1px rgba(145,132,217,.35)"
+        "color:var(--color-neutral-200);box-shadow:inset 0 0 0 1px rgba(238,130,196,.35)"
     } else {
-        "color:var(--color-neutral-700);box-shadow:inset 0 0 0 1px rgba(233,233,237,.07)"
+        "color:var(--color-neutral-700);box-shadow:inset 0 0 0 1px rgba(239,232,245,.07)"
     };
     rsx! {
         div {
@@ -1211,10 +1220,10 @@ fn ping_text(ping: Ping) -> String {
 fn ping_tone(ping: Ping) -> &'static str {
     use Ping;
     match ping {
-        Ping::Ok(ms) if ms < 120 => ON.0,
-        Ping::Ok(ms) if ms < 300 => "var(--color-accent-300)",
+        Ping::Ok(ms) if ms < 120 => GOOD,
+        Ping::Ok(ms) if ms < 300 => "var(--color-accent-2-300)",
         Ping::Ok(_) => "var(--color-neutral-400)",
-        Ping::Down => OFF.0,
+        Ping::Down => BAD,
         Ping::Unknown | Ping::Probing => "var(--color-neutral-600)",
     }
 }
@@ -1228,7 +1237,7 @@ fn Toggle(on: bool, tone: String, onclick: EventHandler<MouseEvent>) -> Element 
         div {
             style: "width:52px;height:28px;border-radius:14px;padding:2px;display:flex;\
                     cursor:default;box-shadow:inset 0 0 0 1px {tone};\
-                    background-color:rgba(145,132,217,.08)",
+                    background-color:rgba(238,130,196,.08)",
             onclick: move |e| onclick.call(e),
             div {
                 style: "width:24px;height:24px;border-radius:50%;background-color:{tone};\
@@ -1256,7 +1265,8 @@ fn tones(state: State) -> (&'static str, &'static str, &'static str) {
     match state {
         State::Running => ON,
         State::Starting => BUSY,
-        State::Stopped | State::Failed => OFF,
+        State::Stopped => IDLE,
+        State::Failed => FAILED,
     }
 }
 
@@ -1333,7 +1343,7 @@ fn Connections(frame: Frame) -> Element {
                         key: "{row.id}",
                         class: "row",
                         style: "display:grid;{COLUMNS};align-items:center;padding:7px 8px;\
-                                cursor:default;border-bottom:1px solid rgba(233,233,237,.05)",
+                                cursor:default;border-bottom:1px solid rgba(239,232,245,.05)",
                         onclick: {
                             let text = row_as_text(row);
                             move |_| {
@@ -1406,7 +1416,7 @@ fn Routing(frame: Frame) -> Element {
                 div {
                     style: "flex:none;display:flex;align-items:center;gap:13px;padding:14px;\
                             border-radius:8px;background-color:var(--color-surface);\
-                            box-shadow:inset 0 0 0 1px rgba(145,132,217,.24)",
+                            box-shadow:inset 0 0 0 1px rgba(238,130,196,.24)",
                     div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
                         span { style: "font-size:14.5px", "Правил пока нет" }
                         span {
@@ -1433,8 +1443,8 @@ fn Routing(frame: Frame) -> Element {
                 div {
                     style: "flex:none;display:flex;flex-direction:column;gap:5px;padding:11px 13px;\
                             border-radius:8px;\
-                            background-color:rgba(210,206,253,.07);\
-                            box-shadow:inset 0 0 0 1px rgba(210,206,253,.18)",
+                            background-color:rgba(203,186,244,.07);\
+                            box-shadow:inset 0 0 0 1px rgba(203,186,244,.18)",
                     span {
                         style: "font-size:12px;letter-spacing:.09em;text-transform:uppercase;\
                                 color:var(--color-neutral-500)",
@@ -1443,7 +1453,7 @@ fn Routing(frame: Frame) -> Element {
                     for (n, warning) in view.warnings.iter().enumerate() {
                         span {
                             key: "{n}",
-                            style: "font-size:13px;line-height:1.45;color:#d2cefd;\
+                            style: "font-size:13px;line-height:1.45;color:#cbbaf4;\
                                     word-break:break-word",
                             "{warning}"
                         }
@@ -1494,7 +1504,7 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                         key: "{rule.position}",
                         style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;\
                                 border-radius:4px;\
-                                background-color:rgba(233,233,237,.03)",
+                                background-color:rgba(239,232,245,.03)",
                         // The number is the rule: first match wins, so the
                         // order is not decoration.
                         span {
@@ -1562,9 +1572,9 @@ fn Checker(
                 autocomplete: "off",
                 spellcheck: "false",
                 style: "padding:8px 10px;border-radius:4px;border:none;\
-                        background-color:#12131d;color:var(--color-text);font-size:14px;\
+                        background-color:#120c1a;color:var(--color-text);font-size:14px;\
                         font-family:ui-monospace,Consolas,monospace;\
-                        box-shadow:inset 0 0 0 1px rgba(233,233,237,.10)",
+                        box-shadow:inset 0 0 0 1px rgba(239,232,245,.10)",
                 // The text lives here rather than in the frame: a controlled
                 // input fed from a value that is republished twice a second
                 // fights whoever is typing into it.
@@ -1578,7 +1588,7 @@ fn Checker(
             if let Some(answer) = result {
                 div {
                     style: "display:flex;flex-direction:column;gap:7px;padding:11px;\
-                            border-radius:4px;background-color:rgba(233,233,237,.03)",
+                            border-radius:4px;background-color:rgba(239,232,245,.03)",
                     span {
                         style: "font-size:13px;color:var(--color-neutral-400);\
                                 font-family:ui-monospace,Consolas,monospace;word-break:break-all",
@@ -1604,9 +1614,9 @@ fn Checker(
 #[component]
 fn ActionPill(action: bliss_proto::Action) -> Element {
     let (text, border) = match action {
-        bliss_proto::Action::Proxy => ("rgba(145,132,217,.14)", ACCENT),
-        bliss_proto::Action::Direct => ("rgba(90,168,127,.14)", ON.0),
-        bliss_proto::Action::Block => ("rgba(168,80,92,.14)", OFF.0),
+        bliss_proto::Action::Proxy => ("rgba(238,130,196,.14)", ACCENT),
+        bliss_proto::Action::Direct => ("rgba(114,207,158,.14)", GOOD),
+        bliss_proto::Action::Block => ("rgba(229,107,111,.14)", BAD),
     };
     rsx! {
         span {
@@ -1664,7 +1674,7 @@ fn bar_height(value: u64, peak: u64) -> u64 {
 
 fn bar_colour(value: u64) -> &'static str {
     if value == 0 {
-        "rgba(233,233,237,.07)"
+        "rgba(239,232,245,.07)"
     } else {
         "var(--color-accent-700)"
     }
@@ -1734,9 +1744,9 @@ mod tests {
     /// and app.css names the file so that `STYLES` can inline it.
     #[test]
     fn the_scene_matches_the_card_surface() {
-        const SURFACE: [u8; 3] = [0x23, 0x25, 0x32];
+        const SURFACE: [u8; 3] = [0x1e, 0x16, 0x29];
         assert!(
-            NOCTURNE.contains("--color-surface: #232532;"),
+            THEME.contains("--color-surface: #1e1629;"),
             "the card surface changed colour: remake status-card.jpg with its edges \
              at the new value, then change SURFACE here"
         );
@@ -1790,8 +1800,8 @@ mod tests {
         ] {
             let declaration = format!("{token}: {literal};");
             assert!(
-                NOCTURNE.contains(&declaration),
-                "nocturne no longer says {declaration:?} — the inline radii in this file \
+                THEME.contains(&declaration),
+                "theme.css no longer says {declaration:?} — the inline radii in this file \
                  still use {literal} and have to be updated with it"
             );
         }
@@ -1984,7 +1994,7 @@ fn LogStrip() -> Element {
             }
             div {
                 style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
-                        background-color:#12131d;border-radius:4px;padding:9px 12px;\
+                        background-color:#120c1a;border-radius:4px;padding:9px 12px;\
                         display:flex;flex-direction:column;gap:4px;\
                         font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.5",
                 if lines.is_empty() {

@@ -46,11 +46,11 @@ impl Severity {
         }
     }
 
-    /// Colours from the Nocturne ramp: only trouble gets to stand out.
+    /// Colours from the theme: only trouble gets to stand out.
     pub fn colour(self) -> &'static str {
         match self {
-            Self::Error => "#a8505c",
-            Self::Warn => "#d2cefd",
+            Self::Error => "#e56b6f",
+            Self::Warn => "#cbbaf4",
             Self::Info => "var(--color-neutral-500)",
             Self::Debug => "var(--color-neutral-700)",
         }
