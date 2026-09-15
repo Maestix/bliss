@@ -1577,7 +1577,7 @@ fn Connections(frame: Frame) -> Element {
 
             // Inside the padded column, not after it: a closing brace once
             // ended the column early, and the log ran edge to edge beneath it.
-            LogDock {}
+            LogDock { revision: crate::logs::revision() }
         }
         if let Some(menu) = ROW_MENU() {
             RowMenuView { menu, copied }
@@ -2386,9 +2386,14 @@ mod tests {
 ///
 /// Reads the buffer directly rather than taking it as a prop: piping several
 /// hundred lines through every frame, twice a second, would cost more than the
-/// pane is worth.
+/// pane is worth. What it does take is the buffer's `revision`, and that is not
+/// decoration: a component is re-run by its parent only when its props change,
+/// so with none at all the pane drew the buffer once and after that only when
+/// its own copy note changed — a "live" log that moved when clicked.
 #[component]
-fn LogStrip() -> Element {
+fn LogStrip(revision: u64) -> Element {
+    // Compared, not read: a new line is a new value, and that is the point.
+    let _ = revision;
     /// Enough to scroll back through without asking the renderer to diff the
     /// whole buffer twice a second.
     const SHOWN: usize = 200;
@@ -2856,7 +2861,7 @@ fn RowMenuView(menu: RowMenu, mut copied: Signal<String>) -> Element {
 /// The log under the connections table, and the bar that shares the height
 /// between them.
 #[component]
-fn LogDock() -> Element {
+fn LogDock(revision: u64) -> Element {
     use dioxus::prelude::dioxus_elements::input_data::MouseButton;
 
     // Where a drag began: the pointer's height on the page, and the log's.
@@ -2894,7 +2899,7 @@ fn LogDock() -> Element {
         div {
             style: "flex:none;height:{height}px;max-height:calc(100vh - 330px);min-height:0;\
                     display:flex;flex-direction:column",
-            LogStrip {}
+            LogStrip { revision }
         }
     }
 }
