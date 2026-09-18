@@ -47,6 +47,8 @@ windows = { workspace = true, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    # Starting with Windows: bliss's value under the user's Run key; see startup.rs.
+    "Win32_System_Registry",
 ] }
 
 [build-dependencies]

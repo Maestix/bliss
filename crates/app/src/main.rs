@@ -19,6 +19,7 @@ mod icons;
 mod logs;
 mod profile_file;
 mod rule_text;
+mod startup;
 mod subscription;
 mod ui;
 
@@ -36,6 +37,10 @@ use tracing_subscriber::{EnvFilter, fmt};
 #[derive(Parser)]
 #[command(name = "bliss", version, about = "VLESS + REALITY client")]
 struct Cli {
+    /// Open the window minimized. Windows passes this when it starts bliss at
+    /// sign-in and the settings ask for a minimized window.
+    #[arg(long)]
+    minimized: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -111,8 +116,8 @@ enum EngineCmd {
 
 fn main() -> Result<()> {
     // Before anything can print, clap's own --help and usage errors included.
-    // The window alone takes no arguments and prints nowhere.
-    if std::env::args_os().len() > 1 {
+    // The window prints nowhere; see `wants_console`.
+    if wants_console(std::env::args_os().skip(1)) {
         attach_console();
     }
     color_eyre::install()?;
@@ -150,10 +155,11 @@ fn main() -> Result<()> {
         guard_system_proxy(dir);
     }
 
-    match Cli::parse().command {
+    let parsed = Cli::parse();
+    match parsed.command {
         // No subcommand is the product: the window. The CLI is for setting it
         // up and for looking under the hood.
-        None => window().inspect_err(report_to_user),
+        None => window(parsed.minimized).inspect_err(report_to_user),
         Some(command) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -187,11 +193,11 @@ async fn cli(command: Command) -> Result<()> {
 ///
 /// This thread belongs to the event loop from here on — every windowing library
 /// insists on the main thread — so the engine gets a runtime of its own.
-fn window() -> Result<()> {
+fn window(minimized: bool) -> Result<()> {
     let setup = window_setup()?;
     let work_dir = setup.work_dir.clone();
     let controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
-    ui::launch(controller);
+    ui::launch(controller, minimized);
 
     // The engine thread is detached, so it may not get to run its own cleanup
     // when the event loop ends and the process winds down. This is the ordinary
@@ -752,6 +758,16 @@ fn attach_console() {
 #[cfg(not(windows))]
 fn attach_console() {}
 
+/// Whether this start is a command, which prints and so wants a console.
+///
+/// Any argument used to mean yes. The window's one, `--minimized`, is what
+/// Windows passes when it starts bliss at sign-in with no terminal around, and
+/// a console of its own would have opened beside the minimized window every
+/// time the user signed in.
+fn wants_console(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    args.any(|arg| arg.to_str() != Some(startup::MINIMIZED))
+}
+
 fn parse_log_level(s: &str) -> Result<bliss_xray::LogLevel> {
     use bliss_xray::LogLevel::*;
     Ok(match s {
@@ -890,4 +906,37 @@ fn default_profile_path() -> Result<PathBuf> {
 /// Where generated configs and the managed engine live.
 fn work_dir() -> Result<PathBuf> {
     Ok(project_dirs()?.data_local_dir().to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A console follows a command, not the presence of an argument: the
+    /// startup entry's `--minimized` on its own is still the window.
+    #[test]
+    fn only_a_command_gets_a_console() {
+        let args = |list: &[&str]| {
+            list.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert!(!wants_console(args(&[])), "the window");
+        assert!(
+            !wants_console(args(&["--minimized"])),
+            "the window, as Windows starts it"
+        );
+        assert!(wants_console(args(&["check"])));
+        assert!(
+            wants_console(args(&["--minimized", "--help"])),
+            "clap has help to print"
+        );
+    }
+
+    #[test]
+    fn the_minimized_flag_reaches_the_window() {
+        let cli = Cli::try_parse_from(["bliss", "--minimized"]).expect("parses");
+        assert!(cli.minimized && cli.command.is_none());
+    }
 }

@@ -168,6 +168,8 @@ pub struct Frame {
     pub subscriptions: Vec<SubscriptionRow>,
     /// A line about what the last action did, on any screen, for a few seconds.
     pub toast: Option<Toast>,
+    /// Whether Windows starts bliss at sign-in; the settings screen's first card.
+    pub startup: crate::startup::Startup,
 }
 
 /// One subscription, as its screen shows it.
@@ -310,6 +312,14 @@ pub enum Command {
     Fetched(FetchDone),
     /// Show one of bliss's own folders to the user.
     Reveal(Reveal),
+    /// Have Windows start this bliss at sign-in, minimized or not, or stop.
+    Startup {
+        on: bool,
+        minimized: bool,
+    },
+    /// Read the startup entry again: Task Manager, or another copy of bliss,
+    /// may have changed it since.
+    ReadStartup,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -592,6 +602,12 @@ async fn drive(
     let probes = Arc::new(Sweep::new());
 
     let mut proxy = setup.profile.inbound.system_proxy;
+
+    // The entry Windows starts bliss from at sign-in, and the executable it
+    // should name: this one.
+    let startup_keys = crate::startup::Keys::from_env();
+    let exe = std::env::current_exe();
+    publish_startup(&frames, &startup_keys, exe.as_deref().ok());
 
     // The rule table lives here rather than inside `start`, so it survives a
     // stop and can be asked questions while the tunnel is down — which is when
@@ -1012,6 +1028,24 @@ async fn drive(
                         }
                     }
                     Command::Reveal(Reveal::WorkDir) => reveal(&setup.work_dir),
+                    Command::Startup { on, minimized } => {
+                        match exe.as_deref() {
+                            Ok(path) => match crate::startup::set(&startup_keys, path, on, minimized) {
+                                Ok(()) => tracing::info!(
+                                    "startup: {}",
+                                    match (on, minimized) {
+                                        (false, _) => "Windows no longer starts bliss",
+                                        (true, false) => "Windows starts bliss at sign-in",
+                                        (true, true) => "Windows starts bliss at sign-in, minimized",
+                                    }
+                                ),
+                                Err(e) => toaster.show(&frames, format!("автозапуск не изменился: {e}"), true),
+                            },
+                            Err(_) => toaster.show(&frames, "не удалось узнать, где лежит bliss.exe", true),
+                        }
+                        publish_startup(&frames, &startup_keys, exe.as_deref().ok());
+                    }
+                    Command::ReadStartup => publish_startup(&frames, &startup_keys, exe.as_deref().ok()),
                 }
             }
             _ = ticker.tick() => {
@@ -1487,6 +1521,22 @@ fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
         rule: decision.rule,
         note,
     })
+}
+
+/// Read the startup entry into the frame, for the settings screen.
+fn publish_startup(
+    frames: &watch::Sender<Frame>,
+    keys: &crate::startup::Keys,
+    exe: Option<&std::path::Path>,
+) {
+    let startup = match exe {
+        Some(exe) => crate::startup::read(keys, exe),
+        None => crate::startup::Startup {
+            problem: Some("не удалось узнать, где лежит bliss.exe".to_owned()),
+            ..Default::default()
+        },
+    };
+    frames.send_modify(|f| f.startup = startup);
 }
 
 /// Tear the tunnel down and say so, whether or not there was one.
