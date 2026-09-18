@@ -22,6 +22,31 @@ pub fn Power(size: u32, color: String) -> Element {
     }
 }
 
+/// The switch on the status card, in place of the power sign: filled once the
+/// tunnel is up, an outline while it is not, and the colour is the state's.
+///
+/// Its own path rather than one lifted from an icon set, drawn in this family's
+/// terms: two arcs for the lobes, a cubic down each side to the point.
+#[component]
+pub fn Heart(size: u32, color: String, filled: bool) -> Element {
+    let fill = if filled {
+        color.clone()
+    } else {
+        "none".to_owned()
+    };
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "{fill}",
+            stroke: "{color}", stroke_width: "1.7", stroke_linejoin: "round",
+            stroke_linecap: "round",
+            path {
+                d: "M12 20.4 C10.4 19 4.2 14.9 4.2 10.4 A4.4 4.4 0 0 1 12 7.8 \
+                    A4.4 4.4 0 0 1 19.8 10.4 C19.8 14.9 13.6 19 12 20.4 Z"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn Shield(size: u32, color: String) -> Element {
     rsx! {

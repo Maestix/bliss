@@ -932,7 +932,7 @@ fn StatusCards(frame: Frame) -> Element {
                             box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
                     title: if on { "Отключить" } else { "Подключить" },
                     onclick: move |_| controller.send(Command::Toggle { was_on: on }),
-                    crate::icons::Power { size: 28, color: tone }
+                    crate::icons::Heart { size: 28, color: tone, filled: on }
                 }
                     // Clips on a narrow card instead of running under the switch beside it.
                     div { style: "display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden",
