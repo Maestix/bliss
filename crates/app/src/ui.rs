@@ -207,7 +207,13 @@ window.addEventListener("keydown", (event) => {
 await new Promise(() => {});
 "#;
 
-pub fn launch(controller: Controller) {
+/// Whether the window opens minimized: `--minimized`, which Windows passes when
+/// it starts bliss at sign-in and the settings ask for it. See `App`.
+#[derive(Clone, Copy)]
+struct StartMinimized(bool);
+
+/// Open the window, minimized or not.
+pub fn launch(controller: Controller, minimized: bool) {
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             Config::new()
@@ -226,6 +232,7 @@ pub fn launch(controller: Controller) {
                 .with_on_window(|window, _| set_icons(&window, window.scale_factor())),
         )
         .with_context(controller)
+        .with_context(StartMinimized(minimized))
         .launch(App);
 }
 
@@ -289,6 +296,7 @@ enum Screen {
     Traffic,
     Subscriptions,
     Routing,
+    Settings,
 }
 
 impl Screen {
@@ -298,6 +306,7 @@ impl Screen {
             Self::Traffic => "traffic",
             Self::Subscriptions => "subscriptions",
             Self::Routing => "routing",
+            Self::Settings => "settings",
         }
     }
 }
@@ -353,6 +362,23 @@ fn App() -> Element {
                 controller.changed().await;
                 frame.set(controller.frame());
             }
+        }
+    });
+
+    // Minimized in the first render: the page has loaded, the window is still
+    // hidden, and Dioxus shows it right after — a minimized window stays
+    // minimized when shown, so it appears on the taskbar and nowhere else. Not
+    // earlier: WebView2 refuses to be created in a minimized window
+    // (E_INVALIDARG, which dioxus-desktop unwraps), and minimizing it as it was
+    // built killed bliss before its window existed. Not later, or it would flash
+    // up at every sign-in. And through tao rather than ShowWindow, which would
+    // leave tao believing the window hidden, so that the title bar's next
+    // minimize or maximize would hide it for good.
+    let start_minimized = use_context::<StartMinimized>().0;
+    let window = dioxus::desktop::use_window();
+    use_hook(move || {
+        if start_minimized {
+            window.set_minimized(true);
         }
     });
 
@@ -419,6 +445,11 @@ fn App() -> Element {
                         Screen::Routing => rsx! {
                             div { key: "{key}", class: "screen", style: SCREEN,
                                 Routing { frame: frame.clone() }
+                            }
+                        },
+                        Screen::Settings => rsx! {
+                            div { key: "{key}", class: "screen", style: SCREEN,
+                                Settings { frame: frame.clone() }
                             }
                         },
                     }
@@ -628,15 +659,14 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                     crate::icons::Split { size: 18, color: nav_tint(here == Screen::Routing, true) }
                 },
             }
-            // Settings exist in the design but not yet in the program. Shown so
-            // the shape is right, dimmed and inert so nothing claims to work
-            // that does not.
             NavItem {
                 label: "Настройки",
-                active: false,
-                enabled: false,
-                onclick: move |_| {},
-                icon: rsx! { crate::icons::Gear { size: 18, color: nav_tint(false, false) } },
+                active: here == Screen::Settings,
+                enabled: true,
+                onclick: move |_| screen.set(Screen::Settings),
+                icon: rsx! {
+                    crate::icons::Gear { size: 18, color: nav_tint(here == Screen::Settings, true) }
+                },
             }
 
             // A cat asleep on the clouds, in the room the navigation leaves above
@@ -2174,6 +2204,24 @@ mod tests {
         }
     }
 
+    /// WebView2 cannot be created in a minimized window, and dioxus-desktop
+    /// unwraps the error: minimized as it was built, in `with_on_window`, the
+    /// window died at every `--minimized` start before it appeared. `App`
+    /// minimizes it once the page exists.
+    #[test]
+    fn the_window_is_not_minimized_before_its_page_exists() {
+        let source = include_str!("ui.rs");
+        let start = source.find("pub fn launch(").expect("launch is in ui.rs");
+        let end = start + source[start..].find("\n}\n").expect("launch ends");
+        let code: String = source[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            !code.contains("set_minimized"),
+            "launch minimizes the window before WebView2 is created in it"
+        );
+    }
     /// build.rs has to get bliss.rc into the executable; without it the window
     /// quietly falls back to the Dioxus logo and Explorer to the generic
     /// application icon. `LoadImageW` resizes whatever frame it finds, so this
@@ -3897,4 +3945,132 @@ fn date(unix: i64) -> Option<String> {
         .ok()?
         .to_zoned(jiff::tz::TimeZone::system());
     Some(zoned.strftime("%d.%m.%Y").to_string())
+}
+
+// --- screen: settings -----------------------------------------------------------
+
+/// The choices about bliss itself. For now: whether Windows starts it.
+#[component]
+fn Settings(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    // Read again whenever the screen opens: Task Manager can switch the entry
+    // off, and another copy of bliss take it over, while this one runs.
+    use_hook({
+        let controller = controller.clone();
+        move || controller.send(Command::ReadStartup)
+    });
+    let startup = frame.startup.clone();
+    let (on, minimized) = (startup.on, startup.minimized);
+    const NOTE: &str = "padding:2px 10px 4px 39px;font-size:12.5px;line-height:1.45;color:#cbbaf4";
+
+    rsx! {
+        div {
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:13px;\
+                    padding:18px 20px",
+            div { style: "display:flex;align-items:baseline;gap:10px",
+                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Настройки" }
+            }
+
+            div {
+                style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
+                        display:flex;flex-direction:column;gap:13px",
+                div {
+                    style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:15px;\
+                            background-color:var(--color-surface);border-radius:8px;\
+                            box-shadow:var(--shadow-sm)",
+                    span { style: "font:700 16px/1 var(--font-heading);padding:0 0 8px", "Запуск" }
+                    CheckRow {
+                        checked: on,
+                        enabled: true,
+                        title: "Запускать вместе с Windows",
+                        hint: "bliss откроется, когда вы войдёте в систему, и сразу поднимет туннель.",
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Startup { on: !on, minimized })
+                        },
+                    }
+                    // Only for an entry that exists: the flag is part of it.
+                    CheckRow {
+                        checked: on && minimized,
+                        enabled: on,
+                        title: "Свёрнутым",
+                        hint: "Окно не появится: bliss будет ждать на панели задач.",
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::Startup { on: true, minimized: !minimized })
+                        },
+                    }
+                    if startup.switched_off {
+                        span { style: NOTE,
+                            "Автозапуск выключен в Диспетчере задач. Поставьте галочку, и bliss \
+                             включит его снова."
+                        }
+                    }
+                    if let Some(path) = startup.elsewhere.clone() {
+                        div { style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;\
+                                      padding:2px 10px 4px 39px",
+                            span {
+                                style: "min-width:0;font-size:12.5px;line-height:1.45;color:#cbbaf4;\
+                                        word-break:break-all",
+                                "При входе в систему запускается другая копия: {path}"
+                            }
+                            Button {
+                                label: "Запускать эту",
+                                enabled: true,
+                                onclick: {
+                                    let controller = controller.clone();
+                                    move |_| controller.send(Command::Startup { on: true, minimized })
+                                },
+                                icon: rsx! { crate::icons::Check { size: 15, color: ACCENT } },
+                            }
+                        }
+                    }
+                    if let Some(problem) = startup.problem.clone() {
+                        span {
+                            style: "padding:2px 10px 4px 39px;font-size:12.5px;line-height:1.45;color:#f2a7ad",
+                            "{problem}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A choice that is on or off: a box with a tick, a title, and a line on what
+/// it does. How each state looks is `.check-row` in app.css — classes, not
+/// inline style (the note at the top of this file).
+#[component]
+fn CheckRow(
+    checked: bool,
+    enabled: bool,
+    title: String,
+    hint: String,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    let class = match (enabled, checked) {
+        (false, _) => "check-row disabled",
+        (true, true) => "check-row on",
+        (true, false) => "check-row",
+    };
+    rsx! {
+        div {
+            class: "{class}",
+            style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;border-radius:4px",
+            onclick: move |e| if enabled { onclick.call(e) },
+            div { class: "check-box",
+                if checked {
+                    // The window's ground colour, on the accent the box fills with.
+                    crate::icons::Check { size: 13, color: "#140f1d" }
+                }
+            }
+            div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
+                span { style: "font-size:14.5px", "{title}" }
+                span {
+                    style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
+                    "{hint}"
+                }
+            }
+        }
+    }
 }

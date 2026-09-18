@@ -61,7 +61,7 @@ The long-form plan, in Russian, lives outside the repo at
 | `crates/proto` | `bliss-proto` | pure data: `vless://` parsing (`server.rs`), TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation, process supervision in a Job Object, GitHub downloader |
-| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), log ring buffer (`logs.rs`), clipboard |
+| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with Windows (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
@@ -105,6 +105,7 @@ CLI (`bliss --help`, and `--help` on each subcommand):
 
 ```
 bliss                                         open the window; the tunnel starts with it
+bliss --minimized                             the same, minimized: how Windows starts it at sign-in
 bliss check [PATH] | check --link             validate a profile, or one link from stdin
 bliss engine list [--limit N]
 bliss engine install [--version VERSION] [--newest] [--via ADDR]
@@ -113,8 +114,9 @@ bliss run [PROFILE] [--server TAG] [--engine-log ENGINE_LOG]
 ```
 
 `bliss.exe` is a **windows-subsystem** program: a double-click opens the window
-and no console beside it. A command with arguments joins the console of the
-terminal it came from (`attach_console` in `main.rs`). Git Bash, and anything
+and no console beside it. A command joins the console of the terminal it came
+from (`attach_console` in `main.rs`); `--minimized` alone is the window as
+Windows starts it at sign-in, and gets no console (`wants_console`). Git Bash, and anything
 capturing the output, hands over pipes and works as it always did; cmd and
 PowerShell do not wait for a windows-subsystem program, so their prompt comes
 back before the output does, and `$out = bliss …` captures nothing. In
@@ -313,6 +315,28 @@ These cost the most time on this project. None of them announce themselves.
   itself, would keep the command channel open forever, and the loop would never
   see the window go.
 
+**Starting with Windows**
+
+- **The entry is a Run value, not a scheduled task** (`startup.rs`): `bliss`
+  under HKCU `Software\Microsoft\Windows\CurrentVersion\Run`, the executable's
+  path in quotes, then `--minimized` when the window should open minimized. The
+  plan named Task Scheduler; the window needs no elevation, the value needs no
+  rights, and the Run key is the list Task Manager shows. The settings screen
+  writes it on a click, never on launch.
+- **Task Manager's switch is another value**: `bliss` under
+  `Explorer\StartupApproved\Run`, whose first byte is 2 while the entry is on
+  and 3, followed by a timestamp, once the user switched it off (6 and 7 occur
+  too, so the test is the low bit). An entry switched off there never starts,
+  so bliss reads it as off and says where; ticking the box deletes the switch
+  along with writing the entry.
+- **The entry names one executable.** One that starts another copy — a build
+  moved or copied since — is named on the screen beside «Запускать эту», and
+  is rewritten only by that button or the checkbox.
+- `BLISS_STARTUP_KEY` moves both keys under a scratch key in HKCU, for probes
+  (§7). `the_entry_round_trips_through_the_registry` uses a key of its own one
+  level under `Software` and deletes it; nested two levels deep, it left the
+  empty parent behind.
+
 **Style**
 
 - Libraries return `thiserror` errors; the binary renders them with `color-eyre`.
@@ -419,7 +443,7 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     proxy" are both pink, which is why "direct" must never borrow `ON`.
 
     The font is Comfortaa: text at 600, headings at 700, its top weight. The
-    six inline `font-weight:700` / `font:700` in `ui.rs` mirror
+    inline `font-weight:700` and `font:700` in `ui.rs` mirror
     `--font-heading-weight`. `assets/comfortaa.woff2` is Google Fonts'
     variable `Comfortaa[wght].ttf` cut with `pyftsubset` to U+0020–007E,
     00A0–00FF, 0400–045F, 0490–0491, 2010–2027, 2030–203A, 2116, 2190–2195
@@ -494,6 +518,19 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     anyway. `flex-wrap` breaks between any two items, so parts that must stay
     side by side are one item: a rule's number and its text are, since as two
     the number took a line of its own.
+20. **A window that opens minimized is minimized in its first render**, not
+    when it is built. WebView2 cannot be created in a minimized window:
+    minimized in `with_on_window`, which runs before the webview exists, bliss
+    died at every `--minimized` start with `E_INVALIDARG`, unwrapped inside
+    dioxus-desktop, before its window ever appeared
+    (`the_window_is_not_minimized_before_its_page_exists`). `App` minimizes it
+    in a `use_hook` (`StartMinimized`). dioxus-desktop renders for the first time
+    once the page has loaded, while the window is still hidden, and shows it
+    right after that render, which leaves a minimized window minimized, with
+    its taskbar button: sampled from the moment the process started, the
+    window was never on screen. Through tao's `set_minimized`, not
+    `ShowWindow`: tao keeps its own copy of the window's state and ends every
+    change to it with `SW_HIDE` unless it believes the window visible.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -552,6 +589,18 @@ nobody can see. Something that moves on a switch is caught by recording its
 position on every `requestAnimationFrame` across the switch, not once after it.
 Pillow is installed, for checking in a screenshot that something meant to be
 invisible is: the header's transparent scrollbar crops to one colour.
+
+**Starting with Windows is probed on a scratch key**, never the real Run key:
+`BLISS_STARTUP_KEY=Software\bliss-probe-startup` puts the entry and Task
+Manager's switch under it (a binary `bliss` value starting with 3 there plays
+Task Manager), and the probe deletes the key when it ends. A start with
+`--minimized` is read from the `bliss` window: `IsIconic` and
+`IsWindowVisible` both true is minimized with a taskbar button. Sample them in
+a tight loop from the moment the process starts, to catch the window showing
+itself before it minimizes; `AttachConsole(pid)` failing proves it has no
+console. The first minimized start died before its window existed, with
+nothing on screen and exit code 101: send the probe copy's stderr to a file
+to read a panic, since started from Explorer it has nowhere to print one.
 
 Two more probes that worked:
 
@@ -620,13 +669,13 @@ subscriptions; subscriptions (1.6: base64 or plain lists, `subscription-userinfo
 and `profile-title`, a refresh every 12 hours, through the tunnel when it is
 up); zoom with the window size; no console window; deleting servers, a
 subscription's servers grouped under its name, a rule filter for the
-connections table, and log levels in colour. The tunnel already starts with the
+connections table, and log levels in colour; a settings screen, which so far
+starts bliss with Windows, minimized or not. The tunnel already starts with the
 window (`Setup.autostart`).
 
-**Open:** renaming servers; a settings screen (ports, the engine,
-installing it with a button); UDP ASSOCIATE; an idle timeout for half-open
-connections; tray and start-with-Windows via Task Scheduler (1.8); the 12-hour
-memory run.
+**Open:** renaming servers; the rest of the settings screen (ports, the
+engine, installing it with a button); UDP ASSOCIATE; an idle timeout for
+half-open connections; the tray (1.8); the 12-hour memory run.
 
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes

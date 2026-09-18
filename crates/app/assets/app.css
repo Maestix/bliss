@@ -172,8 +172,8 @@ body { font-size: 16px; user-select: none; cursor: default; }
    dead: nothing changed under the mouse, not even the cursor. No inline style
    in ui.rs sets a cursor, because an inline one beats any class. */
 .act, .tab, .nav-item, .srv, .row, .logline, .ring, .choice, .seg-choice,
-.pill-choice, .menu-item, .icon-btn, .sort, .group-head { cursor: pointer; }
-.act.disabled, .nav-item.disabled, .icon-btn.disabled { cursor: default; }
+.pill-choice, .menu-item, .icon-btn, .sort, .group-head, .check-row { cursor: pointer; }
+.act.disabled, .nav-item.disabled, .icon-btn.disabled, .check-row.disabled { cursor: default; }
 .act:not(.disabled):active { background-color: rgba(239, 232, 245, .12); }
 
 /* Action cards keep their resting tint here rather than inline. Inline, it
@@ -368,3 +368,18 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .group-head:hover { background-color: rgba(239, 232, 245, .05); }
 .srv-tools { display: flex; justify-content: flex-end; opacity: .4; transition: opacity .14s ease; }
 .srv:hover .srv-tools { opacity: 1; }
+
+/* --- Settings ------------------------------------------------------------------ */
+/* A choice that is on or off. The box fills with the accent while it is on; a
+   row that cannot change yet — minimized, before bliss starts with Windows at
+   all — is dimmed and takes no clicks. */
+.check-row { transition: background-color .14s ease; }
+.check-row:not(.disabled):hover { background-color: rgba(239, 232, 245, .05); }
+.check-row.disabled { opacity: .45; }
+.check-box {
+  width: 18px; height: 18px; flex: none; margin-top: 1px;
+  display: grid; place-items: center; border-radius: 4px;
+  box-shadow: inset 0 0 0 1.5px rgba(239, 232, 245, .28);
+  transition: background-color .14s ease, box-shadow .14s ease;
+}
+.check-row.on .check-box { background-color: var(--color-accent); box-shadow: none; }
