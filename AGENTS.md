@@ -368,7 +368,8 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
 7. The window never touches tokio. The engine thread publishes a `Frame` on a
    watch channel; the UI sends `Command`s through `Controller`.
 8. **Pictures and the font ship inside the binary, in the stylesheets.** `STYLES`
-   in `ui.rs` replaces `url(status-card.jpg)` in `app.css`, and `THEME_STYLES`
+   in `ui.rs` replaces `url(status-card.jpg)` and `url(rail-cat.jpg)` in
+   `app.css`, and `THEME_STYLES`
    replaces `url(comfortaa.woff2)` in `theme.css`, with base64 data URIs, once.
    Each url() must appear in its file exactly once, comments included — a
    comment naming the scene was replaced too, and tripped
@@ -400,6 +401,14 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     means remaking the file, or its edge shows as a rectangle;
     `the_scene_matches_the_card_surface` checks the edge pixels. The generated
     originals are not in git.
+
+    The rail's cat (`assets/rail-cat.jpg`) is a GPT picture on a transparent
+    ground whose faint glow reaches almost to its edges: cropped to where that
+    glow is at least 8/255 opaque plus 60px, the glow faded to nothing over the
+    last 48px of each edge, composited onto `--color-surface`, 400px tall, JPEG
+    q90 without chroma subsampling. `the_rail_cat_matches_the_card_surface`
+    checks all four edges. `.rail-cat` takes the room the navigation leaves, up
+    to 170px, and shrinks first in a short window.
 11. **The theme is `theme.css`**: a calm neon — plum grounds, a soft pink accent,
     violet for what is on its way, mint for "fine" and "direct", a soft red for
     failures. It replaced Nocturne, whose token names it kept. Colours that
@@ -601,7 +610,7 @@ Two more probes that worked:
 and download; relay and connection table; system proxy (three modes, crash-safe
 restore); routing (proxy / direct / block by domain, address, port, process,
 geosite/geoip) and its screen; server list with ping; copy to clipboard; the
-application icon and the status card's picture; starting with no profile, no
+application icon, the status card's picture and the rail's cat; starting with no profile, no
 server and no engine, and adding a server from the window; the profile written
 by bliss itself, with the system-proxy choice remembered; the rule editor (add,
 change, reorder, delete, the fallback) with rules applied under live traffic,

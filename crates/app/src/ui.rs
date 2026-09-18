@@ -58,6 +58,10 @@ const APP_CSS: &str = include_str!("../assets/app.css");
 const SCENE: &[u8] = include_bytes!("../assets/status-card.jpg");
 /// How app.css names the scene, for `STYLES` to replace.
 const SCENE_URL: &str = "url(status-card.jpg)";
+/// The cat asleep at the foot of the rail; see `.rail-cat` in app.css.
+const RAIL_CAT: &[u8] = include_bytes!("../assets/rail-cat.jpg");
+/// How app.css names the cat, for `STYLES` to replace.
+const RAIL_CAT_URL: &str = "url(rail-cat.jpg)";
 /// Comfortaa, subset to what the window draws; see the @font-face in theme.css.
 const FONT: &[u8] = include_bytes!("../assets/comfortaa.woff2");
 /// How theme.css names the font, for `THEME_STYLES` to replace.
@@ -70,10 +74,13 @@ fn data_url(mime: &str, bytes: &[u8]) -> String {
     format!("url(data:{mime};base64,{data})")
 }
 
-/// app.css with the scene inlined. Built once: encoding a picture on every
+/// app.css with its pictures inlined. Built once: encoding a picture on every
 /// render would be work for nothing.
-static STYLES: LazyLock<String> =
-    LazyLock::new(|| APP_CSS.replace(SCENE_URL, &data_url("image/jpeg", SCENE)));
+static STYLES: LazyLock<String> = LazyLock::new(|| {
+    APP_CSS
+        .replace(SCENE_URL, &data_url("image/jpeg", SCENE))
+        .replace(RAIL_CAT_URL, &data_url("image/jpeg", RAIL_CAT))
+});
 
 /// theme.css with the font inlined. Nothing is fetched: the window opens before
 /// the tunnel, for people whose network may well block a font CDN.
@@ -632,10 +639,15 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                 icon: rsx! { crate::icons::Gear { size: 18, color: nav_tint(false, false) } },
             }
 
+            // A cat asleep on the clouds, in the room the navigation leaves above
+            // the engine: `.rail-cat` in app.css, the first thing to give way in a
+            // short window.
+            div { class: "rail-cat" }
+
             div {
                 // A faint tint rather than the surface colour: the rail is that
                 // colour now, and the box would vanish into it.
-                style: "margin-top:auto;padding:12px;display:flex;flex-direction:column;gap:5px;\
+                style: "padding:12px;display:flex;flex-direction:column;gap:5px;\
                         border-radius:8px;background-color:rgba(239,232,245,.03)",
                 span {
                     style: "font-size:12px;letter-spacing:.1em;text-transform:uppercase;\
@@ -2218,6 +2230,48 @@ mod tests {
         assert!(
             SOURCE.contains("class: \"status-card\""),
             "the status card lost its class"
+        );
+    }
+
+    /// The cat at the foot of the rail. Its transparent ground was composited
+    /// onto the card colour when the file was made, so all four of its edges
+    /// have to be that colour, or it shows on the rail as a square.
+    #[test]
+    fn the_rail_cat_matches_the_card_surface() {
+        const SURFACE: [u8; 3] = [0x1e, 0x16, 0x29];
+        assert!(
+            THEME.contains("--color-surface: #1e1629;"),
+            "the card surface changed colour: remake rail-cat.jpg on the new value, \
+             then change SURFACE here"
+        );
+
+        let mut decoder = jpeg_decoder::Decoder::new(RAIL_CAT);
+        let pixels = decoder.decode().expect("rail-cat.jpg decodes");
+        let info = decoder.info().expect("decoded, so described");
+        assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+        let (width, height) = (usize::from(info.width), usize::from(info.height));
+        let at = |x: usize, y: usize| &pixels[(y * width + x) * 3..(y * width + x) * 3 + 3];
+        let edges = (0..height)
+            .flat_map(|y| [at(0, y), at(width - 1, y)])
+            .chain((0..width).flat_map(|x| [at(x, 0), at(x, height - 1)]));
+        for pixel in edges {
+            for (got, want) in pixel.iter().zip(SURFACE) {
+                assert!(
+                    got.abs_diff(want) <= 3,
+                    "edge pixel {pixel:?} is not the card's {SURFACE:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            APP_CSS.matches(RAIL_CAT_URL).count(),
+            1,
+            "app.css names the cat once"
+        );
+        assert!(!STYLES.contains(RAIL_CAT_URL), "the cat was not inlined");
+        assert!(
+            SOURCE.contains("class: \"rail-cat\""),
+            "the rail lost its cat"
         );
     }
 

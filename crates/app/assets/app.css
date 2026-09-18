@@ -125,6 +125,24 @@ body { font-size: 16px; user-select: none; cursor: default; }
   background-size: 100% 100%, auto 100%;
 }
 
+/* A cat asleep on the clouds, at the foot of the rail.
+   - The picture's transparent ground was composited onto --color-surface when
+     the file was made, so it has no edge on the rail:
+     `the_rail_cat_matches_the_card_surface` holds the two together.
+   - It takes the room the navigation leaves, up to 170px, sits on the engine
+     box, and is the first thing to give way in a short window: the navigation
+     and the engine box keep their size, the cat shrinks.
+   - The file name in the url() below is replaced with the file's bytes, like
+     the status card's scene (`STYLES` in ui.rs). Write that url() nowhere else
+     in this file. */
+.rail-cat {
+  margin-top: auto; flex: 0 1 170px; min-height: 0;
+  background-image: url(rail-cat.jpg);
+  background-repeat: no-repeat;
+  background-position: center bottom;
+  background-size: contain;
+}
+
 /* Screens fade in when switched, so the change reads as a movement rather than
    as a redraw. */
 @keyframes bliss-enter {
