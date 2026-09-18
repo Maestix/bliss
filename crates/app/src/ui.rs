@@ -207,6 +207,74 @@ window.addEventListener("keydown", (event) => {
 await new Promise(() => {});
 "#;
 
+/// What the traffic chart says under the pointer: a guide, a dot on the sample
+/// nearest it, and that sample's rate, from the chart's `data-rates` and
+/// `data-labels`.
+///
+/// A script, placing them on every frame while the pointer is over the chart:
+/// the samples glide out from under a pointer that holds still, which no
+/// handler in rsx would hear, and only the page knows where the glide stands.
+/// It writes custom properties and `data-hover` on `.chart`, to which rsx gives
+/// no style and no such attribute, so no render takes them back. Only the
+/// samples on the chart are read, not the one past each edge. Blitz runs no
+/// script, and would show no readout.
+const CHART_HOVER: &str = r#"
+if (!window.blissChartHover) {
+    window.blissChartHover = true;
+    let pointer = null;
+    let frame = 0;
+    const matrix = (element) => {
+        const transform = getComputedStyle(element).transform;
+        return new DOMMatrixReadOnly(transform === "none" ? undefined : transform);
+    };
+    const hide = () => {
+        pointer = null;
+        for (const chart of document.querySelectorAll(".chart[data-hover]")) {
+            chart.removeAttribute("data-hover");
+        }
+    };
+    const draw = () => {
+        frame = 0;
+        if (!pointer) return;
+        const under = document.elementFromPoint(pointer.x, pointer.y);
+        const chart = under && under.closest(".chart");
+        const layer = chart && chart.querySelector(".glide");
+        const group = chart && chart.querySelector(".chart-scale");
+        const tip = chart && chart.querySelector(".chart-tip");
+        const rates = chart ? (chart.dataset.rates || "").split(",").map(Number) : [];
+        const labels = chart ? (chart.dataset.labels || "").split("|") : [];
+        if (!layer || !group || !tip || rates.length < 3) {
+            hide();
+            return;
+        }
+        const box = chart.getBoundingClientRect();
+        const shift = matrix(layer).m41;
+        const step = layer.offsetWidth / (rates.length - 1);
+        const first = Math.ceil(-shift / step - 0.001);
+        const last = Math.floor((box.width - shift) / step + 0.001);
+        const k = Math.max(first, Math.min(last, Math.round((pointer.x - box.left - shift) / step)));
+        const x = shift + k * step;
+        // The group maps a KB/s to its height out of the chart's 100 units.
+        const y = (1 + matrix(group).m22 * rates[k] / 1024 / 100) * layer.offsetHeight;
+        tip.textContent = labels[k] || "";
+        const tipX = x + 12 + tip.offsetWidth <= box.width ? x + 12 : x - 12 - tip.offsetWidth;
+        const tipY = Math.max(0, Math.min(box.height - tip.offsetHeight, y - tip.offsetHeight - 10));
+        chart.style.setProperty("--hover-x", x + "px");
+        chart.style.setProperty("--hover-y", y + "px");
+        chart.style.setProperty("--tip-x", tipX + "px");
+        chart.style.setProperty("--tip-y", tipY + "px");
+        chart.setAttribute("data-hover", "");
+        frame = requestAnimationFrame(draw);
+    };
+    document.addEventListener("pointermove", (event) => {
+        pointer = { x: event.clientX, y: event.clientY };
+        if (!frame) frame = requestAnimationFrame(draw);
+    }, { passive: true });
+    document.documentElement.addEventListener("pointerleave", hide);
+    window.addEventListener("blur", hide);
+}
+"#;
+
 /// Whether the window opens minimized: `--minimized`, which Windows passes when
 /// it starts bliss at sign-in and the settings ask for it. See `App`.
 #[derive(Clone, Copy)]
@@ -405,6 +473,11 @@ fn App() -> Element {
                 }
             }
         }
+    });
+
+    // See CHART_HOVER.
+    use_hook(|| {
+        let _ = document::eval(CHART_HOVER);
     });
 
     let frame = frame();
@@ -1089,20 +1162,82 @@ fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
     }
 }
 
+/// Download rates over the last twenty seconds, as a line that glides.
+///
+/// The paths are drawn in the chart's own units, `CHART_STEP` apart and one
+/// KB/s to a unit up, so they do not change when only the range does: the
+/// group around them carries the range as a transform, which eases
+/// (`chart_lift`). The layer glides one step left per tick and starts again on
+/// each new sample (`glide_class`); the chart's section in app.css says why
+/// each part is there, and `CHART_HOVER` what the pointer reads off it.
 #[component]
 fn TrafficTab(frame: Frame) -> Element {
-    let span_seconds = frame.history.len() / 2;
+    // Two of the samples are past the chart's edges for most of a tick.
+    let intervals = frame.history.len().saturating_sub(2) as u128;
+    let span_seconds = intervals * crate::engine::TICK.as_millis() / 1000;
+    let samples = frame.samples;
+    // The sample the tab opened on: until the next one there is no glide in
+    // step with the ticks to join.
+    let opened = use_hook(move || samples);
+    let idle = frame.history.iter().all(|&rate| rate == 0);
+    let glide = glide_class(samples, opened, idle);
+    let (line, area) = chart_paths(&frame.history);
+    let width = CHART_STEP * frame.history.len().saturating_sub(1) as f64;
+    let group = format!(
+        "transform:translate(0px,{CHART_HEIGHT}px) scale(1,-{:.8})",
+        chart_lift(frame.scale)
+    );
+    let stroke = if idle { CHART_IDLE } else { ACCENT };
+    // For the readout under the pointer: each sample's rate, and as the tip
+    // writes it.
+    let rates = frame
+        .history
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let labels = frame
+        .history
+        .iter()
+        .map(|&sample| format!("↓ {}", rate(sample)))
+        .collect::<Vec<_>>()
+        .join("|");
     rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:9px",
-            div { style: "flex:1;min-height:0;display:flex;align-items:flex-end;gap:3px",
-                for value in frame.history.iter().copied() {
-                    div {
-                        class: "bar",
-                        style: "flex:1;border-radius:1px 1px 0 0;\
-                                height:{bar_height(value, frame.scale)}%;\
-                                background-color:{bar_colour(value)}",
+            div { class: "chart", "data-rates": "{rates}", "data-labels": "{labels}",
+                div { class: glide,
+                    svg {
+                        width: "100%",
+                        height: "100%",
+                        view_box: "0 0 {width} {CHART_HEIGHT}",
+                        preserve_aspect_ratio: "none",
+                        defs {
+                            linearGradient {
+                                id: "chart-fill",
+                                x1: "0",
+                                y1: "1",
+                                x2: "0",
+                                y2: "0",
+                                stop { offset: "0", stop_color: ACCENT, stop_opacity: "0.3" }
+                                stop { offset: "1", stop_color: ACCENT, stop_opacity: "0.02" }
+                            }
+                        }
+                        g { class: "chart-scale", style: "{group}",
+                            path { d: "{area}", fill: "url(#chart-fill)" }
+                            path {
+                                d: "{line}",
+                                fill: "none",
+                                stroke,
+                                stroke_width: "1.8",
+                                stroke_linejoin: "round",
+                                vector_effect: "non-scaling-stroke",
+                            }
+                        }
                     }
                 }
+                div { class: "chart-guide" }
+                div { class: "chart-dot" }
+                div { class: "chart-tip" }
             }
             div {
                 style: "display:flex;justify-content:space-between;font-size:12px;\
@@ -2136,26 +2271,98 @@ pub(crate) fn plural(n: u64, one: &str, few: &str, many: &str) -> String {
     format!("{n} {form}")
 }
 
-/// Bars are a baseline when there is nothing to show and data when there is.
-/// Height of one bar, as a percentage of the pane.
+/// Horizontal distance between two samples, in the chart's own units.
+const CHART_STEP: f64 = 10.0;
+/// The chart's height in its own units. The top of the range stands at
+/// `CHART_TOP`, short of the edge, so a line along it is not cut off.
+const CHART_HEIGHT: f64 = 100.0;
+const CHART_TOP: f64 = 90.0;
+/// The line while nothing flows: a quiet baseline, because pink says traffic.
+const CHART_IDLE: &str = "rgba(239,232,245,.16)";
+
+/// The classes of the chart's gliding layer.
 ///
-/// An idle slot gets a visible floor rather than a hairline. Forty hairlines
-/// read as a chart that is broken; a row of low bars reads as a chart with no
-/// traffic, which is what it actually is.
-fn bar_height(value: u64, peak: u64) -> u64 {
-    const FLOOR: u64 = 9;
-    if value == 0 {
-        return FLOOR;
+/// A CSS animation starts again only when its name changes, so consecutive
+/// samples take two identical glides in turn, by the parity of the count. A
+/// chart with nothing to draw, or one opened since the last sample, stands
+/// where a glide ends, and the next sample moves it on from exactly there.
+/// Should the window ever miss a whole tick, the parity comes back unchanged
+/// and that one glide is skipped.
+fn glide_class(samples: u64, opened: u64, idle: bool) -> &'static str {
+    if idle || samples == opened {
+        "glide still"
+    } else if samples.is_multiple_of(2) {
+        "glide a"
+    } else {
+        "glide b"
     }
-    (value * 100 / peak.max(1)).max(FLOOR + 7)
 }
 
-fn bar_colour(value: u64) -> &'static str {
-    if value == 0 {
-        "rgba(239,232,245,.07)"
-    } else {
-        "var(--color-accent-700)"
+/// How far the group around the chart's paths stretches one KB/s, so that the
+/// range's top stands at `CHART_TOP`.
+fn chart_lift(scale: u64) -> f64 {
+    CHART_TOP / (scale.max(1) as f64 / 1024.0)
+}
+
+/// The chart's line through its samples and the area under it: `CHART_STEP`
+/// apart, one KB/s to a unit, the baseline at zero.
+fn chart_paths(history: &[u64]) -> (String, String) {
+    let points: Vec<(f64, f64)> = history
+        .iter()
+        .enumerate()
+        .map(|(i, &rate)| (i as f64 * CHART_STEP, rate as f64 / 1024.0))
+        .collect();
+    let Some(&(first_x, first_y)) = points.first() else {
+        return (String::new(), String::new());
+    };
+    let mut line = format!("M{first_x:.2},{first_y:.2}");
+    for [(ax, ay), (bx, by), (x, y)] in monotone_segments(&points) {
+        line.push_str(&format!("C{ax:.2},{ay:.2} {bx:.2},{by:.2} {x:.2},{y:.2}"));
     }
+    let last_x = points.last().map_or(first_x, |point| point.0);
+    let area = format!("{line}L{last_x:.2},0L{first_x:.2},0Z");
+    (line, area)
+}
+
+/// The Bézier segments of a smooth curve through `points`, whose x rises, that
+/// never overshoots them: each segment stays between the two samples it joins.
+///
+/// A spline that merely looks smooth dips below zero beside a burst and draws
+/// traffic that never flowed. The slopes are Fritsch and Carlson's, as in d3's
+/// monotone curve: flat at a peak or a trough, and never steeper than twice the
+/// gentler of the two secants beside a sample.
+fn monotone_segments(points: &[(f64, f64)]) -> Vec<[(f64, f64); 3]> {
+    let n = points.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let secant = |i: usize| (points[i + 1].1 - points[i].1) / (points[i + 1].0 - points[i].0);
+    let slope = |i: usize| {
+        if i == 0 {
+            return secant(0);
+        }
+        if i == n - 1 {
+            return secant(n - 2);
+        }
+        let (before, after) = (secant(i - 1), secant(i));
+        if before * after <= 0.0 {
+            return 0.0;
+        }
+        let (h0, h1) = (points[i].0 - points[i - 1].0, points[i + 1].0 - points[i].0);
+        let weighted = (before * h1 + after * h0) / (h0 + h1);
+        2.0 * before.signum() * before.abs().min(after.abs()).min(weighted.abs() / 2.0)
+    };
+    (0..n - 1)
+        .map(|i| {
+            let ((x0, y0), (x1, y1)) = (points[i], points[i + 1]);
+            let third = (x1 - x0) / 3.0;
+            [
+                (x0 + third, y0 + slope(i) * third),
+                (x1 - third, y1 - slope(i + 1) * third),
+                (x1, y1),
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2704,18 +2911,76 @@ mod tests {
         assert_eq!(count(121), "121 соединение");
     }
 
+    /// The line bends between samples and never beyond them: every point of
+    /// every segment lies between the two samples it joins, so it neither dips
+    /// under zero beside a burst nor rises over a peak.
     #[test]
-    fn idle_chart_reads_as_a_baseline() {
-        // Nothing happening: every bar sits on the same visible floor. The
-        // floor was raised from a hairline because forty hairlines read as a
-        // broken chart rather than as an idle one.
-        assert_eq!(bar_height(0, 0), 9);
-        assert_eq!(bar_height(0, 1_000), 9);
-        assert_ne!(bar_colour(0), bar_colour(1));
-        // A real sample always clears the floor, however small next to the peak.
-        assert_eq!(bar_height(1, 1_000_000), 16);
-        assert!(bar_height(1, 1_000_000) > bar_height(0, 1_000_000));
-        assert_eq!(bar_height(500, 1_000), 50);
+    fn the_chart_line_never_overshoots_a_sample() {
+        let rates = [
+            0u64, 0, 512_000, 0, 30_000, 31_000, 4_000_000, 3_900_000, 0, 0, 1,
+        ];
+        let points: Vec<(f64, f64)> = rates
+            .iter()
+            .enumerate()
+            .map(|(i, &rate)| (i as f64 * CHART_STEP, rate as f64 / 1024.0))
+            .collect();
+        let segments = monotone_segments(&points);
+        assert_eq!(segments.len(), points.len() - 1);
+        for (i, [a, b, end]) in segments.iter().enumerate() {
+            let start = points[i];
+            assert_eq!(*end, points[i + 1]);
+            let (low, high) = (start.1.min(end.1), start.1.max(end.1));
+            for step in 0..=100 {
+                let t = f64::from(step) / 100.0;
+                let u = 1.0 - t;
+                let y = u * u * u * start.1
+                    + 3.0 * u * u * t * a.1
+                    + 3.0 * u * t * t * b.1
+                    + t * t * t * end.1;
+                assert!(
+                    y >= low - 1e-9 && y <= high + 1e-9,
+                    "segment {i} at {t}: {y} outside {low}..{high}"
+                );
+            }
+        }
+        let (line, area) = chart_paths(&rates);
+        assert!(line.starts_with("M0.00,0.00C"), "{line}");
+        assert!(area.starts_with(&line) && area.ends_with("L100.00,0L0.00,0Z"));
+    }
+
+    /// A new sample starts the glide again; the tab's first frame and an idle
+    /// chart stand still; and two samples in a row never share an animation,
+    /// or the second would not restart it.
+    #[test]
+    fn each_new_sample_restarts_the_glide() {
+        assert_eq!(
+            glide_class(7, 7, false),
+            "glide still",
+            "opened on this sample"
+        );
+        assert_eq!(glide_class(9, 7, true), "glide still", "nothing to draw");
+        assert_ne!(glide_class(8, 7, false), glide_class(9, 7, false));
+        assert_ne!(glide_class(9, 7, false), glide_class(10, 7, false));
+        assert!(glide_class(8, 7, false).starts_with("glide "));
+    }
+
+    /// The layer is one sample wider than the chart on each side, and a glide
+    /// is one sample of its own width over one tick. app.css writes all three
+    /// as numbers, which must follow `CHART_SAMPLES` and `TICK`: a glide a
+    /// little short or long makes the line jump back or forth on every sample.
+    #[test]
+    fn the_chart_glides_one_sample_per_tick() {
+        let n = crate::engine::CHART_SAMPLES as f64;
+        let width = format!("width: {:.1}%", 100.0 * (n - 1.0) / (n - 2.0));
+        let glide = format!("translateX(-{:.7}%)", 100.0 / (n - 1.0));
+        let tick = format!("{}ms steps(", crate::engine::TICK.as_millis());
+        assert_eq!(APP_CSS.matches(&width).count(), 1, "{width}");
+        assert_eq!(
+            APP_CSS.matches(&glide).count(),
+            3,
+            "{glide}: two glides and where they end"
+        );
+        assert_eq!(APP_CSS.matches(&tick).count(), 2, "{tick}");
     }
 
     /// Bands, not a gradient — and the distinctions that have to survive

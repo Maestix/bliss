@@ -542,6 +542,39 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     wide at both zooms (WebView2's thin bar was 10px and 7px, sized in device
     pixels), and table headers still line up with their rows
     (`the_standard_scrollbar_properties_stay_unset`).
+22. **The traffic chart glides; it does not step.** Forty bars each jumped a
+    place twice a second, which the user saw as a chart moving in jerks. It is
+    a line through `CHART_SAMPLES` (42) download rates, one past each edge of
+    the chart, on a layer 41/40 of the chart wide that a CSS animation moves
+    left by one sample, 1/41 of its width, over one `TICK`, in fifteen steps.
+    A new sample restarts the glide by switching between two identical
+    keyframe names (`glide_class`, by the parity of `Frame.samples`), so the
+    data shifts in the render that starts the glide again from zero. Gliding
+    at the display's rate, over 900 frames the line never moved back or jumped
+    more than 0.25px; in steps it moves 30 times a second, 1.2px at a time,
+    and still never back. The numbers in
+    `app.css` follow the constants (`the_chart_glides_one_sample_per_tick`).
+    - The curve is monotone (Fritsch–Carlson): it never dips below zero beside
+      a burst (`the_chart_line_never_overshoots_a_sample`).
+    - The paths are in units of one KB/s and the range is a CSS transform on
+      the SVG group, with a transition, so a change of range eases.
+    - The rate under the pointer is a script, `CHART_HOVER`: the samples glide
+      out from under a pointer that holds still, which no rsx handler hears.
+      It writes on `.chart` only what rsx does not own there (custom
+      properties, `data-hover`). Blitz runs no script and was not seen to
+      transform SVG through CSS, so a Blitz build would lose the readout and
+      the easing.
+    - **The glide costs CPU while it is on screen**: 12–20% of one core with
+      traffic flowing, against 3% for the bars, nearly all of it WebView2's GPU
+      process and renderer drawing at the display's rate. The user found that
+      too much for one chart, so the glide takes fifteen steps a tick, 30
+      frames a second: 8% of a core against 12% in the same run. Ten steps
+      saved nothing more, since the renderer still wakes at the display's rate
+      and only the frames that change get cheaper. It costs nothing where it is
+      not seen:
+      21 s without traffic and the chart stands still (1.35% of a core, as on
+      the logs screen), and a minimized window draws nothing (2.3% with
+      traffic flowing), which matters for a bliss that starts minimized.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -615,6 +648,18 @@ console. The first minimized start died before its window existed, with
 nothing on screen and exit code 101: send the probe copy's stderr to a file
 to read a panic, since started from Explorer it has nowhere to print one.
 
+**Motion and CPU.** What animates is read on every `requestAnimationFrame` in
+the page: the glide layer's computed transform, with each data shift (a change
+of glide class) added back, is one sample's place on screen, which must only
+ever move left. CPU is the process tree's time from psutil over 15–30 s, split
+by WebView2 process (`--type=` in its command line), with the window kept
+above others without activating it (`SetWindowPos`, `HWND_TOPMOST`,
+`SWP_NOACTIVATE`), because a window behind others may not draw at all. The same
+state measured 12% and 20% of a core in two runs: compare states within one
+run. A readout's position is checked against the SVG path's own geometry
+(`getPointAtLength` through `getScreenCTM`), not against the script's
+arithmetic, which would only agree with itself.
+
 Two more probes that worked:
 
 - **Window icons:** `WM_GETICON` on the `bliss` window, then `GetIconInfo` and
@@ -683,8 +728,9 @@ and `profile-title`, a refresh every 12 hours, through the tunnel when it is
 up); zoom with the window size; no console window; deleting servers, a
 subscription's servers grouped under its name, a rule filter for the
 connections table, and log levels in colour; a settings screen, which so far
-starts bliss with Windows, minimized or not; scrollbars that draw only a thumb.
-The tunnel already starts with the window (`Setup.autostart`).
+starts bliss with Windows, minimized or not; scrollbars that draw only a thumb;
+the traffic chart as a gliding curve with the rate under the pointer. The
+tunnel already starts with the window (`Setup.autostart`).
 
 **Open:** renaming servers; the rest of the settings screen (ports, the
 engine, installing it with a button); UDP ASSOCIATE; an idle timeout for

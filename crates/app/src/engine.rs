@@ -22,7 +22,7 @@ use crate::ui::plural;
 
 /// How often the UI gets a new frame. Fast enough that a speed readout looks
 /// live, slow enough that it costs nothing.
-const TICK: Duration = Duration::from_millis(500);
+pub(crate) const TICK: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
@@ -157,8 +157,12 @@ pub struct Frame {
     pub down_rate: u64,
     /// Newest first, live connections before closed ones.
     pub connections: Vec<bliss_core::Snapshot>,
-    /// Recent download rates, oldest first, for the bar chart.
+    /// Recent download rates, oldest first, for the chart: `CHART_SAMPLES` of
+    /// them, the first and the last outside it for most of a tick.
     pub history: Vec<u64>,
+    /// How many times `history` has moved on by a sample. The chart glides one
+    /// sample left over a tick, and starts the glide again when this changes.
+    pub samples: u64,
     /// What the chart's full height means, in bytes per second. Computed here
     /// rather than in the UI so it can be smoothed across ticks.
     pub scale: u64,
@@ -441,7 +445,7 @@ fn initial_frame(setup: &Setup) -> Frame {
             "socks {} · http {}",
             setup.profile.inbound.socks, setup.profile.inbound.http
         ),
-        history: vec![0; 40],
+        history: vec![0; CHART_SAMPLES],
         proxy_mode: setup.profile.inbound.system_proxy,
         servers: server_rows(&setup.profile, &setup.servers, setup.selected),
         subscriptions: subscription_rows(&setup.profile, &HashSet::new(), &HashMap::new()),
@@ -1843,6 +1847,11 @@ impl Meter {
     }
 }
 
+/// Samples in the chart's history: forty intervals across the chart, twenty
+/// seconds at a tick each, and one more past each edge, where a sample waits to
+/// glide in or finishes gliding out between ticks (`TrafficTab` in ui.rs).
+pub(crate) const CHART_SAMPLES: usize = 42;
+
 /// The chart never means less than this. Without a floor, a few hundred bytes
 /// of background chatter draws a full-height bar and the chart looks alarming
 /// when nothing is happening.
@@ -1858,7 +1867,8 @@ const SCALE_FLOOR: u64 = 64 * 1024;
 ///
 /// Buckets fix both. A sample's height is settled when it is recorded and stays
 /// put; the scale only moves when the peak crosses a doubling, which is rare
-/// and reads as a deliberate change of range rather than as drift.
+/// and reads as a deliberate change of range rather than as drift. The window
+/// eases into a new range rather than snapping to it (`chart_lift` in ui.rs).
 fn snap_scale(peak: u64) -> u64 {
     let mut bucket = SCALE_FLOOR;
     while bucket < peak {
@@ -1911,6 +1921,7 @@ fn publish(
         // never grows, which is the rule for anything that ticks forever.
         f.history.remove(0);
         f.history.push(down_rate);
+        f.samples = f.samples.wrapping_add(1);
 
         let peak = f.history.iter().copied().max().unwrap_or(0);
         scale = snap_scale(peak);
