@@ -110,6 +110,9 @@ pub struct CheckResult {
     pub target: String,
     pub action: Action,
     pub rule: String,
+    /// Why a rule with a country did not decide a site, when one did not:
+    /// `Router::geoip_note`.
+    pub note: Option<String>,
 }
 
 /// Everything the window shows, recomputed each tick.
@@ -1467,6 +1470,7 @@ fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
     };
 
     let decision = router.decide(&target, None);
+    let note = router.geoip_note(&target, None);
     Some(CheckResult {
         // The port only when it was typed. Assumed, it read as part of the
         // answer: `geoip:ru` came back as `geoip:ru:443`.
@@ -1481,6 +1485,7 @@ fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
             bliss_core::Route::Blocked => Action::Block,
         },
         rule: decision.rule,
+        note,
     })
 }
 
