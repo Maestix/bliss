@@ -2222,6 +2222,50 @@ mod tests {
             "launch minimizes the window before WebView2 is created in it"
         );
     }
+
+    /// WebView2 ignores every `::-webkit-scrollbar` rule on an element that
+    /// sets either standard scrollbar property, and draws its own bar, whose
+    /// arrows stay when there is nothing to scroll. Set on `*`, they put two
+    /// arrows and no bar beside every pane that fit, the settings card first.
+    /// So neither is set anywhere: not in the stylesheets, not inline. The
+    /// names are assembled here, or this test would find them in itself.
+    #[test]
+    fn the_standard_scrollbar_properties_stay_unset() {
+        fn without_comments(css: &str) -> String {
+            let mut out = String::new();
+            let mut rest = css;
+            while let Some(start) = rest.find("/*") {
+                out.push_str(&rest[..start]);
+                rest = match rest[start + 2..].find("*/") {
+                    Some(end) => &rest[start + 2 + end + 2..],
+                    None => "",
+                };
+            }
+            out.push_str(rest);
+            out
+        }
+        let code: String = include_str!("ui.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sources = [
+            ("app.css", without_comments(APP_CSS)),
+            ("theme.css", without_comments(THEME)),
+            ("ui.rs", code),
+        ];
+        for part in ["width", "color"] {
+            let property = format!("scrollbar-{part}");
+            for (name, text) in &sources {
+                assert!(!text.contains(&property), "{name} sets {property}");
+            }
+        }
+        assert!(
+            sources[0].1.contains("::-webkit-scrollbar-thumb"),
+            "app.css draws the thumb"
+        );
+    }
+
     /// build.rs has to get bliss.rc into the executable; without it the window
     /// quietly falls back to the Dioxus logo and Explorer to the generic
     /// application icon. `LoadImageW` resizes whatever frame it finds, so this

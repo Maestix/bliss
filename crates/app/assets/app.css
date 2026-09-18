@@ -155,8 +155,16 @@ body { font-size: 16px; user-select: none; cursor: default; }
    like someone left a browser window open inside the app. They are also only
    wanted where something actually scrolls — `overflow: scroll` was chosen
    originally because Blitz has no `auto`, but a permanent empty track is worse
-   than the portability it buys, so panes that fit their content use `hidden`. */
-* { scrollbar-width: thin; scrollbar-color: rgba(239, 232, 245, .16) transparent; }
+   than the portability it buys, so panes that fit their content use `hidden`.
+
+   These rules draw a thumb and nothing else, and they apply only while nothing
+   sets `scrollbar-width` or `scrollbar-color`: on an element with either,
+   WebView2 ignores every `::-webkit-scrollbar` rule and draws its own bar,
+   whose arrows stay when there is nothing to scroll. Both used to be set on
+   `*`, which put two faint arrows and no bar beside every pane that fit — the
+   settings screen's lone card, the rule list, the subscriptions — and left the
+   rules below unused (`the_standard_scrollbar_properties_stay_unset`). A thumb
+   has a smallest length, or a long log's would be a sliver to aim at. */
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
@@ -164,6 +172,8 @@ body { font-size: 16px; user-select: none; cursor: default; }
   background: rgba(239, 232, 245, .16);
   border-radius: 5px;
 }
+::-webkit-scrollbar-thumb:vertical { min-height: 28px; }
+::-webkit-scrollbar-thumb:horizontal { min-width: 28px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(239, 232, 245, .28); }
 
 /* --- What can be clicked says so -------------------------------------------
@@ -310,14 +320,11 @@ body { font-size: 16px; user-select: none; cursor: default; }
 /* --- The connections table ------------------------------------------------- */
 /* A table's header over a list that scrolls. The list's scrollbar takes its
    width from the rows alone, so the header's columns stood to the right of
-   the rows' by the bar's width: 10px, or 7px at zoom 1.5, since the bar keeps
-   its size in device pixels. The header keeps the same gutter with a scrollbar
-   of its own, which has nothing to scroll and is painted in no colour. And
-   `flex: none`, because a scroll container may shrink to nothing in a column. */
-.list-head {
-  flex: none; overflow-y: scroll; overflow-x: hidden;
-  scrollbar-color: transparent transparent;
-}
+   the rows' by the bar's width, 9px at any zoom. The header keeps the same
+   gutter with a scrollbar of its own, which has nothing to scroll and so draws
+   nothing: a bar here is only ever its thumb. And `flex: none`, because a
+   scroll container may shrink to nothing in a column. */
+.list-head { flex: none; overflow-y: scroll; overflow-x: hidden; }
 .sort { transition: color .14s ease; white-space: nowrap; }
 .sort:hover { color: var(--color-neutral-200); }
 .sort.on { color: var(--color-accent); }

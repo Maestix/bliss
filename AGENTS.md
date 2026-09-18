@@ -502,10 +502,9 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     (`CONNECTION_COLUMNS`, `SERVER_COLUMNS`, guarded by
     `table_columns_do_not_grow_with_their_text`). A header over a list that
     scrolls takes `.list-head`: the list's scrollbar narrows the rows alone, by
-    10px at zoom 1 and 7px at 1.5, and the header's columns stood that far to the
-    right of theirs. The class gives the header a scrollbar of the same width
-    with nothing to scroll, painted transparent, because WebView2 draws the
-    bar's arrows even then. The subscriptions screen had the same gap between
+    9px, and the header's columns stood that far to the right of theirs. The
+    class gives the header a scrollbar of the same width with nothing to
+    scroll, which draws nothing (rule 21). The subscriptions screen had the same gap between
     its form and its cards, and puts the form inside the scrolling column.
 19. **A line that must keep its height hides what does not fit instead of
     wrapping it in place.** `TabBar` is `height:30px;overflow:hidden;
@@ -531,6 +530,18 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     window was never on screen. Through tao's `set_minimized`, not
     `ShowWindow`: tao keeps its own copy of the window's state and ends every
     change to it with `SW_HIDE` unless it believes the window visible.
+21. **Scrollbars are a thumb drawn by `::-webkit-scrollbar` in `app.css`, and
+    nothing sets `scrollbar-width` or `scrollbar-color`.** On an element with
+    either, WebView2 ignores the `::-webkit-scrollbar` rules and draws its own
+    bar, which keeps its arrows when there is nothing to scroll. Both were set
+    on `*`: every pane that fit showed two faint arrows with no bar between
+    them — the user found them beside the settings screen's lone card — and
+    the `::-webkit-scrollbar` rules had never applied. Without them, measured
+    on every screen at zoom 1 and 1.5: nothing is drawn beside a pane that
+    fits, a list that scrolls keeps a thumb of at least 28px, every bar is 9px
+    wide at both zooms (WebView2's thin bar was 10px and 7px, sized in device
+    pixels), and table headers still line up with their rows
+    (`the_standard_scrollbar_properties_stay_unset`).
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -588,7 +599,9 @@ a person can reach by dragging. The first try measured a 384px page, which
 nobody can see. Something that moves on a switch is caught by recording its
 position on every `requestAnimationFrame` across the switch, not once after it.
 Pillow is installed, for checking in a screenshot that something meant to be
-invisible is: the header's transparent scrollbar crops to one colour.
+invisible is: in a scrollbar's gutter beside a pane that fits, count the pixels
+off the gutter's commonest colour, at both ends where arrows sat and along it
+where a thumb would be; all three are zero now.
 
 **Starting with Windows is probed on a scratch key**, never the real Run key:
 `BLISS_STARTUP_KEY=Software\bliss-probe-startup` puts the entry and Task
@@ -670,8 +683,8 @@ and `profile-title`, a refresh every 12 hours, through the tunnel when it is
 up); zoom with the window size; no console window; deleting servers, a
 subscription's servers grouped under its name, a rule filter for the
 connections table, and log levels in colour; a settings screen, which so far
-starts bliss with Windows, minimized or not. The tunnel already starts with the
-window (`Setup.autostart`).
+starts bliss with Windows, minimized or not; scrollbars that draw only a thumb.
+The tunnel already starts with the window (`Setup.autostart`).
 
 **Open:** renaming servers; the rest of the settings screen (ports, the
 engine, installing it with a button); UDP ASSOCIATE; an idle timeout for
