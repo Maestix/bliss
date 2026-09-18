@@ -365,6 +365,9 @@ fn explain_route(path: Option<PathBuf>, target: &str, process: Option<&str>) -> 
         },
         decision.rule
     );
+    if let Some(note) = router.geoip_note(&parsed, process) {
+        println!("  {note}");
+    }
 
     if router.rule_count() == 0 {
         println!();

@@ -1638,6 +1638,7 @@ fn Connections(frame: Frame) -> Element {
                         span {
                             style: "overflow:hidden;white-space:nowrap;font-size:12.5px;\
                                     color:{route_color(row.closed_at.is_some())}",
+                            title: "правило: {row.rule}",
                             if row.closed_at.is_some() { "закрыто" } else { "{route_short(row.route)}" }
                         }
                         span {
@@ -1739,7 +1740,7 @@ fn Routing(frame: Frame) -> Element {
                     span {
                         style: "font-size:12px;letter-spacing:.09em;text-transform:uppercase;\
                                 color:var(--color-neutral-500)",
-                        "Правила, которые не сработают"
+                        "Что в правилах не сработает"
                     }
                     for (n, warning) in view.warnings.iter().enumerate() {
                         span {
@@ -2024,6 +2025,13 @@ fn Checker(
                         span {
                             style: "font-size:12.5px;color:var(--color-neutral-500);min-width:0",
                             "{elide(&answer.rule, 24)}"
+                        }
+                    }
+                    // A site that walked past a rule with a country: why it did.
+                    if let Some(note) = &answer.note {
+                        span {
+                            style: "font-size:12.5px;line-height:1.45;color:#cbbaf4",
+                            "{note}"
                         }
                     }
                 }

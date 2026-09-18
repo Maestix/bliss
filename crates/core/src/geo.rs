@@ -221,6 +221,13 @@ pub fn load_sites(path: &Path, wanted: &[String]) -> std::io::Result<HashMap<Str
     Ok(found)
 }
 
+/// The name of every category in `geosite.dat`, uppercased, without reading
+/// one domain: enough to know a category exists before suggesting it.
+pub fn site_names(path: &Path) -> std::io::Result<HashSet<String>> {
+    let bytes = std::fs::read(path)?;
+    Ok(top_level_entries(&bytes).filter_map(entry_name).collect())
+}
+
 /// Load the named countries from `geoip.dat`.
 pub fn load_ips(path: &Path, wanted: &[String]) -> std::io::Result<HashMap<String, IpSet>> {
     let mut found = HashMap::new();

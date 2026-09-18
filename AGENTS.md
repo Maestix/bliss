@@ -236,7 +236,12 @@ These cost the most time on this project. None of them announce themselves.
 - **Names are never resolved locally for proxied traffic** — `Target` keeps
   domains as names so DNS does not leak. Direct routes resolve locally, on
   purpose. Consequence: `geoip` rules only match connections that name an
-  address; sites by country need `geosite`.
+  address; sites by country need `geosite`. The user found that out from
+  Russian sites still going through the tunnel under `geoip:ru`, so the table
+  says it when it is built — a warning for a country whose rule lacks its
+  geosite category, naming the category when geosite.dat has one — and a check
+  of a name says which rules with a country it went past (`Router::geoip_note`,
+  `a_country_rule_says_it_cannot_see_sites`).
 
 **Inbound invariants — keep them in every new ingress (UDP ASSOCIATE, TUN)**
 

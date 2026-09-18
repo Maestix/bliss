@@ -177,6 +177,9 @@ struct Compiled {
     processes: Vec<String>,
     sites: Vec<SiteSet>,
     ips: Vec<IpSet>,
+    /// The geoip countries it names, as written, apart from `private`: for
+    /// saying why a site went past it, never for deciding.
+    countries: Vec<String>,
 }
 
 impl Compiled {
@@ -266,6 +269,9 @@ impl Router {
             crate::geo::load_ips,
         );
 
+        // Read only when a rule needs a category suggested; see below.
+        let mut site_names: Option<Option<std::collections::HashSet<String>>> = None;
+
         let mut rules = Vec::with_capacity(config.rules.len());
         for (index, rule) in config.rules.iter().enumerate() {
             let name = rule.display_name();
@@ -291,6 +297,12 @@ impl Router {
                     .collect(),
                 sites: Vec::new(),
                 ips: Vec::new(),
+                countries: rule
+                    .geoip
+                    .iter()
+                    .filter(|country| !country.eq_ignore_ascii_case("private"))
+                    .cloned()
+                    .collect(),
             };
 
             for raw in &rule.ip {
@@ -310,7 +322,8 @@ impl Router {
                     Some(set) => {
                         if set.skipped_regex > 0 {
                             warnings.push(format!(
-                                "{where_}: в наборе {raw} есть {} шаблон(ов) вида regex, \n                                 их bliss пока не умеет",
+                                "{where_}: в наборе {raw} есть {} шаблон(ов) вида regex, \
+                                 их bliss пока не умеет",
                                 set.skipped_regex
                             ));
                         }
@@ -324,6 +337,23 @@ impl Router {
                     Some(set) => compiled.ips.push(set.clone()),
                     None => warnings.push(format!("{where_}: нет страны geoip с именем {raw:?}")),
                 }
+            }
+            // A country's addresses are not its sites. A browser behind the proxy
+            // names the site, bliss never resolves the name (the note on
+            // `Rule::geoip`), and a rule of geoip alone quietly never matched a
+            // single page — which is how the user found out. So the table says
+            // it, and names the category that does catch those sites when
+            // geosite.dat has one.
+            let blind: Vec<&String> = compiled
+                .countries
+                .iter()
+                .filter(|country| !rule.geosite.iter().any(|set| covers_country(set, country)))
+                .collect();
+            if !blind.is_empty() {
+                let names = site_names.get_or_insert_with(|| {
+                    crate::geo::site_names(&geo_dir.join("geosite.dat")).ok()
+                });
+                warnings.push(blind_warning(&where_, &blind, names.as_ref()));
             }
 
             rules.push(compiled);
@@ -376,6 +406,106 @@ impl Router {
     pub fn fallback(&self) -> Route {
         self.fallback
     }
+
+    /// Why no rule with a country decided a destination that names a site, in
+    /// words for the user; `None` for an address, or when no such rule came
+    /// before the decision. It explains a decision and never makes one.
+    pub fn geoip_note(&self, target: &Target, process: Option<&str>) -> Option<String> {
+        let passed = self.geoip_passed_over(target, process);
+        let names = passed
+            .iter()
+            .map(|name| format!("«{name}»"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match passed.len() {
+            0 => None,
+            1 => Some(format!(
+                "{} — имя сайта, а geoip сравнивает адреса: правило {names} его не проверяло",
+                target.host()
+            )),
+            _ => Some(format!(
+                "{} — имя сайта, а geoip сравнивает адреса: правила {names} его не проверяли",
+                target.host()
+            )),
+        }
+    }
+
+    /// The rules with a country that a destination went past before its
+    /// decision, their geoip conditions never looking at it because it is a
+    /// name. Empty for an address, which geoip does see.
+    fn geoip_passed_over(&self, target: &Target, process: Option<&str>) -> Vec<String> {
+        let named = match target {
+            Target::Socket(_) => false,
+            Target::Domain { host, .. } => host.parse::<IpAddr>().is_err(),
+        };
+        if !named {
+            return Vec::new();
+        }
+        let host = normalise(&target.host());
+        let port = target.port();
+        self.rules
+            .iter()
+            .take_while(|rule| !rule.matches(&host, None, port, process))
+            .filter(|rule| !rule.countries.is_empty())
+            .map(|rule| rule.name.clone())
+            .collect()
+    }
+}
+
+/// Whether a geosite category is a country's sites, in the names the common
+/// files give them: `category-ru`, `cn`, `geolocation-cn`, `tld-ru`.
+fn covers_country(set: &str, country: &str) -> bool {
+    let set = set.trim().to_ascii_lowercase();
+    let country = country.trim().to_ascii_lowercase();
+    ["", "category-", "geolocation-", "tld-"]
+        .iter()
+        .any(|prefix| set == format!("{prefix}{country}"))
+}
+
+/// The warning for countries in a rule that cannot see a site's name, with
+/// the category to add for each one geosite.dat has.
+fn blind_warning(
+    where_: &str,
+    blind: &[&String],
+    names: Option<&std::collections::HashSet<String>>,
+) -> String {
+    let conditions = blind
+        .iter()
+        .map(|country| format!("geoip:{country}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suggested: Vec<String> = blind
+        .iter()
+        .filter_map(|country| {
+            let names = names?;
+            let country = country.to_ascii_lowercase();
+            ["category-", "", "geolocation-", "tld-"]
+                .iter()
+                .map(|prefix| format!("{prefix}{country}"))
+                .find(|set| names.contains(&set.to_ascii_uppercase()))
+                .map(|set| format!("geosite:{set}"))
+        })
+        .collect();
+    let head = format!(
+        "{where_}: {conditions} {} адреса, а браузер через прокси называет сайт по имени, \
+         так что сайты это правило не поймает.",
+        if blind.len() == 1 {
+            "сравнивает"
+        } else {
+            "сравнивают"
+        }
+    );
+    match suggested.len() {
+        0 => format!("{head} Их ловят условия geosite и домены."),
+        1 => format!(
+            "{head} Их ловит {} — добавьте его в это же правило.",
+            suggested[0]
+        ),
+        _ => format!(
+            "{head} Их ловят {} — добавьте их в это же правило.",
+            suggested.join(", ")
+        ),
+    }
 }
 
 /// A geo loader: one of `geo::load_sites` or `geo::load_ips`.
@@ -397,7 +527,8 @@ fn load_or_warn<T>(
         Ok(found) => found,
         Err(e) => {
             warnings.push(format!(
-                "не удалось прочитать {} ({e}) — правила, которые его используют, \n                 не будут срабатывать",
+                "не удалось прочитать {} ({e}) — правила, которые его используют, \
+                 не будут срабатывать",
                 path.display()
             ));
             Default::default()
@@ -617,8 +748,8 @@ mod tests {
         assert_eq!(r.decide(&t, None).route, Route::Proxy);
     }
 
-    /// A geoip rule cannot match a name, and the user has to be able to find
-    /// that out from the warnings rather than from their traffic.
+    /// A rule that cannot work is reported when the table is built, rather
+    /// than found out from the traffic.
     #[test]
     fn a_rule_that_cannot_work_is_reported() {
         let mut nothing = rule(Action::Direct, "empty");
@@ -645,5 +776,83 @@ mod tests {
         let d = r.decide(&Target::domain("anything.example", 443), None);
         assert_eq!(d.route, Route::Proxy);
         assert_eq!(r.rule_count(), 0);
+    }
+
+    /// A geoip rule cannot see a site's name. The user found that out from
+    /// Russian sites still going through the tunnel under `geoip:ru`; the table
+    /// now says so when it is built, naming the category that catches those
+    /// sites, and the answer for a name says which rules never looked at it.
+    #[test]
+    fn a_country_rule_says_it_cannot_see_sites() {
+        // A geosite.dat of one category, `category-ru`, which covers `ru`.
+        let field = |number: u8, bytes: &[u8]| {
+            let mut out = vec![(number << 3) | 2, bytes.len() as u8];
+            out.extend_from_slice(bytes);
+            out
+        };
+        let domain = [vec![0x08, 0x02], field(2, b"ru")].concat();
+        let entry = [field(1, b"CATEGORY-RU"), field(2, &domain)].concat();
+        let dir = std::env::temp_dir()
+            .join("bliss-routing-tests")
+            .join("country-sites");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(dir.join("geosite.dat"), field(1, &entry)).expect("geosite.dat");
+
+        let mut sites = rule(Action::Direct, "Сайты");
+        sites.domain = vec!["yandex.ru".into()];
+        let mut lan = rule(Action::Direct, "LAN");
+        lan.geoip = vec!["private".into()];
+        let mut ru = rule(Action::Direct, "RU");
+        ru.geoip = vec!["ru".into()];
+        let mut whole = rule(Action::Direct, "RU целиком");
+        whole.geoip = vec!["ru".into()];
+        whole.geosite = vec!["category-ru".into()];
+        let routing = Routing {
+            fallback: Action::Proxy,
+            geo_dir: None,
+            rules: vec![sites, lan, ru, whole],
+        };
+        let r = Router::build(&routing, &dir);
+
+        let all = r.warnings.join("\n");
+        // One such warning, for `RU`: `private` means addresses, and the last
+        // rule already carries its country's sites.
+        let blind: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("адреса, а браузер"))
+            .collect();
+        assert_eq!(blind.len(), 1, "{all}");
+        assert!(
+            blind[0].starts_with("правило #3 (RU): geoip:ru сравнивает адреса"),
+            "{all}"
+        );
+        assert!(
+            blind[0].ends_with("Их ловит geosite:category-ru — добавьте его в это же правило."),
+            "{all}"
+        );
+
+        // Decided before any rule with a country: nothing to explain.
+        assert_eq!(r.geoip_note(&Target::domain("yandex.ru", 443), None), None);
+        // Past `RU` unseen, and caught by the category in the rule after it.
+        let site = Target::domain("mail.ru", 443);
+        assert_eq!(r.decide(&site, None).rule, "RU целиком");
+        assert_eq!(r.geoip_passed_over(&site, None), ["RU"]);
+        let note = r.geoip_note(&site, None).expect("a note for a name");
+        assert!(note.contains("правило «RU»"), "{note}");
+        // An address is what geoip does see, however it was spelled.
+        let address = Target::Socket("1.2.3.4:443".parse().expect("an address"));
+        assert!(r.geoip_passed_over(&address, None).is_empty());
+        assert!(
+            r.geoip_passed_over(&Target::domain("1.2.3.4", 443), None)
+                .is_empty()
+        );
+
+        // Without geosite.dat the warning stands, with no category to name.
+        let bare = Router::build(&routing, Path::new("nonexistent"));
+        let all = bare.warnings.join("\n");
+        assert!(all.contains("geoip:ru сравнивает адреса"), "{all}");
+        assert!(all.contains("Их ловят условия geosite и домены"), "{all}");
     }
 }
