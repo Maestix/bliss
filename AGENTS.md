@@ -61,6 +61,7 @@ The long-form plan, in Russian, lives outside the repo at
 | `crates/proto` | `bliss-proto` | pure data: `vless://` parsing (`server.rs`), TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation, process supervision in a Job Object, GitHub downloader |
+| `crates/tun` | `bliss-tun` | stage 2, started: `wintun.dll` carried inside the binary and written out beside the engine (`lib.rs`); the adapter and the userspace stack land here |
 | `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with Windows (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
@@ -192,7 +193,9 @@ These cost the most time on this project. None of them announce themselves.
   one, and prove the last commit byte-identical to the snapshot.
 - Messages explain *why*: the bug, how it was found, what the fix costs. End with
   the `Co-Authored-By` trailer the harness gives you.
-- Design sources (`*.zip`) stay out of git.
+- Design sources (`*.zip`) stay out of git. `crates/tun/assets/wintun.dll` is in
+  it on purpose, with its licence beside it: bliss ships as one file, so the
+  library is carried inside the binary (`include_bytes!`) rather than downloaded.
 
 ## 5. House rules for code
 
