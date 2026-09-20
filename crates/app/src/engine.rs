@@ -36,7 +36,6 @@ pub enum State {
 impl State {
     /// The state as a word. The main screen says it in colour instead, but the
     /// tray tooltip has no room for a ring.
-    #[allow(dead_code, reason = "the tray menu lands in 1.8")]
     pub fn label(self) -> &'static str {
         match self {
             Self::Stopped => "Отключено",

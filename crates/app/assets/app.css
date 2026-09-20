@@ -428,6 +428,47 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .srv-tools { display: flex; justify-content: flex-end; opacity: .4; transition: opacity .14s ease; }
 .srv:hover .srv-tools { opacity: 1; }
 
+/* --- The tray's menu ------------------------------------------------------------
+   Windows draws its own menus in its own font and colours, so this one is not
+   one of those: it is bliss's window in a small shape (`into_menu` in ui.rs),
+   which costs no second webview and looks like the rest of the program. While
+   the tray has the window, the program's screen is folded away rather than left
+   to lay itself out at 300px — by a class, because an inline `display` that
+   comes and goes is restored by the renderer and sticks (rule 1). */
+.shell { display: flex; }
+.shell.folded { display: none; }
+/* The bunny sits in the corner and fades out under the words, the way the
+   scene does on the status card. Its transparent ground was composited onto
+   --color-surface when the file was made, so it has no edge of its own
+   (`the_tray_bunny_matches_the_card_surface`), and the url() below is replaced
+   with the file's bytes by `STYLES` — write it nowhere else in this file. */
+.tray-card {
+  position: fixed; inset: 0; display: flex; flex-direction: column; gap: 9px;
+  padding: 13px; color: var(--color-text); background-color: var(--color-surface);
+  box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10);
+  background-image:
+    linear-gradient(to top left, transparent 10%, var(--color-surface) 58%),
+    url(tray-bunny.jpg);
+  background-repeat: no-repeat;
+  background-position: 0 0, right bottom;
+  background-size: 100% 100%, auto 58%;
+}
+.tray-sep { height: 1px; flex: none; background-color: rgba(239, 232, 245, .08); }
+.tray-head {
+  flex: none; font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--color-neutral-600);
+}
+/* The list is the only part that gives: four servers fit, the rest scroll. */
+.tray-list {
+  display: flex; flex-direction: column; gap: 2px; min-height: 0;
+  max-height: 120px; overflow-y: scroll; overflow-x: hidden;
+}
+.tray-act {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  padding: 7px; border-radius: 4px; font-size: 13.5px;
+  background-color: rgba(239, 232, 245, .04);
+}
+
 /* --- Settings ------------------------------------------------------------------ */
 /* A choice that is on or off. The box fills with the accent while it is on; a
    row that cannot change yet — minimized, before bliss starts with Windows at
