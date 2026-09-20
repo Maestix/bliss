@@ -1,0 +1,19 @@
+[package]
+name = "bliss-tun"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "The TUN adapter: Wintun, a userspace stack, and its traffic handed to the same outbound as every other inbound"
+
+[dependencies]
+bliss-core = { path = "../core" }
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[target."cfg(windows)".dependencies]
+ipstack.workspace = true
+wintun-bindings.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true

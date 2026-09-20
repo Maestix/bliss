@@ -4,7 +4,7 @@ members = ["crates/*"]
 # The spike drags in WebView2 and, under its other feature, wgpu + Stylo. Keeping
 # it out of the default set means a bare `cargo build` or `cargo test` stays a few
 # seconds; build it deliberately with `-p bliss-spike`.
-default-members = ["crates/proto", "crates/core", "crates/xray", "crates/app"]
+default-members = ["crates/proto", "crates/core", "crates/xray", "crates/tun", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -55,6 +55,18 @@ async-trait = "0.1"                                    # Outbound must be dyn-co
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }    # CancellationToken: one clean shutdown path
 bytes = "1"                                            # relay buffers without copying
+
+# --- the TUN adapter ------------------------------------------------------
+# Wintun is WireGuard's TUN driver for Windows: one signed DLL, no installer,
+# and it ships inside bliss.exe (crates/tun). These are the maintained bindings
+# — the older `wintun` crate is the same idea with less upkeep — and the async
+# feature is what lets a session be read and written from tokio.
+wintun-bindings = { version = "0.7", features = ["async"] }
+# The userspace stack: IP packets in, TCP streams and UDP datagrams out, which
+# is exactly what the relay already takes. Writing our own on smoltcp is the
+# fallback if this does not hold up; the TCP state machine is the expensive
+# part of that, and a spike is the wrong place to pay for it.
+ipstack = "1"
 
 # --- allocator ------------------------------------------------------------
 # Windows' system heap is the weak one under multithreaded churn, and a proxy
