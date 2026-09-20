@@ -105,7 +105,7 @@ CLI (`bliss --help`, and `--help` on each subcommand):
 
 ```
 bliss                                         open the window; the tunnel starts with it
-bliss --minimized                             the same, minimized: how Windows starts it at sign-in
+bliss --minimized                             the same, in the tray: how Windows starts it at sign-in
 bliss check [PATH] | check --link             validate a profile, or one link from stdin
 bliss engine list [--limit N]
 bliss engine install [--version VERSION] [--newest] [--via ADDR]
@@ -319,7 +319,7 @@ These cost the most time on this project. None of them announce themselves.
 
 - **The entry is a Run value, not a scheduled task** (`startup.rs`): `bliss`
   under HKCU `Software\Microsoft\Windows\CurrentVersion\Run`, the executable's
-  path in quotes, then `--minimized` when the window should open minimized. The
+  path in quotes, then `--minimized` when bliss should start in the tray. The
   plan named Task Scheduler; the window needs no elevation, the value needs no
   rights, and the Run key is the list Task Manager shows. The settings screen
   writes it on a click, never on launch.
@@ -392,8 +392,8 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
 7. The window never touches tokio. The engine thread publishes a `Frame` on a
    watch channel; the UI sends `Command`s through `Controller`.
 8. **Pictures and the font ship inside the binary, in the stylesheets.** `STYLES`
-   in `ui.rs` replaces `url(status-card.jpg)` and `url(rail-cat.jpg)` in
-   `app.css`, and `THEME_STYLES`
+   in `ui.rs` replaces `url(status-card.jpg)`, `url(rail-cat.jpg)` and
+   `url(tray-bunny.jpg)` in `app.css`, and `THEME_STYLES`
    replaces `url(comfortaa.woff2)` in `theme.css`, with base64 data URIs, once.
    Each url() must appear in its file exactly once, comments included — a
    comment naming the scene was replaced too, and tripped
@@ -433,6 +433,11 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     q90 without chroma subsampling. `the_rail_cat_matches_the_card_surface`
     checks all four edges. `.rail-cat` takes the room the navigation leaves, up
     to 170px, and shrinks first in a short window.
+
+    The tray menu's bunny (`assets/tray-bunny.jpg`) is made the same way, 300px
+    tall, and sits in the corner of `.tray-card` under a gradient that fades it
+    out across the words, as the status card's scene does
+    (`the_tray_bunny_matches_the_card_surface`).
 11. **The theme is `theme.css`**: a calm neon — plum grounds, a soft pink accent,
     violet for what is on its way, mint for "fine" and "direct", a soft red for
     failures. It replaced Nocturne, whose token names it kept. Colours that
@@ -517,19 +522,18 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     anyway. `flex-wrap` breaks between any two items, so parts that must stay
     side by side are one item: a rule's number and its text are, since as two
     the number took a line of its own.
-20. **A window that opens minimized is minimized in its first render**, not
-    when it is built. WebView2 cannot be created in a minimized window:
-    minimized in `with_on_window`, which runs before the webview exists, bliss
-    died at every `--minimized` start with `E_INVALIDARG`, unwrapped inside
-    dioxus-desktop, before its window ever appeared
-    (`the_window_is_not_minimized_before_its_page_exists`). `App` minimizes it
-    in a `use_hook` (`StartMinimized`). dioxus-desktop renders for the first time
-    once the page has loaded, while the window is still hidden, and shows it
-    right after that render, which leaves a minimized window minimized, with
-    its taskbar button: sampled from the moment the process started, the
-    window was never on screen. Through tao's `set_minimized`, not
-    `ShowWindow`: tao keeps its own copy of the window's state and ends every
-    change to it with `SW_HIDE` unless it believes the window visible.
+20. **A window that starts in the tray is built hidden, never minimized.**
+    WebView2 cannot be created in a minimized window: minimized in
+    `with_on_window`, which runs before the webview exists, bliss died at every
+    `--minimized` start with `E_INVALIDARG`, unwrapped inside dioxus-desktop,
+    before its window ever appeared. `with_visible(false)` costs nothing, since
+    dioxus-desktop builds every window hidden anyway and shows it after the
+    first render: a window that starts in the tray is one it is never told to
+    show. The guard stands
+    (`the_window_is_not_minimized_before_its_page_exists`): nothing in `launch`
+    may minimize. Move a window through tao, never `ShowWindow` — tao keeps its
+    own copy of the window's state and ends every change to it with `SW_HIDE`
+    unless it believes the window visible.
 21. **Scrollbars are a thumb drawn by `::-webkit-scrollbar` in `app.css`, and
     nothing sets `scrollbar-width` or `scrollbar-color`.** On an element with
     either, WebView2 ignores the `::-webkit-scrollbar` rules and draws its own
@@ -575,6 +579,36 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       21 s without traffic and the chart stands still (1.35% of a core, as on
       the logs screen), and a minimized window draws nothing (2.3% with
       traffic flowing), which matters for a bliss that starts minimized.
+
+23. **The tray's menu is this window, in a small shape.** Windows draws its own
+    menus in its own font and colours, and the one Dioxus offers a tray icon is
+    one of those, so bliss builds its icon without a menu and shows `TrayMenu`
+    instead: the same webview, the same stylesheet, one card (`into_menu`,
+    `out_of_menu`). No second webview to pay for, and nothing else would look
+    like the program.
+    - **A native menu also stops everything.** `TrackPopupMenu` runs a message
+      loop of its own inside the shell's click, and while it is up the window
+      answers no events at all — including the one that would open bliss's own
+      menu. A stopgap "Выход" item was enough to make every right click do
+      nothing whatsoever.
+    - **Shape it out of sight.** Hidden, resized, moved, and only then shown —
+      by an effect, after the render that puts the menu on the page. Shown
+      first, the window stood for a frame with the whole program squeezed into
+      300px; reshaped while still visible on the way back, it flashed the
+      program at the centre of the screen, which is what the user saw both when
+      the menu closed and when bliss quit.
+    - **Closing on lost focus needs two guards**: the menu goes when the focus
+      goes, but only once it has had the focus (`MENU_HELD`) and 250ms after it
+      opened. Windows hands the focus around as a window appears, and without
+      them the menu opened and vanished inside 50ms.
+    - The close button and Alt+F4 hide the window
+      (`WindowCloseBehaviour::WindowHides`), so bliss goes on serving; leaving
+      is "Выход" in the menu, which sets `WindowCloses` first and then closes
+      the last window.
+    - The program's screen is folded away by class while the tray has the
+      window, and `display` lives in `.shell` rather than in the inline style:
+      `.shell.folded { display: none }` did nothing until the inline
+      `display:flex` moved out of its way (rule 12).
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -660,6 +694,22 @@ run. A readout's position is checked against the SVG path's own geometry
 (`getPointAtLength` through `getScreenCTM`), not against the script's
 arithmetic, which would only agree with itself.
 
+**The tray is driven by the message the shell sends.** The icon's window is
+`tray_icon_app` in bliss's own process — `EnumWindows` misses it, being
+message-only, so walk `FindWindowExW(HWND_MESSAGE, …)` as well — and
+`PostMessage(tray, 6002, 0, WM_LBUTTONUP)`, or `WM_RBUTTONUP`, is exactly what
+Windows posts on a click, so the handler runs as it would for a person. Two
+things about the menu: it closes when the window loses focus, and a window a
+script opened holds none, so call `SetForegroundWindow` on it first or the menu
+is gone before the first question; and closing no longer ends bliss, so a probe
+kills what it started, while the DevTools socket dies with the "Выход" it just
+clicked — expect that rather than reading it as a failure.
+
+**The user's screen is theirs.** Probes open real windows on it, and the tray's
+menu pops up wherever the pointer is. Ask before a run when they are at the
+machine, and take them at their word when they say not to: work from the code
+and the tests instead, and say plainly which claims are then untested.
+
 Two more probes that worked:
 
 - **Window icons:** `WM_GETICON` on the `bliss` window, then `GetIconInfo` and
@@ -729,12 +779,13 @@ up); zoom with the window size; no console window; deleting servers, a
 subscription's servers grouped under its name, a rule filter for the
 connections table, and log levels in colour; a settings screen, which so far
 starts bliss with Windows, minimized or not; scrollbars that draw only a thumb;
-the traffic chart as a gliding curve with the rate under the pointer. The
-tunnel already starts with the window (`Setup.autostart`).
+the traffic chart as a gliding curve with the rate under the pointer; the tray,
+which the window hides into and whose menu bliss draws itself. The tunnel
+already starts with the window (`Setup.autostart`).
 
 **Open:** renaming servers; the rest of the settings screen (ports, the
 engine, installing it with a button); UDP ASSOCIATE; an idle timeout for
-half-open connections; the tray (1.8); the 12-hour memory run.
+half-open connections; the first-run wizard (1.8); the 12-hour memory run.
 
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes

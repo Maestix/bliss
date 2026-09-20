@@ -62,6 +62,10 @@ const SCENE_URL: &str = "url(status-card.jpg)";
 const RAIL_CAT: &[u8] = include_bytes!("../assets/rail-cat.jpg");
 /// How app.css names the cat, for `STYLES` to replace.
 const RAIL_CAT_URL: &str = "url(rail-cat.jpg)";
+/// The bunny in the corner of the tray's menu; see `.tray-card` in app.css.
+const TRAY_BUNNY: &[u8] = include_bytes!("../assets/tray-bunny.jpg");
+/// How app.css names the bunny, for `STYLES` to replace.
+const TRAY_BUNNY_URL: &str = "url(tray-bunny.jpg)";
 /// Comfortaa, subset to what the window draws; see the @font-face in theme.css.
 const FONT: &[u8] = include_bytes!("../assets/comfortaa.woff2");
 /// How theme.css names the font, for `THEME_STYLES` to replace.
@@ -80,6 +84,7 @@ static STYLES: LazyLock<String> = LazyLock::new(|| {
     APP_CSS
         .replace(SCENE_URL, &data_url("image/jpeg", SCENE))
         .replace(RAIL_CAT_URL, &data_url("image/jpeg", RAIL_CAT))
+        .replace(TRAY_BUNNY_URL, &data_url("image/jpeg", TRAY_BUNNY))
 });
 
 /// theme.css with the font inlined. Nothing is fetched: the window opens before
@@ -132,6 +137,19 @@ static ROW_MENU: GlobalSignal<Option<RowMenu>> = Signal::global(|| None);
 static DRAFT: GlobalSignal<Option<Draft>> = Signal::global(|| None);
 /// The rule the connections table is narrowed to; `None` for every rule.
 static TABLE_RULE: GlobalSignal<Option<String>> = Signal::global(|| None);
+
+/// Whether the window is lent to the tray's menu rather than showing the
+/// program, and the shape to give it back in (`into_menu`, `out_of_menu`).
+static TRAY_MENU: GlobalSignal<bool> = Signal::global(|| false);
+/// Whether the menu has had the focus yet. It closes when the focus goes, but
+/// the first thing that arrives after it opens is the losing of the focus it
+/// never had: shown from a click on the tray, the window is not the foreground
+/// one, and it closed itself before it had been seen.
+static MENU_HELD: GlobalSignal<bool> = Signal::global(|| false);
+/// When it opened. Windows hands the focus around as a window appears, and a
+/// menu that took the first loss of it for an answer closed before it was seen.
+static MENU_OPENED: GlobalSignal<Option<std::time::Instant>> = Signal::global(|| None);
+static NORMAL_SHAPE: GlobalSignal<Option<(i32, i32, u32, u32)>> = Signal::global(|| None);
 /// Whether the list of rules to narrow the table to is open.
 static RULE_MENU: GlobalSignal<bool> = Signal::global(|| false);
 /// Subscription groups in the server list someone opened or closed, by id.
@@ -275,12 +293,8 @@ if (!window.blissChartHover) {
 }
 "#;
 
-/// Whether the window opens minimized: `--minimized`, which Windows passes when
-/// it starts bliss at sign-in and the settings ask for it. See `App`.
-#[derive(Clone, Copy)]
-struct StartMinimized(bool);
-
-/// Open the window, minimized or not.
+/// Open the window, or leave it in the tray: `--minimized` is what Windows
+/// passes when it starts bliss at sign-in and the settings ask for that.
 pub fn launch(controller: Controller, minimized: bool) {
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
@@ -294,13 +308,25 @@ pub fn launch(controller: Controller, minimized: bool) {
                         .with_decorations(false)
                         .with_inner_size(LogicalSize::new(1040.0, 660.0))
                         .with_min_inner_size(LogicalSize::new(880.0, 560.0))
+                        // Started in the tray, the window is simply never
+                        // shown. dioxus-desktop builds every window hidden and
+                        // shows it after the first render, so the webview is
+                        // created in the window Windows is happy with either
+                        // way; minimized instead, WebView2 refuses to be
+                        // created at all (rule 20 of AGENTS.md §6).
+                        .with_visible(!minimized)
                         // Dioxus puts its own logo on any window built without one.
                         .with_window_icon(app_icon(None)),
                 )
+                // The window is the program's, not a document's: its close
+                // button and Alt+F4 put it in the tray, where bliss goes on
+                // serving. Leaving is a deliberate act, from the tray (`Tray`).
+                .with_close_behaviour(dioxus::desktop::WindowCloseBehaviour::WindowHides)
+                // The clicks on the icon are answered here, not by Dioxus.
+                .with_tray_icon_show_window_on_click(false)
                 .with_on_window(|window, _| set_icons(&window, window.scale_factor())),
         )
         .with_context(controller)
-        .with_context(StartMinimized(minimized))
         .launch(App);
 }
 
@@ -319,6 +345,374 @@ fn app_icon(side: Option<u32>) -> Option<Icon> {
 #[cfg(not(windows))]
 fn app_icon(_side: Option<u32>) -> Option<Icon> {
     None
+}
+
+/// bliss's icon beside the clock, and what clicking it does.
+///
+/// Built here rather than through Dioxus's `init_tray_icon` because there is no
+/// native menu to give it: Windows draws those in its own font and colours, and
+/// bliss's own menu is this window in a compact shape (`into_menu`).
+///
+/// A prop rather than the frame, so this runs only when the words change, which
+/// is exactly when the shell has to be told (rule 17 of AGENTS.md §6).
+#[component]
+fn Tray(tooltip: String) -> Element {
+    use dioxus::desktop::trayicon::{
+        MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+    };
+
+    let window = dioxus::desktop::use_window();
+    let side = icon_side(16.0, window.scale_factor());
+    let icon = use_hook(|| {
+        // No menu of Windows' own, and not only because it cannot be styled:
+        // `TrackPopupMenu` runs a loop of its own inside the shell's message,
+        // which holds up every event this window has to answer — including the
+        // one that puts bliss's own menu on the screen. With a menu attached,
+        // a right click opened that and nothing else ever happened.
+        let mut builder = TrayIconBuilder::new().with_tooltip("bliss");
+        if let Some(mark) = tray_mark(side) {
+            builder = builder.with_icon(mark);
+        }
+        builder
+            .build()
+            .inspect_err(|e| tracing::warn!("no tray icon: {e}"))
+            .ok()
+            .map(std::rc::Rc::new)
+    });
+    if let Some(icon) = &icon {
+        let _ = icon.set_tooltip(Some(&tooltip));
+    }
+
+    // The menu is shown only once the page holds it; see `into_menu`.
+    let showing = window.clone();
+    use_effect(move || {
+        use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+        if TRAY_MENU() {
+            showing.set_visible(true);
+            let _ = showing.set_skip_taskbar(true);
+            showing.set_focus();
+        }
+    });
+
+    let clicked = window.clone();
+    dioxus::desktop::use_tray_icon_event_handler(move |event| {
+        // On the release: a click is a press and a release, and both arrive.
+        let TrayIconEvent::Click {
+            button,
+            button_state: MouseButtonState::Up,
+            position,
+            ..
+        } = event
+        else {
+            return;
+        };
+        match button {
+            // The left button is for the program itself.
+            MouseButton::Left => {
+                if TRAY_MENU() {
+                    out_of_menu(&clicked, true);
+                } else {
+                    out_of_the_tray(&clicked);
+                }
+            }
+            // The right one is for the menu — unless the program is already
+            // open, in which case raising it is the useful answer and taking
+            // its window away to make a menu of it would not be.
+            MouseButton::Right => {
+                if TRAY_MENU() {
+                    out_of_menu(&clicked, false);
+                } else if clicked.is_visible() {
+                    out_of_the_tray(&clicked);
+                } else {
+                    into_menu(&clicked, (position.x, position.y));
+                }
+            }
+            MouseButton::Middle => {}
+        }
+    });
+
+    // A menu closes when you look elsewhere — once it has been looked at.
+    let unfocused = window.clone();
+    dioxus::desktop::use_wry_event_handler(move |event, _| {
+        use dioxus::desktop::tao::event::{Event, WindowEvent};
+        let Event::WindowEvent {
+            event: WindowEvent::Focused(focused),
+            ..
+        } = event
+        else {
+            return;
+        };
+        if !TRAY_MENU() {
+            return;
+        }
+        let settled =
+            MENU_OPENED().is_some_and(|at| at.elapsed() > std::time::Duration::from_millis(250));
+        if *focused {
+            *MENU_HELD.write() = true;
+        } else if MENU_HELD() && settled {
+            out_of_menu(&unfocused, false);
+        }
+    });
+
+    rsx! {}
+}
+
+/// How big the tray's menu is, in logical pixels, and the smallest the program
+/// itself may be — the menu has to undo that floor to fit.
+const MENU_SIZE: (f64, f64) = (300.0, 372.0);
+const MIN_SIZE: (f64, f64) = (880.0, 560.0);
+
+/// Lend the window to the tray's menu: small, above everything, out of the
+/// taskbar, beside the icon, with the program's screen folded away under it.
+fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64)) {
+    use dioxus::desktop::tao::dpi::LogicalSize;
+
+    if !TRAY_MENU() {
+        let size = window.inner_size();
+        if let Ok(at) = window.outer_position() {
+            *NORMAL_SHAPE.write() = Some((at.x, at.y, size.width, size.height));
+        }
+    }
+    *TRAY_MENU.write() = true;
+    *MENU_HELD.write() = false;
+    *MENU_OPENED.write() = Some(std::time::Instant::now());
+    // Shaped out of sight, and shown by the effect in `Tray` once the page has
+    // drawn the menu. Shown first, the window stood there for a frame holding
+    // the whole program shrunk into 300 pixels.
+    window.set_visible(false);
+    window.set_always_on_top(true);
+    window.set_min_inner_size(None::<LogicalSize<f64>>);
+    window.set_inner_size(LogicalSize::new(MENU_SIZE.0, MENU_SIZE.1));
+    window.set_outer_position(menu_corner(window, near));
+}
+
+/// Give the window back: the program's shape, and shown or away.
+fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
+    use dioxus::desktop::tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+    use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+
+    *TRAY_MENU.write() = false;
+    *MENU_HELD.write() = false;
+    *MENU_OPENED.write() = None;
+    // Out of sight before it changes shape. Given its size and place back while
+    // still on screen, the window flashed the whole program in the middle of
+    // the screen for a frame — on the way out of the menu and out of bliss.
+    window.set_visible(false);
+    window.set_always_on_top(false);
+    let _ = window.set_skip_taskbar(false);
+    window.set_min_inner_size(Some(LogicalSize::new(MIN_SIZE.0, MIN_SIZE.1)));
+    if let Some((x, y, width, height)) = NORMAL_SHAPE() {
+        window.set_inner_size(PhysicalSize::new(width, height));
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
+    if show {
+        out_of_the_tray(window);
+    }
+}
+
+/// Put the menu by the icon and keep it on the screen the pointer is on: a
+/// menu half off the edge is worse than one a little away from the click.
+fn menu_corner(
+    window: &dioxus::desktop::DesktopContext,
+    near: (f64, f64),
+) -> dioxus::desktop::tao::dpi::PhysicalPosition<i32> {
+    use dioxus::desktop::tao::dpi::PhysicalPosition;
+
+    let scale = window.scale_factor();
+    let (width, height) = ((MENU_SIZE.0 * scale) as i32, (MENU_SIZE.1 * scale) as i32);
+    let (x, y) = (near.0 as i32, near.1 as i32);
+    let screen = window
+        .available_monitors()
+        .find(|monitor| {
+            let at = monitor.position();
+            let size = monitor.size();
+            (at.x..at.x + size.width as i32).contains(&x)
+                && (at.y..at.y + size.height as i32).contains(&y)
+        })
+        .or_else(|| window.current_monitor());
+    let Some(screen) = screen else {
+        return PhysicalPosition::new(x - width / 2, y - height - 12);
+    };
+    let at = screen.position();
+    let size = screen.size();
+    let margin = (12.0 * scale) as i32;
+    let left = (x - width / 2).clamp(at.x + margin, at.x + size.width as i32 - width - margin);
+    // Above the pointer, which is over the tray; below it if there is no room.
+    let above = y - height - margin;
+    let top = if above >= at.y + margin {
+        above
+    } else {
+        (y + margin).min(at.y + size.height as i32 - height - margin)
+    };
+    PhysicalPosition::new(left, top)
+}
+
+/// Put the menu away, whatever was chosen in it.
+fn close_menu() {
+    out_of_menu(&dioxus::desktop::window(), false);
+}
+
+/// End the program. The window hides when it closes, so leaving has to say
+/// otherwise first; then it is the last window, and that ends the program.
+fn quit(window: &dioxus::desktop::DesktopContext) {
+    // Away first: closing while the menu was up put the window back into its
+    // full shape on the way out, which is a flash of the program at the centre
+    // of the screen as bliss leaves.
+    *TRAY_MENU.write() = false;
+    window.set_visible(false);
+    window.set_close_behavior(dioxus::desktop::WindowCloseBehaviour::WindowCloses);
+    window.close();
+}
+
+/// The mark out of bliss.exe's own resources, at the size the tray draws.
+#[cfg(windows)]
+fn tray_mark(side: u32) -> Option<dioxus::desktop::trayicon::Icon> {
+    dioxus::desktop::trayicon::Icon::from_resource(1, Some((side, side)))
+        .inspect_err(|e| tracing::warn!("could not load the tray icon: {e}"))
+        .ok()
+}
+
+#[cfg(not(windows))]
+fn tray_mark(_side: u32) -> Option<dioxus::desktop::trayicon::Icon> {
+    None
+}
+
+/// Bring the window back out of the tray.
+fn out_of_the_tray(window: &dioxus::desktop::DesktopContext) {
+    window.set_visible(true);
+    window.set_minimized(false);
+    window.set_focus();
+}
+
+/// The tray's menu: the window itself, small, beside the icon.
+///
+/// Not a menu of Windows' own — those are drawn in the system's font and
+/// colours, and this one is the program, in the program's look. Every item
+/// gives the window back as it acts (`close_menu`), the way a menu closes.
+#[component]
+fn TrayMenu(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let on = frame.state.is_on();
+    let (tone, outer, inner) = tones(frame.state);
+    let chosen = frame.proxy_mode;
+
+    rsx! {
+        div { class: "tray-card",
+            div { style: "display:flex;align-items:center;gap:11px",
+                div {
+                    class: "ring",
+                    style: "width:38px;height:38px;flex:none;border-radius:50%;display:grid;\
+                            place-items:center;border:1px solid {tone};\
+                            box-shadow:0 0 18px {outer}, inset 0 0 10px {inner}",
+                    title: if on { "Отключить" } else { "Подключить" },
+                    onclick: {
+                        let controller = controller.clone();
+                        move |_| controller.send(Command::Toggle { was_on: on })
+                    },
+                    crate::icons::Heart { size: 19, color: tone, filled: on }
+                }
+                div { style: "min-width:0;display:flex;flex-direction:column;gap:2px",
+                    span {
+                        style: "font:700 15px/1.1 var(--font-heading);color:{tone}",
+                        "{frame.state.label()}"
+                    }
+                    span {
+                        style: "font-size:12.5px;color:var(--color-neutral-500);\
+                                min-width:0;overflow:hidden;white-space:nowrap",
+                        "{elide(&frame.server_tag, 26)}"
+                    }
+                }
+            }
+
+            div { class: "tray-sep" }
+            span { class: "tray-head", "Серверы" }
+            div { class: "tray-list",
+                for (index, server) in frame.servers.iter().enumerate() {
+                    div {
+                        key: "{index}",
+                        // Marked by class, as everywhere else here: an inline
+                        // property that comes and goes is restored and sticks.
+                        class: if server.current { "srv current" } else { "srv" },
+                        style: "display:flex;align-items:center;gap:8px;padding:6px 8px;\
+                                border-radius:4px",
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| {
+                                controller.send(Command::Select(index));
+                                close_menu();
+                            }
+                        },
+                        span {
+                            style: "flex:1;min-width:0;overflow:hidden;white-space:nowrap;\
+                                    font-size:13.5px",
+                            "{elide(&server.tag, 22)}"
+                        }
+                        span {
+                            style: "font-size:12.5px;color:{ping_tone(server.ping)}",
+                            "{ping_text(server.ping)}"
+                        }
+                    }
+                }
+            }
+
+            div { class: "tray-sep" }
+            span { class: "tray-head", "Системный прокси" }
+            div { style: "display:flex;flex-direction:column;gap:2px",
+                for mode in [ProxyMode::Unchanged, ProxyMode::Set, ProxyMode::Clear] {
+                    div {
+                        key: "{mode.key()}",
+                        class: if mode == chosen { "act choice on" } else { "act choice" },
+                        style: "display:flex;align-items:center;gap:9px;padding:5px 8px;\
+                                border-radius:4px;font-size:13px;color:{choice_tint(mode == chosen)}",
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| {
+                                controller.send(Command::Proxy(mode));
+                                close_menu();
+                            }
+                        },
+                        div {
+                            style: "width:11px;height:11px;flex:none;border-radius:50%;\
+                                    box-shadow:inset 0 0 0 1px {choice_ring(mode == chosen)};\
+                                    display:grid;place-items:center",
+                            if mode == chosen {
+                                div {
+                                    style: "width:5px;height:5px;border-radius:50%;\
+                                            background-color:var(--color-accent)",
+                                }
+                            }
+                        }
+                        "{mode.label()}"
+                    }
+                }
+            }
+
+            div { class: "tray-sep" }
+            div { style: "display:flex;gap:8px",
+                div {
+                    class: "act tray-act",
+                    onclick: move |_| out_of_menu(&dioxus::desktop::window(), true),
+                    "Открыть"
+                }
+                div {
+                    class: "act tray-act",
+                    onclick: move |_| quit(&dioxus::desktop::window()),
+                    "Выход"
+                }
+            }
+        }
+    }
+}
+
+/// What the icon says when the pointer rests on it: the state, and the server
+/// it is about. Not the rates — they change twice a second, these words are
+/// read only while the pointer is on the icon, and every change is a call into
+/// the shell.
+fn tray_tooltip(frame: &Frame) -> String {
+    match frame.server_tag.as_str() {
+        "" => format!("bliss — {}", frame.state.label()),
+        tag => format!("bliss — {} · {tag}", frame.state.label()),
+    }
 }
 
 /// The frames of `assets/bliss.ico` that carry the mark alone. The file's two
@@ -433,23 +827,6 @@ fn App() -> Element {
         }
     });
 
-    // Minimized in the first render: the page has loaded, the window is still
-    // hidden, and Dioxus shows it right after — a minimized window stays
-    // minimized when shown, so it appears on the taskbar and nowhere else. Not
-    // earlier: WebView2 refuses to be created in a minimized window
-    // (E_INVALIDARG, which dioxus-desktop unwraps), and minimizing it as it was
-    // built killed bliss before its window existed. Not later, or it would flash
-    // up at every sign-in. And through tao rather than ShowWindow, which would
-    // leave tao believing the window hidden, so that the title bar's next
-    // minimize or maximize would hide it for good.
-    let start_minimized = use_context::<StartMinimized>().0;
-    let window = dioxus::desktop::use_window();
-    use_hook(move || {
-        if start_minimized {
-            window.set_minimized(true);
-        }
-    });
-
     // See KEY_LISTENER.
     let keys = controller.clone();
     use_future(move || {
@@ -465,6 +842,10 @@ fn App() -> Element {
                         from_form: false,
                     }),
                     "escape" => {
+                        // The tray's menu is the outermost thing open, if it is.
+                        if TRAY_MENU() {
+                            out_of_menu(&dioxus::desktop::window(), false);
+                        }
                         *ROW_MENU.write() = None;
                         *RULE_MENU.write() = false;
                         *DRAFT.write() = None;
@@ -486,11 +867,19 @@ fn App() -> Element {
         Styles {}
         WindowIcons {}
         WindowZoom {}
+        Tray { tooltip: tray_tooltip(&frame) }
         ToastLine { toast: frame.toast.clone() }
+        if TRAY_MENU() {
+            TrayMenu { frame: frame.clone() }
+        }
         // The title bar spans the whole window, as in the reference, with the
-        // sidebar beginning underneath it.
+        // sidebar beginning underneath it. Folded away by class while the tray
+        // has the window: an inline `display` would be restored and stick.
         div {
-            style: "width:100vw;height:100vh;display:flex;flex-direction:column;\
+            class: if TRAY_MENU() { "shell folded" } else { "shell" },
+            // `display` is in `.shell`, not here: an inline property outranks
+            // every class rule, and the tray's menu folds this away by class.
+            style: "width:100vw;height:100vh;flex-direction:column;\
                     background-color:var(--color-bg);overflow:hidden;color:var(--color-text)",
             TitleBar { engine: frame.engine.clone() }
             div { style: "flex:1;min-height:0;display:flex",
@@ -2473,6 +2862,50 @@ mod tests {
         );
     }
 
+    /// The bunny in the tray's menu, composited onto the card colour the same
+    /// way as the cat, and held to it the same way: a mismatch would show as a
+    /// rectangle in the corner of the menu.
+    #[test]
+    fn the_tray_bunny_matches_the_card_surface() {
+        const SURFACE: [u8; 3] = [0x1e, 0x16, 0x29];
+        assert!(
+            THEME.contains("--color-surface: #1e1629;"),
+            "the card surface changed colour: remake tray-bunny.jpg on the new value,              then change SURFACE here"
+        );
+
+        let mut decoder = jpeg_decoder::Decoder::new(TRAY_BUNNY);
+        let pixels = decoder.decode().expect("tray-bunny.jpg decodes");
+        let info = decoder.info().expect("decoded, so described");
+        assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+        let (width, height) = (usize::from(info.width), usize::from(info.height));
+        let at = |x: usize, y: usize| &pixels[(y * width + x) * 3..(y * width + x) * 3 + 3];
+        let edges = (0..height)
+            .flat_map(|y| [at(0, y), at(width - 1, y)])
+            .chain((0..width).flat_map(|x| [at(x, 0), at(x, height - 1)]));
+        for pixel in edges {
+            for (got, want) in pixel.iter().zip(SURFACE) {
+                assert!(
+                    got.abs_diff(want) <= 3,
+                    "edge pixel {pixel:?} is not the card's {SURFACE:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            APP_CSS.matches(TRAY_BUNNY_URL).count(),
+            1,
+            "app.css names the bunny once"
+        );
+        assert!(
+            !STYLES.contains(TRAY_BUNNY_URL),
+            "the bunny was not inlined"
+        );
+        assert!(
+            SOURCE.contains("class: \"tray-card\""),
+            "the menu lost its card"
+        );
+    }
+
     /// build.rs has to get bliss.rc into the executable; without it the window
     /// quietly falls back to the Dioxus logo and Explorer to the generic
     /// application icon. `LoadImageW` resizes whatever frame it finds, so this
@@ -4302,8 +4735,8 @@ fn Settings(frame: Frame) -> Element {
                     CheckRow {
                         checked: on && minimized,
                         enabled: on,
-                        title: "Свёрнутым",
-                        hint: "Окно не появится: bliss будет ждать на панели задач.",
+                        title: "В трее",
+                        hint: "Окно не появится: bliss будет ждать значком у часов.",
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::Startup { on: true, minimized: !minimized })
