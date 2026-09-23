@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bliss_core::{EngineInfo, Inbound, Router, Serving, SocksOutbound, Tracker};
-use bliss_proto::{Action, Flow, Profile, ProxyMode, Rule, Security, ServerConfig, Usage};
+use bliss_proto::{
+    Action, Flow, Profile, Protocol, ProxyMode, Rule, Security, ServerConfig, TcpHeader, Transport,
+    Usage,
+};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -62,6 +65,9 @@ pub enum Ping {
     Ok(u32),
     /// Refused, or nothing inside the timeout.
     Down,
+    /// Reached over UDP — Hysteria 2, WireGuard, mKCP — where a TCP handshake
+    /// measures nothing: such a server would read as down when it is not.
+    Udp,
 }
 
 /// One row of the server list.
@@ -69,8 +75,10 @@ pub enum Ping {
 pub struct ServerRow {
     pub tag: String,
     pub addr: String,
-    /// How it hides: `reality · vision`, `tls`, `plain`.
+    /// What it is, briefly: `VLESS · REALITY`, `Trojan · TLS`, `WireGuard`.
     pub kind: String,
+    /// And in full, for the pointer: `VLESS · xhttp · reality · vision`.
+    pub detail: String,
     pub ping: Ping,
     /// True for the one the engine is set to use.
     pub current: bool,
@@ -173,6 +181,27 @@ pub struct Frame {
     pub toast: Option<Toast>,
     /// Whether Windows starts bliss at sign-in; the settings screen's first card.
     pub startup: crate::startup::Startup,
+    /// The TUN adapter: asked for, allowed, and whether it is carrying.
+    pub tun: TunView,
+}
+
+/// What the settings screen says about carrying the machine's traffic.
+///
+/// Three separate facts, because they come apart: the profile can ask for the
+/// adapter, the copy of bliss reading it can be unable to create one, and a
+/// created one can still have failed. The screen shows a different line for
+/// each, and a switch that silently did nothing would be the worst of the
+/// three.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TunView {
+    /// What the profile asks for.
+    pub on: bool,
+    /// Whether this copy has the rights to create an adapter.
+    pub elevated: bool,
+    /// Whether one is up and carrying traffic right now.
+    pub carrying: bool,
+    /// Why it is not, when it is asked for and is not carrying.
+    pub problem: Option<String>,
 }
 
 /// One subscription, as its screen shows it.
@@ -323,6 +352,36 @@ pub enum Command {
     /// Read the startup entry again: Task Manager, or another copy of bliss,
     /// may have changed it since.
     ReadStartup,
+    /// Carry the machine's whole traffic through a TUN adapter, or stop.
+    ///
+    /// Remembered in the profile, and applied to a tunnel that is already up
+    /// without restarting it: the adapter is another way in, and the
+    /// connections going through the two ports have no reason to be dropped
+    /// for it.
+    Tun(bool),
+    /// An adapter finished coming up. Only the engine sends this, to itself.
+    TunUp(Box<TunRaised>),
+}
+
+/// An adapter on its way back into the loop, and the tunnel it was built for.
+pub struct TunRaised {
+    /// A restart between the click and the adapter coming up leaves this
+    /// pointing at a `Serving` nobody serves any more; an adapter carrying
+    /// traffic into one would be a hole with no bottom, so it is compared
+    /// before the adapter is kept.
+    serving: Arc<Serving>,
+    result: Result<bliss_tun::Tun, String>,
+}
+
+/// `Command` is `Debug` because a refused link must not be printable; an
+/// adapter has nothing to say here beyond whether it arrived.
+impl std::fmt::Debug for TunRaised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.result {
+            Ok(_) => f.write_str("TunRaised(up)"),
+            Err(e) => write!(f, "TunRaised({e})"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -367,6 +426,10 @@ pub struct Setup {
     pub profile_path: PathBuf,
     pub engine_log: bliss_xray::LogLevel,
     pub autostart: bool,
+    /// Carry the machine's traffic through a TUN adapter as well as the two
+    /// local ports. Needs administrator rights, so it is asked for on the
+    /// command line while it is being proved out.
+    pub tun: bool,
     /// Why the profile on disk could not be used, for the window to say.
     pub problem: Option<String>,
 }
@@ -448,6 +511,12 @@ fn initial_frame(setup: &Setup) -> Frame {
         proxy_mode: setup.profile.inbound.system_proxy,
         servers: server_rows(&setup.profile, &setup.servers, setup.selected),
         subscriptions: subscription_rows(&setup.profile, &HashSet::new(), &HashMap::new()),
+        tun: TunView {
+            on: setup.tun,
+            elevated: bliss_tun::elevated(),
+            carrying: false,
+            problem: None,
+        },
         ..Frame::default()
     };
     if let Some(server) = setup.server(setup.selected) {
@@ -481,7 +550,8 @@ fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> 
             ServerRow {
                 tag: server.tag.clone(),
                 addr: format!("{}:{}", server.address, server.port),
-                kind: how_it_hides(server),
+                kind: kind(server),
+                detail: how_it_hides(server),
                 ping: Ping::Unknown,
                 current: i == selected,
                 group_id: group.as_ref().map(|(id, _)| id.clone()),
@@ -542,21 +612,54 @@ fn describe_selection(frame: &mut Frame, server: &ServerConfig) {
     frame.flow = how_it_hides(server);
     frame.fingerprint = match &server.security {
         Security::Reality(r) => r.fingerprint.to_string(),
+        // Hysteria's QUIC does its own handshake and parrots no browser.
+        Security::Tls(_) if matches!(server.transport, Transport::Hysteria { .. }) => {
+            "-".to_owned()
+        }
         Security::Tls(tls) => tls.fingerprint.to_string(),
         Security::None => "-".to_owned(),
     };
 }
 
-fn how_it_hides(server: &ServerConfig) -> String {
-    let security = match &server.security {
-        Security::Reality(_) => "reality",
-        Security::Tls(_) => "tls",
-        Security::None => "plain",
-    };
-    match server.flow {
-        Flow::XtlsRprxVision => format!("{security} · vision"),
-        Flow::None => security.to_owned(),
+/// What a server is, in the fewest words the list has room for: the protocol,
+/// and what hides it. Hysteria 2 is TLS by nature, so it is not said.
+fn kind(server: &ServerConfig) -> String {
+    let name = server.protocol.name();
+    match (&server.security, &server.transport) {
+        (Security::None, _) | (_, Transport::Hysteria { .. }) => name.to_owned(),
+        (Security::Tls(_), _) => format!("{name} · TLS"),
+        (Security::Reality(_), _) => format!("{name} · REALITY"),
     }
+}
+
+/// The same in full: the transport when it is not plain TCP, and Vision.
+fn how_it_hides(server: &ServerConfig) -> String {
+    let mut parts = vec![server.protocol.name()];
+    match &server.transport {
+        Transport::Tcp {
+            header: TcpHeader::None,
+        }
+        | Transport::None => {}
+        Transport::Tcp {
+            header: TcpHeader::Http { .. },
+        } => parts.push("tcp-http"),
+        Transport::Hysteria { obfs, .. } => {
+            if obfs.is_some() {
+                parts.push("salamander");
+            }
+        }
+        other => parts.push(other.name()),
+    }
+    match (&server.security, &server.transport) {
+        (Security::None, _) | (_, Transport::Hysteria { .. }) => {}
+        (security, _) => parts.push(security.name()),
+    }
+    if let Protocol::Vless { flow, .. } = &server.protocol
+        && *flow != Flow::None
+    {
+        parts.push("vision");
+    }
+    parts.join(" · ")
 }
 
 /// The engine's whole life: start, publish, obey, stop.
@@ -616,14 +719,19 @@ async fn drive(
     // stop and can be asked questions while the tunnel is down — which is when
     // someone is most likely to be editing rules.
     let mut rules = Rules::from_setup(&setup);
-    publish_routing(&frames, &rules);
+    publish_routing(&frames, &rules, setup.tun);
 
     // One sweep at the start, so the list arrives with numbers in it rather
     // than with a column of dashes waiting for someone to discover the button.
     ping_all(&setup.servers, &frames, &probes);
 
     if setup.autostart {
-        running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+        running = start(
+            &setup,
+            selected,
+            wiring(&tracker, &rules.router, &frames, &own),
+        )
+        .await;
     }
     apply_proxy(proxy, &setup, running.is_some(), &frames);
 
@@ -634,7 +742,7 @@ async fn drive(
                 match command {
                     Command::Start => {
                         if running.is_none() {
-                            running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                            running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
@@ -651,7 +759,7 @@ async fn drive(
                             stop_now(&mut running, &frames).await;
                             apply_proxy(proxy, &setup, false, &frames);
                         } else if running.is_none() {
-                            running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                            running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
@@ -659,7 +767,7 @@ async fn drive(
                         if let Some(parts) = running.take() {
                             parts.stop().await;
                         }
-                        running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                        running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
                         apply_proxy(proxy, &setup, running.is_some(), &frames);
                     }
                     // Switching server means rebuilding the engine: its config
@@ -696,7 +804,7 @@ async fn drive(
                                 }
                             });
                             if resume {
-                                running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
                             }
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
@@ -839,7 +947,7 @@ async fn drive(
                             if from_form || text.0.contains("://") {
                                 why
                             } else {
-                                "в буфере обмена нет ссылки vless:// или адреса подписки".to_owned()
+                                "в буфере обмена нет ссылки на сервер или адреса подписки".to_owned()
                             }
                         });
                         if from_form {
@@ -855,7 +963,7 @@ async fn drive(
                             // The first server is what the window was waiting
                             // for. Connect, as opening it with one already would.
                             if first && setup.autostart && running.is_none() {
-                                running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
                                 apply_proxy(proxy, &setup, running.is_some(), &frames);
                             }
                         }
@@ -904,7 +1012,7 @@ async fn drive(
                                     false,
                                 );
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &frames, &own), proxy)
                                         .await;
                                 }
                             }
@@ -951,7 +1059,7 @@ async fn drive(
                                 // The rows came back without their numbers.
                                 ping_all(&setup.servers, &frames, &probes);
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &frames, &own), proxy)
                                         .await;
                                 }
                             }
@@ -994,10 +1102,10 @@ async fn drive(
                                 // The rows came back without their numbers.
                                 ping_all(&setup.servers, &frames, &probes);
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, &tracker, &rules.router, &frames, proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &frames, &own), proxy)
                                         .await;
                                 } else if first && setup.autostart && running.is_none() && !setup.servers.is_empty() {
-                                    running = start(&setup, selected, &tracker, &rules.router, &frames).await;
+                                    running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
                                     apply_proxy(proxy, &setup, running.is_some(), &frames);
                                 }
                             }
@@ -1048,7 +1156,96 @@ async fn drive(
                         }
                         publish_startup(&frames, &startup_keys, exe.as_deref().ok());
                     }
+                    Command::TunUp(raised) => {
+                        let TunRaised { serving, result } = *raised;
+                        // The tunnel it was built for, and the one running now,
+                        // have to be the same one: a restart in between leaves
+                        // an adapter pointed at a `Serving` nobody serves.
+                        let mine = running
+                            .as_ref()
+                            .is_some_and(|parts| Arc::ptr_eq(&parts.serving, &serving));
+                        if let Some(parts) = running.as_mut().filter(|_| mine) {
+                            parts.tun_rising = false;
+                        }
+                        match result {
+                            Ok(tun) if mine && setup.tun => {
+                                if let Some(parts) = running.as_mut() {
+                                    parts.tun = Some(tun);
+                                }
+                                tracing::info!("tun: carrying the machine's traffic");
+                                publish_tun(&frames, true, true, None);
+                            }
+                            // It arrived after the switch went back, or after a
+                            // restart. Dropped, which removes the adapter and
+                            // its routes — off the loop, like every other
+                            // driver call.
+                            Ok(tun) => {
+                                let _ = tokio::task::spawn_blocking(move || drop(tun)).await;
+                                publish_tun(&frames, setup.tun, false, None);
+                            }
+                            Err(e) => {
+                                tracing::error!("tun: {e}");
+                                publish_tun(&frames, setup.tun, false, Some(e.clone()));
+                                toaster.show(&frames, format!("TUN не поднялся: {e}"), true);
+                            }
+                        }
+                    }
                     Command::ReadStartup => publish_startup(&frames, &startup_keys, exe.as_deref().ok()),
+                    Command::Tun(on) => {
+                        if setup.profile.tun.enabled != on {
+                            let mut next = setup.profile.clone();
+                            next.tun.enabled = on;
+                            match save_profile(&mut store, &next) {
+                                Ok(()) => {
+                                    setup.profile = next;
+                                    forget_problem(&mut setup, &frames);
+                                }
+                                Err(e) => {
+                                    toaster.show(&frames, format!("выбор не сохранился: {e}"), true);
+                                }
+                            }
+                        }
+                        setup.tun = on;
+                        match (running.as_mut(), setup.server(selected)) {
+                            (Some(parts), Some(server)) if on => {
+                                if parts.tun.is_none() && !parts.tun_rising {
+                                    let serving = Arc::clone(&parts.serving);
+                                    parts.tun_rising =
+                                        begin_tun(&setup, server, &serving, &own, &frames);
+                                }
+                            }
+                            (Some(parts), _) => {
+                                if let Some(tun) = parts.tun.take() {
+                                    // Off the loop, as raising it is: taking an
+                                    // adapter away is driver work too.
+                                    let _ = tokio::task::spawn_blocking(move || drop(tun)).await;
+                                    tracing::info!(
+                                        "tun: the adapter is down; the machine's own routes are back"
+                                    );
+                                }
+                                // `setup.tun`, not `false`: this arm also
+                                // catches "asked for, but there is no server
+                                // to carry it", and the switch must go on
+                                // saying what the profile asks for.
+                                publish_tun(&frames, setup.tun, false, None);
+                            }
+                            // Nothing to apply it to yet: the next start reads
+                            // the same flag and brings the adapter up with it.
+                            _ => publish_tun(&frames, on, false, None),
+                        }
+                        // The one refusal that is known at the moment of the
+                        // click says so at the moment of the click. Everything
+                        // else is answered when the adapter reports back.
+                        if on && !bliss_tun::elevated() {
+                            // The window runs elevated as well as not (rule 25),
+                            // so the answer is the plain one. The choice is
+                            // saved: an elevated start raises the adapter.
+                            let note = "TUN не поднялся: адаптеру нужны права администратора. \
+                                        Выбор сохранён — перезапустите bliss от имени \
+                                        администратора, и он включится сам";
+                            toaster.show(&frames, note.to_owned(), true);
+                        }
+                    }
                 }
             }
             _ = ticker.tick() => {
@@ -1137,6 +1334,13 @@ fn apply_proxy(mode: ProxyMode, setup: &Setup, serving: bool, frames: &watch::Se
 struct Running {
     xray: bliss_xray::Xray,
     inbounds: Vec<JoinHandle<()>>,
+    /// The adapter, while there is one. Dropping it takes the routes away and
+    /// removes the adapter, which is the whole of putting the machine back.
+    tun: Option<bliss_tun::Tun>,
+    /// One is on its way up. Without this a second click while the driver is
+    /// still installing starts a second adapter, and the first one is orphaned
+    /// the moment the second arrives.
+    tun_rising: bool,
     since: Instant,
     /// What the inbounds share: the dialer, which the latency probe uses too,
     /// and the rule table a routing change swaps under live traffic.
@@ -1150,6 +1354,14 @@ impl Running {
     async fn stop(self) {
         for task in self.inbounds {
             task.abort();
+        }
+        // Explicitly, and before the engine: while the adapter is up the
+        // machine keeps handing it traffic, and the engine is what carries
+        // that traffic anywhere. Dropping it takes the routes away and the
+        // adapter with them — driver calls, so off this thread, as raising it
+        // is.
+        if let Some(tun) = self.tun {
+            let _ = tokio::task::spawn_blocking(move || drop(tun)).await;
         }
         let _ = self.xray.shutdown().await;
     }
@@ -1195,7 +1407,16 @@ impl Rules {
         Self::compile(setup.profile.routing.clone(), &setup.work_dir)
     }
 
-    fn view(&self) -> RoutingView {
+    /// The table as the screen shows it, told whether the adapter is carrying.
+    ///
+    /// The warning depends on both: the rules come from the profile and the
+    /// adapter comes and goes under them, so it cannot live in `Router`, which
+    /// is compiled once and knows nothing about how traffic arrives.
+    fn view(&self, tun: bool) -> RoutingView {
+        let mut warnings = self.router.warnings.clone();
+        if tun && let Some(note) = blind_under_tun(&self.config.rules) {
+            warnings.push(note);
+        }
         RoutingView {
             fallback: self.config.fallback,
             rules: self
@@ -1211,9 +1432,52 @@ impl Rules {
                 })
                 .collect(),
             source: self.config.rules.clone(),
-            warnings: self.router.warnings.clone(),
+            warnings,
         }
     }
+}
+
+/// Which rules a TUN adapter cannot decide, said the way the other warnings
+/// are said.
+///
+/// A packet holds an address; the name the program looked up is gone by then.
+/// So a rule made of domains and geosite sets alone never matches anything
+/// that arrives through the adapter — while it goes on matching everything
+/// that arrives at the SOCKS and HTTP ports, which is why the note says both.
+/// A rule that also has an address, a port or a program is left out: half of
+/// it still decides, and naming it would bury the ones that decide nothing.
+fn blind_under_tun(rules: &[Rule]) -> Option<String> {
+    let blind: Vec<String> = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| {
+            !(rule.domain.is_empty() && rule.geosite.is_empty())
+                && rule.ip.is_empty()
+                && rule.geoip.is_empty()
+                && rule.port.is_empty()
+                && rule.process.is_empty()
+        })
+        .map(|(i, _)| format!("#{}", i + 1))
+        .collect();
+    if blind.is_empty() {
+        return None;
+    }
+    let (many, list) = (blind.len() > 1, blind.join(", "));
+    let head = if many {
+        format!("правила {list} не сработают")
+    } else {
+        format!("правило {list} не сработает")
+    };
+    let tail = if many {
+        "они работают"
+    } else {
+        "оно работает"
+    };
+    Some(format!(
+        "Включён режим TUN: в пакете виден только адрес, а не имя сайта, поэтому {head} \
+         для трафика через адаптер. Для программ, которые ходят через порты SOCKS и HTTP, \
+         {tail} как раньше."
+    ))
 }
 
 /// Save a changed profile, saying so in the log.
@@ -1268,7 +1532,7 @@ fn commit_routing(
     setup.profile = next;
     forget_problem(setup, frames);
     *rules = Rules::compile(setup.profile.routing.clone(), &setup.work_dir);
-    publish_routing(frames, rules);
+    publish_routing(frames, rules, setup.tun);
     if let Some(parts) = running {
         parts.serving.set_router(Arc::clone(&rules.router));
     }
@@ -1317,11 +1581,10 @@ async fn follow_selection(
     running: &mut Option<Running>,
     setup: &Setup,
     selected: usize,
-    tracker: &Arc<Tracker>,
-    router: &Arc<Router>,
-    frames: &watch::Sender<Frame>,
+    wiring: Wiring<'_>,
     proxy: ProxyMode,
 ) {
+    let frames = wiring.frames;
     let Some(parts) = running.take() else {
         return;
     };
@@ -1329,7 +1592,7 @@ async fn follow_selection(
     if setup.servers.is_empty() {
         stop_now(running, frames).await;
     } else {
-        *running = start(setup, selected, tracker, router, frames).await;
+        *running = start(setup, selected, wiring).await;
     }
     apply_proxy(proxy, setup, running.is_some(), frames);
 }
@@ -1471,8 +1734,8 @@ fn describe_conditions(rule: &bliss_proto::Rule) -> Vec<String> {
     out
 }
 
-fn publish_routing(frames: &watch::Sender<Frame>, rules: &Rules) {
-    let view = rules.view();
+fn publish_routing(frames: &watch::Sender<Frame>, rules: &Rules, tun: bool) {
+    let view = rules.view(tun);
     frames.send_modify(|f| f.routing = view);
 }
 
@@ -1559,13 +1822,45 @@ async fn stop_now(running: &mut Option<Running>, frames: &watch::Sender<Frame>) 
     });
 }
 
-async fn start(
-    setup: &Setup,
-    selected: usize,
-    tracker: &Arc<Tracker>,
-    router: &Arc<Router>,
-    frames: &watch::Sender<Frame>,
-) -> Option<Running> {
+/// What a start needs besides the profile, and what it reports to.
+///
+/// One argument because these four travel together everywhere and none of
+/// them tells the others apart by type: two `Arc`s, a sender and a sender.
+/// The same reason `Serving` exists on the other side of the seam.
+#[derive(Clone, Copy)]
+struct Wiring<'a> {
+    /// Where every connection is recorded.
+    tracker: &'a Arc<Tracker>,
+    /// Which rules decide them, as compiled right now.
+    router: &'a Arc<Router>,
+    /// What the window reads.
+    frames: &'a watch::Sender<Frame>,
+    /// The loop's own address, for work that finishes elsewhere — a
+    /// subscription fetched, an adapter raised — to come back through.
+    own: &'a mpsc::WeakUnboundedSender<Command>,
+}
+
+fn wiring<'a>(
+    tracker: &'a Arc<Tracker>,
+    router: &'a Arc<Router>,
+    frames: &'a watch::Sender<Frame>,
+    own: &'a mpsc::WeakUnboundedSender<Command>,
+) -> Wiring<'a> {
+    Wiring {
+        tracker,
+        router,
+        frames,
+        own,
+    }
+}
+
+async fn start(setup: &Setup, selected: usize, wiring: Wiring<'_>) -> Option<Running> {
+    let Wiring {
+        tracker,
+        router,
+        frames,
+        own,
+    } = wiring;
     // Nothing to start before a server is added. The window offers to add one,
     // which says more than a failure would.
     let server = setup.server(selected)?;
@@ -1584,14 +1879,24 @@ async fn start(
         Ok(exe) => exe,
         Err(e) => return fail(frames, &e),
     };
-    let needs = bliss_xray::minimum_xray_version(server).map(|(major, _)| major);
+    let needs = bliss_xray::minimum_xray_version(server);
     let version = match bliss_xray::check_version(&exe, needs).await {
         Ok(v) => v,
         Err(e) => return fail(frames, &e.to_string()),
     };
+    if let bliss_proto::Security::Tls(tls) = &server.security
+        && tls.allow_insecure
+        && tls.pinned.is_empty()
+    {
+        tracing::warn!(
+            "{}: the link asks not to check the server's certificate, which xray no longer \
+             allows; without a pinned certificate (pcs) a self-signed server will be refused",
+            server.tag
+        );
+    }
 
     let port = setup.profile.engine.bridge_port;
-    let config = bliss_xray::build(server, port, setup.engine_log);
+    let config = bliss_xray::build(server, port, setup.engine_log, version);
     let xray = match bliss_xray::Xray::spawn(&exe, &config, &setup.work_dir, port).await {
         Ok(x) => x,
         Err(e) => return fail(frames, &e.to_string()),
@@ -1601,7 +1906,7 @@ async fn start(
         xray.socks_addr(),
         EngineInfo {
             kind: "xray-core",
-            version: version.clone(),
+            version: version.to_string(),
             external: true,
         },
     )) as Arc<dyn bliss_core::Outbound>;
@@ -1624,10 +1929,21 @@ async fn start(
             Ok(listener) => bound.push(listener),
             Err(e) => {
                 let _ = xray.shutdown().await;
+                // Name the program holding it. This is the most common way a
+                // start fails — another client of the same family uses the same
+                // two ports — and "занят другой программой" sent the user
+                // looking at bliss itself for an evening, while v2rayN sat on
+                // 10808. The table that answers this is the one the connections
+                // screen already uses.
                 let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
-                    format!(
-                        "порт {addr} уже занят другой программой — другим клиентом или прошлой копией bliss"
-                    )
+                    match bliss_core::name_for_port(addr.port()) {
+                        Some(who) => format!(
+                            "порт {addr} занят программой {who} — закройте её или задайте bliss другие порты в профиле"
+                        ),
+                        None => format!(
+                            "порт {addr} уже занят другой программой — другим клиентом или прошлой копией bliss"
+                        ),
+                    }
                 } else {
                     format!("не удалось занять {addr}: {e}")
                 };
@@ -1652,6 +1968,12 @@ async fn start(
         }));
     }
 
+    // After the inbounds, because the adapter starts carrying traffic the
+    // moment its routes go in, and it carries it into `serving`. Not waited
+    // for: the tunnel is up either way, and the adapter joins it when it is
+    // ready.
+    let tun_rising = begin_tun(setup, server, &serving, own, frames);
+
     frames.send_modify(|f| {
         f.state = State::Running;
         f.engine = format!("xray-core {version}");
@@ -1662,11 +1984,146 @@ async fn start(
     Some(Running {
         xray,
         inbounds,
+        tun: None,
+        tun_rising,
         since: Instant::now(),
         serving,
         bridge,
     })
 }
+
+/// Bring the adapter up when the profile asks for one, and put what happened
+/// in the frame either way.
+///
+/// It never fails the tunnel. The two ports carry traffic perfectly well
+/// without an adapter, and a bliss that refused to start because it could not
+/// create one would take away more than it explains — especially at sign-in,
+/// where the Run key starts it without administrator rights and there is no
+/// way for it to ask for them.
+fn begin_tun(
+    setup: &Setup,
+    server: &ServerConfig,
+    serving: &Arc<Serving>,
+    own: &mpsc::WeakUnboundedSender<Command>,
+    frames: &watch::Sender<Frame>,
+) -> bool {
+    if !setup.tun {
+        publish_tun(frames, false, false, None);
+        return false;
+    }
+    if !bliss_tun::elevated() {
+        tracing::warn!("tun: asked for, but this bliss has no administrator rights");
+        publish_tun(frames, true, false, None);
+        return false;
+    }
+    // Asked for, not there yet: the switch shows this as its own state rather
+    // than pretending either of the other two.
+    publish_tun(frames, true, false, None);
+    raise_tun(setup, server, serving, own);
+    true
+}
+
+/// What the settings screen shows about the adapter.
+///
+/// Whether the rights are there is asked at every publish rather than once at
+/// startup: it cannot change inside one process, but reading it here keeps the
+/// three facts in one place and costs a token query.
+fn publish_tun(frames: &watch::Sender<Frame>, on: bool, carrying: bool, problem: Option<String>) {
+    let elevated = bliss_tun::elevated();
+    frames.send_modify(|f| {
+        f.tun = TunView {
+            on,
+            elevated,
+            carrying,
+            problem,
+        };
+    });
+}
+
+/// Start bringing the adapter up; the answer comes back through the loop.
+///
+/// The same path a finished subscription takes, and for the same reason: this
+/// takes seconds — the first adapter on a machine installs a driver — and
+/// every click the window makes in the meantime would otherwise wait behind
+/// it. The engine loop answering nothing is a program that has hung, which is
+/// exactly how this was found.
+///
+/// The server's name is resolved on this machine, which is the one other place
+/// bliss does that, alongside the latency probe. It has to be: the route that
+/// keeps the tunnel's own traffic out of the tunnel names an address, and the
+/// engine will be dialling whatever that name resolves to.
+fn raise_tun(
+    setup: &Setup,
+    server: &ServerConfig,
+    serving: &Arc<Serving>,
+    own: &mpsc::WeakUnboundedSender<Command>,
+) {
+    let host = server.address.to_string();
+    let port = server.port;
+    let work_dir = setup.work_dir.clone();
+    let serving = Arc::clone(serving);
+    let own = own.clone();
+
+    tokio::spawn(async move {
+        let result = match around_the_tunnel(&host, port).await {
+            Ok(around) => {
+                let dir = work_dir;
+                let carrying = Arc::clone(&serving);
+                // Creating the adapter is blocking work, so it goes to a
+                // thread that is allowed to block.
+                let raising = tokio::task::spawn_blocking(move || {
+                    bliss_tun::Tun::up(&dir, carrying, &around)
+                });
+                match tokio::time::timeout(TUN_TIMEOUT, raising).await {
+                    Ok(Ok(Ok(tun))) => Ok(tun),
+                    Ok(Ok(Err(e))) => Err(format!("не удалось поднять адаптер: {e}")),
+                    Ok(Err(e)) => Err(format!("поток адаптера не дожил до конца: {e}")),
+                    // A blocking call cannot be cancelled: it runs to its own
+                    // end on its own thread, and whatever it built is dropped
+                    // there — the adapter with it, since that is all `Tun` is.
+                    Err(_) => Err(format!(
+                        "адаптер не поднялся за {} с",
+                        TUN_TIMEOUT.as_secs()
+                    )),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        if let Some(own) = own.upgrade() {
+            let _ = own.send(Command::TunUp(Box::new(TunRaised { serving, result })));
+        }
+    });
+}
+
+/// Every address of the server, for the route that keeps the tunnel's own
+/// traffic outside it.
+async fn around_the_tunnel(host: &str, port: u16) -> Result<Vec<std::net::Ipv4Addr>, String> {
+    let found = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("не удалось узнать адрес сервера {host}: {e}"))?;
+    let around: Vec<std::net::Ipv4Addr> = found
+        .filter_map(|addr| match addr {
+            SocketAddr::V4(v4) => Some(*v4.ip()),
+            // A server reached over IPv6 would need a route of its own, and
+            // IPv6 is not carried yet either way.
+            SocketAddr::V6(_) => None,
+        })
+        .collect();
+    if around.is_empty() {
+        return Err(format!(
+            "у сервера {host} нет адреса IPv4, а TUN пока несёт только IPv4"
+        ));
+    }
+    Ok(around)
+}
+
+/// How long the adapter gets before bliss stops waiting for it.
+///
+/// Half a minute, because the first adapter on a machine installs a driver.
+/// Nothing else waits on this — the loop went back to work the moment it was
+/// asked for — so the only thing the timeout buys is a line that says what
+/// happened instead of a switch that stays violet forever.
+const TUN_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn fail(frames: &watch::Sender<Frame>, message: &str) -> Option<Running> {
     // Also to the log: the window shows this, but a window nobody is looking at
@@ -1738,12 +2195,17 @@ fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>, sweep: &Arc
     let targets: Vec<(usize, String, u16)> = servers
         .iter()
         .enumerate()
+        .filter(|(_, s)| !s.over_udp())
         .map(|(i, s)| (i, s.address.to_string(), s.port))
         .collect();
 
     frames.send_modify(|f| {
-        for row in f.servers.iter_mut() {
-            row.ping = Ping::Probing;
+        for (row, server) in f.servers.iter_mut().zip(servers) {
+            row.ping = if server.over_udp() {
+                Ping::Udp
+            } else {
+                Ping::Probing
+            };
         }
     });
 
@@ -1915,6 +2377,11 @@ fn publish(
         f.down_rate = down_rate;
         f.connections = connections;
         f.uptime = running.map(|r| hms(r.since.elapsed())).unwrap_or_default();
+        // The adapter goes down with the tunnel, and the tunnel goes down from
+        // half a dozen places — a failed engine among them, which is nobody's
+        // click. Read from what is actually held rather than set at each of
+        // those places, so the screen cannot say "carrying" over nothing.
+        f.tun.carrying = running.is_some_and(|r| r.tun.is_some());
 
         // A fixed-length ring: the chart shows the recent past and the vector
         // never grows, which is the rule for anything that ticks forever.
@@ -2026,6 +2493,41 @@ async fn measure_latency(outbound: &dyn bliss_core::Outbound) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// The list's column is 136px: the short form has to fit it, and the full
+    /// one, under the pointer and on the status card, says the rest.
+    #[test]
+    fn a_server_is_named_briefly_and_in_full() {
+        let server = |link: &str| link.parse::<ServerConfig>().expect("the link parses");
+        let reality = server(
+            "vless://11111111-2222-3333-4444-555555555555@a.example:443?type=xhttp\
+             &security=reality&sni=b.example&pbk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBQ\
+             &flow=xtls-rprx-vision",
+        );
+        assert_eq!(kind(&reality), "VLESS · REALITY");
+        assert_eq!(how_it_hides(&reality), "VLESS · xhttp · reality · vision");
+
+        let trojan = server("trojan://PPPP@a.example:443");
+        assert_eq!(kind(&trojan), "Trojan · TLS");
+        assert_eq!(how_it_hides(&trojan), "Trojan · tls");
+
+        // TLS is Hysteria's nature, not a choice worth a word.
+        let hysteria = server("hy2://PPPP@a.example/?obfs=salamander&obfs-password=OOOO");
+        assert_eq!(kind(&hysteria), "Hysteria2");
+        assert_eq!(how_it_hides(&hysteria), "Hysteria2 · salamander");
+
+        let plain = server("vless://11111111-2222-3333-4444-555555555555@a.example:443");
+        assert_eq!(
+            (kind(&plain), how_it_hides(&plain)),
+            ("VLESS".to_owned(), "VLESS".to_owned())
+        );
+        for name in [&reality, &trojan, &hysteria, &plain].map(kind) {
+            assert!(
+                name.chars().count() <= 16,
+                "{name} is too long for its column"
+            );
+        }
+    }
+
     /// This calculation was wrong twice, in opposite directions, and both times
     /// the symptom was a chart that would not hold still. The property that
     /// matters is not the exact number: it is that a given sample keeps the
@@ -2108,6 +2610,7 @@ mod tests {
             profile_path: dir.join("bliss.toml"),
             engine_log: bliss_xray::LogLevel::Warning,
             autostart: true,
+            tun: false,
             problem: Some("профиль не читается".to_owned()),
         };
         assert!(setup.server(setup.selected).is_none());
@@ -2138,6 +2641,65 @@ mod tests {
             !shown.contains("11111111") && !shown.contains("a.example"),
             "{shown}"
         );
+    }
+
+    /// A rule made of names alone decides nothing that comes through the
+    /// adapter, because a packet holds an address. The user was told this once
+    /// already about `geoip:ru` from the other side, and found it by watching
+    /// traffic go the wrong way for days; the same mistake in the other
+    /// direction gets said out loud rather than discovered.
+    #[test]
+    fn rules_of_names_alone_are_named_under_tun() {
+        let rule = |name: &str, domain: Vec<&str>, ip: Vec<&str>| Rule {
+            name: Some(name.to_owned()),
+            action: Action::Proxy,
+            domain: domain.into_iter().map(str::to_owned).collect(),
+            ip: ip.into_iter().map(str::to_owned).collect(),
+            port: Vec::new(),
+            process: Vec::new(),
+            geosite: Vec::new(),
+            geoip: Vec::new(),
+        };
+        let names = rule("сайты", vec!["a.example"], vec![]);
+        let both = rule("и то и то", vec!["b.example"], vec!["203.0.113.0/24"]);
+        let addresses = rule("адреса", vec![], vec!["203.0.113.7"]);
+
+        let note = blind_under_tun(std::slice::from_ref(&names)).expect("a rule of names is named");
+        assert!(note.contains("правило #1"), "{note}");
+        assert!(note.contains("не сработает"), "{note}");
+
+        // Half of this one still decides, so naming it would bury the ones
+        // that decide nothing at all.
+        assert_eq!(blind_under_tun(&[both.clone(), addresses.clone()]), None);
+
+        let two = blind_under_tun(&[names.clone(), addresses, names])
+            .expect("two of them are named together");
+        assert!(two.contains("правила #1, #3"), "{two}");
+        assert!(two.contains("не сработают"), "{two}");
+        assert_eq!(blind_under_tun(&[]), None, "nothing to warn about");
+    }
+
+    /// And the note is there only while the adapter is: the same rules are
+    /// perfectly good for everything arriving at the two ports.
+    #[test]
+    fn the_note_about_names_comes_and_goes_with_the_adapter() {
+        let routing = bliss_proto::Routing {
+            fallback: Action::Proxy,
+            geo_dir: None,
+            rules: vec![Rule {
+                name: Some("сайты".to_owned()),
+                action: Action::Proxy,
+                domain: vec!["a.example".to_owned()],
+                ip: Vec::new(),
+                port: Vec::new(),
+                process: Vec::new(),
+                geosite: Vec::new(),
+                geoip: Vec::new(),
+            }],
+        };
+        let rules = Rules::compile(routing, std::path::Path::new("nonexistent"));
+        assert!(rules.view(false).warnings.is_empty());
+        assert_eq!(rules.view(true).warnings.len(), 1);
     }
 
     #[test]

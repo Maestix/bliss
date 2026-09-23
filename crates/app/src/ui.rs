@@ -101,6 +101,23 @@ const SOURCE: &str = include_str!("ui.rs");
 /// `min-width:0` so a line that must not wrap clips inside the screen instead
 /// of stretching it past the window's edge.
 const SCREEN: &str = "flex:1;min-height:0;min-width:0;display:flex;flex-direction:column";
+
+/// How wide a digit's box is, in ems, for a number that changes while someone
+/// is looking at it. `.figure` in app.css is the box; this is its width.
+///
+/// Comfortaa has no tabular figures. Every `font-variant-numeric:tabular-nums`
+/// in this file has therefore never done anything: the property asks for a
+/// `tnum` feature the file does not carry, and the font's digits run from 378
+/// to 647 units of 1000 — a spread of 0.269em. At 14px the clock on the status
+/// card moved the rest of its line by up to twenty pixels a second, which the
+/// user reported as text hopping about. A digit centred in a box of the widest
+/// digit's width *is* a tabular figure, so that is what `Ticking` draws.
+///
+/// The width itself lives in `.figure` in app.css, where a box belongs; this
+/// is the measurement it has to keep up with, and a test holds the two
+/// together.
+#[cfg(test)]
+const FIGURE_EM: &str = "0.65";
 /// Soft pink, `--color-accent` in theme.css: what is on, chosen or clickable.
 const ACCENT: &str = "#ee82c4";
 /// Neutral-400: window controls and anything else that should recede.
@@ -459,7 +476,12 @@ fn Tray(tooltip: String) -> Element {
 
 /// How big the tray's menu is, in logical pixels, and the smallest the program
 /// itself may be — the menu has to undo that floor to fit.
-const MENU_SIZE: (f64, f64) = (300.0, 372.0);
+///
+/// Everything but the server list takes about 270px (Comfortaa's line is
+/// 1.115em); the rest is the list's, up to `.tray-list`'s `max-height` in
+/// app.css. At 372px that was three servers and a half, and the user asked for
+/// more: 460px holds six and the edge of a seventh, which says it scrolls.
+const MENU_SIZE: (f64, f64) = (300.0, 460.0);
 const MIN_SIZE: (f64, f64) = (880.0, 560.0);
 
 /// Lend the window to the tray's menu: small, above everything, out of the
@@ -481,6 +503,12 @@ fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64)) {
     // the whole program shrunk into 300 pixels.
     window.set_visible(false);
     window.set_always_on_top(true);
+    // A menu has one shape. The window has no frame, but tao still lets a
+    // borderless window be dragged by its edges while it is resizable (its
+    // WM_NCHITTEST), and Win+Up maximizes anything with a maximize box — the
+    // menu stretched either way. Both come back in `out_of_menu`.
+    window.set_resizable(false);
+    window.set_maximizable(false);
     window.set_min_inner_size(None::<LogicalSize<f64>>);
     window.set_inner_size(LogicalSize::new(MENU_SIZE.0, MENU_SIZE.1));
     window.set_outer_position(menu_corner(window, near));
@@ -500,6 +528,8 @@ fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
     window.set_visible(false);
     window.set_always_on_top(false);
     let _ = window.set_skip_taskbar(false);
+    window.set_resizable(true);
+    window.set_maximizable(true);
     window.set_min_inner_size(Some(LogicalSize::new(MIN_SIZE.0, MIN_SIZE.1)));
     if let Some((x, y, width, height)) = NORMAL_SHAPE() {
         window.set_inner_size(PhysicalSize::new(width, height));
@@ -687,7 +717,7 @@ fn TrayMenu(frame: Frame) -> Element {
                 }
             }
 
-            div { class: "tray-sep" }
+            div { class: "tray-sep tray-foot" }
             div { style: "display:flex;gap:8px",
                 div {
                     class: "act tray-act",
@@ -1315,13 +1345,17 @@ fn StatusCards(frame: Frame) -> Element {
                         padding:18px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
                 div {
-                    class: "ring",
-                    style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
-                            place-items:center;border:1px solid {tone};\
-                            box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
-                    title: if on { "Отключить" } else { "Подключить" },
-                    onclick: move |_| controller.send(Command::Toggle { was_on: on }),
-                    crate::icons::Heart { size: 28, color: tone, filled: on }
+                    style: "flex:none;display:flex;flex-direction:column;align-items:center;gap:11px",
+                    div {
+                        class: "ring",
+                        style: "width:78px;height:78px;flex:none;border-radius:50%;display:grid;\
+                                place-items:center;border:1px solid {tone};\
+                                box-shadow:0 0 34px {outer}, inset 0 0 20px {inner}",
+                        title: if on { "Отключить" } else { "Подключить" },
+                        onclick: move |_| controller.send(Command::Toggle { was_on: on }),
+                        crate::icons::Heart { size: 28, color: tone, filled: on }
+                    }
+                    TunSwitch { tun: frame.tun.clone() }
                 }
                     // Clips on a narrow card instead of running under the switch beside it.
                     div { style: "display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden",
@@ -1342,9 +1376,18 @@ fn StatusCards(frame: Frame) -> Element {
                         }
                     }
                     span {
-                        style: "font-size:14px;color:var(--color-neutral-500);\
-                                font-variant-numeric:tabular-nums",
-                        if on { "В сети {frame.uptime} · {frame.flow}" } else { "{frame.flow}" }
+                        // One line: `VLESS · xhttp · reality · vision` is long,
+                        // and a narrow card clips its tail rather than growing.
+                        style: "font-size:14px;color:var(--color-neutral-500);white-space:nowrap",
+                        if on {
+                            // Boxed digits, or the tail of this line walks left
+                            // and right once a second; see `FIGURE_EM`.
+                            span { "В сети " }
+                            Ticking { text: frame.uptime.clone() }
+                            span { " · {frame.flow}" }
+                        } else {
+                            "{frame.flow}"
+                        }
                     }
                 }
                 // One switch: the ring. A pill switch beside it did the same
@@ -1381,6 +1424,64 @@ fn StatusCards(frame: Frame) -> Element {
     }
 }
 
+/// What goes through bliss: only what is pointed at its ports, or everything.
+///
+/// Two positions with a knob that slides between them, under the ring, because
+/// it is the second thing about the tunnel a person decides and the first place
+/// they look. How each position looks is `.tun-switch` in app.css — the inline
+/// style here is one constant string, and only the class and the icons' colour
+/// change with the state (the note at the top of this file).
+///
+/// The right-hand side is where it is *asked* to be, not where it got to: a
+/// copy of bliss without administrator rights cannot make an adapter, so the
+/// knob moves and the colour says "on its way" rather than "done". The click
+/// that could not take effect says why in a line at the bottom of the window.
+#[component]
+fn TunSwitch(tun: crate::engine::TunView) -> Element {
+    let controller = use_context::<Controller>();
+    let class = match (tun.on, tun.carrying) {
+        (false, _) => "tun-switch",
+        (true, true) => "tun-switch on",
+        (true, false) => "tun-switch on waiting",
+    };
+    let (ports, machine) = match (tun.on, tun.carrying) {
+        (false, _) => (ACCENT, MUTED),
+        (true, true) => (MUTED, ACCENT),
+        (true, false) => (MUTED, BUSY.0),
+    };
+    let title = match (tun.on, tun.carrying, tun.elevated) {
+        (false, ..) => {
+            "Через bliss идёт только то, что направили в его порты. \
+             Включить TUN — весь трафик машины, включая UDP: звонки, игры, QUIC"
+        }
+        (true, true, _) => "Весь трафик машины идёт через bliss. Выключить",
+        (true, false, false) => {
+            "TUN включён, но адаптеру нужны права администратора: перезапустите bliss \
+             от имени администратора"
+        }
+        (true, false, true) => "TUN включён, но адаптер не поднялся",
+    };
+
+    rsx! {
+        div {
+            class: "{class}",
+            style: "flex:none;display:flex;align-items:center",
+            title,
+            onclick: {
+                let on = tun.on;
+                move |_| controller.send(Command::Tun(!on))
+            },
+            div { class: "tun-knob" }
+            div { class: "tun-side",
+                crate::icons::Plug { size: 15, color: ports }
+            }
+            div { class: "tun-side",
+                crate::icons::Machine { size: 15, color: machine }
+            }
+        }
+    }
+}
+
 /// What the connection screen shows before there is a server: the one thing
 /// bliss needs from anyone, asked for in the window rather than in a file.
 #[component]
@@ -1399,11 +1500,12 @@ fn AddServerCard(frame: Frame) -> Element {
                     "Добавьте сервер"
                 }
                 span { style: "font-size:14px;line-height:1.5;color:var(--color-neutral-400)",
-                    "Вставьте ссылку vless:// или адрес подписки — их даёт провайдер. \
+                    "Вставьте ссылку на сервер — vless://, vmess://, trojan://, ss://, \
+                     hysteria2:// или wireguard:// — или адрес подписки: их даёт провайдер. \
                      bliss сохранит их в профиль и подключится. Можно просто нажать Ctrl+V."
                 }
             }
-            ImportForm { frame, placeholder: "vless://… или https://… подписки" }
+            ImportForm { frame, placeholder: "vless://, trojan://, ss://… или https://… подписки" }
         }
     }
 }
@@ -1662,7 +1764,7 @@ fn ServersTab(frame: Frame) -> Element {
                         border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--color-divider)",
                 span { "Имя" }
                 span { "Адрес" }
-                span { "Защита" }
+                span { "Протокол" }
                 // The hint beside the tabs says it too, and leaves a narrow window.
                 span {
                     style: "text-align:right",
@@ -1675,7 +1777,7 @@ fn ServersTab(frame: Frame) -> Element {
             div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
                 if frame.servers.is_empty() {
                     div { style: "padding:22px 10px;font-size:14.5px;color:var(--color-neutral-600)",
-                        "Серверов пока нет — вставьте ссылку vless:// в поле ниже или нажмите Ctrl+V."
+                        "Серверов пока нет — вставьте ссылку на сервер в поле ниже или нажмите Ctrl+V."
                     }
                 }
                 for section in sections {
@@ -1731,7 +1833,7 @@ fn ServersTab(frame: Frame) -> Element {
                 }
             }
 
-            ImportForm { frame: frame.clone(), placeholder: "vless://… или адрес подписки" }
+            ImportForm { frame: frame.clone(), placeholder: "vless://, trojan://, ss://… или адрес подписки" }
 
             div { style: "display:flex;align-items:center;gap:10px;padding-top:2px",
                 Button {
@@ -1990,6 +2092,7 @@ fn ping_text(ping: Ping) -> String {
         Ping::Probing => "…".to_owned(),
         Ping::Ok(ms) => format!("{ms} мс"),
         Ping::Down => "нет".to_owned(),
+        Ping::Udp => "UDP".to_owned(),
     }
 }
 
@@ -2002,7 +2105,7 @@ fn ping_tone(ping: Ping) -> &'static str {
         Ping::Ok(ms) if ms < 300 => "var(--color-accent-2-300)",
         Ping::Ok(_) => "var(--color-neutral-400)",
         Ping::Down => BAD,
-        Ping::Unknown | Ping::Probing => "var(--color-neutral-600)",
+        Ping::Unknown | Ping::Probing | Ping::Udp => "var(--color-neutral-600)",
     }
 }
 
@@ -2011,9 +2114,27 @@ fn StatRow(label: String, value: String) -> Element {
     rsx! {
         div { style: "display:flex;justify-content:space-between;align-items:baseline;gap:10px",
             span { style: "font-size:13.5px;color:var(--color-neutral-500)", "{label}" }
-            span {
-                style: "font-size:15px;font-variant-numeric:tabular-nums;text-align:right",
-                "{value}"
+            span { style: "font-size:15px;text-align:right",
+                Ticking { text: value }
+            }
+        }
+    }
+}
+
+/// Text whose digits keep still while the number under them changes.
+///
+/// Each digit goes in a box of the widest digit's width and is centred in it —
+/// which is what a tabular figure is, and what this font cannot do by itself
+/// (`FIGURE_EM`). Everything else keeps its natural width, so a comma or a unit
+/// reads as it was drawn.
+#[component]
+fn Ticking(text: String) -> Element {
+    rsx! {
+        for (i, glyph) in text.chars().enumerate() {
+            if glyph.is_ascii_digit() {
+                span { key: "{i}", class: "figure", "{glyph}" }
+            } else {
+                span { key: "{i}", "{glyph}" }
             }
         }
     }
@@ -2819,6 +2940,37 @@ mod tests {
         );
     }
 
+    /// The tray's menu is the window in a small shape, and tao lets a
+    /// borderless window be dragged by its edges while it is resizable, and
+    /// Win+Up maximizes it while it is maximizable: the menu stretched. The
+    /// menu takes both away, and has to give both back, or the program could
+    /// never be resized again after the first menu.
+    #[test]
+    fn the_menu_keeps_its_shape() {
+        fn body(name: &str) -> String {
+            let source = include_str!("ui.rs");
+            let start = source
+                .find(&format!("fn {name}("))
+                .expect("the function is in ui.rs");
+            let end = start + source[start..].find("\n}\n").expect("it ends");
+            source[start..end]
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect()
+        }
+        let (into, out) = (body("into_menu"), body("out_of_menu"));
+        for call in ["set_resizable", "set_maximizable"] {
+            assert!(
+                into.contains(&format!("{call}(false)")),
+                "the menu keeps {call}"
+            );
+            assert!(
+                out.contains(&format!("{call}(true)")),
+                "the program loses {call}"
+            );
+        }
+    }
+
     /// WebView2 ignores every `::-webkit-scrollbar` rule on an element that
     /// sets either standard scrollbar property, and draws its own bar, whose
     /// arrows stay when there is nothing to scroll. Set on `*`, they put two
@@ -3414,6 +3566,110 @@ mod tests {
             "{glide}: two glides and where they end"
         );
         assert_eq!(APP_CSS.matches(&tick).count(), 2, "{tick}");
+    }
+
+    /// A digit's box is as wide as the widest digit this font draws, and the
+    /// numbers that change under the eye go through `Ticking`.
+    ///
+    /// Comfortaa has no `tnum`, so every `font-variant-numeric:tabular-nums`
+    /// in this file is decoration; the box is what actually holds the line
+    /// still. Narrow the box and the clock starts walking again.
+    #[test]
+    fn the_numbers_that_tick_stand_still() {
+        assert!(
+            APP_CSS.contains(&format!(
+                ".figure {{ display: inline-block; width: {FIGURE_EM}em"
+            )),
+            "the box in app.css no longer matches the widest digit measured in ui.rs"
+        );
+
+        // The clock and the metrics are the two that change twice a second.
+        let card = SOURCE
+            .split_once("fn StatusCards(")
+            .expect("StatusCards exists")
+            .1
+            .split_once("fn AddServerCard(")
+            .expect("AddServerCard follows it")
+            .0;
+        assert!(
+            card.contains("Ticking { text: frame.uptime.clone() }"),
+            "the clock is back to plain text and will walk its line again"
+        );
+        let row = SOURCE
+            .split_once("fn StatRow(")
+            .expect("StatRow exists")
+            .1
+            .split_once("fn Ticking(")
+            .expect("Ticking follows it")
+            .0;
+        assert!(row.contains("Ticking { text: value }"), "{row}");
+    }
+
+    /// The switch under the ring keeps its look in classes. An inline
+    /// property present in one state and absent in another is restored by
+    /// Dioxus and then stays forever — the bug that made the rail's highlight
+    /// stick to every item ever clicked, reported three times.
+    #[test]
+    fn the_tun_switch_style_does_not_vary_by_state() {
+        let body = SOURCE
+            .split_once("fn TunSwitch(")
+            .expect("TunSwitch exists")
+            .1
+            .split_once("/// What the connection screen shows before there is a server")
+            .expect("TunSwitch is followed by AddServerCard")
+            .0;
+        let style = body
+            .split_once("style: \"")
+            .expect("TunSwitch has an inline style")
+            .1
+            .split_once("\",")
+            .expect("the style string ends")
+            .0;
+
+        assert!(
+            !style.contains('{'),
+            "the switch's inline style interpolates a value: {style:?}"
+        );
+        for state_look in ["transform", "box-shadow", "background", "color:"] {
+            assert!(
+                !style.contains(state_look),
+                "{state_look} belongs in .tun-switch.on, not inline: {style:?}"
+            );
+        }
+    }
+
+    /// The knob lands exactly on the other half. Its travel is not a number
+    /// anyone can see is right: it is the pill's width less its padding,
+    /// halved, and a pill made wider without moving it would leave the knob
+    /// short of the icon it is supposed to sit under.
+    #[test]
+    fn the_switch_knob_travels_exactly_one_half() {
+        let number = |after: &str, within: &str| -> f64 {
+            let tail = APP_CSS
+                .split_once(within)
+                .unwrap_or_else(|| panic!("app.css has {within}"))
+                .1;
+            let value = tail
+                .split_once(after)
+                .unwrap_or_else(|| panic!("{within} sets {after}"))
+                .1;
+            value
+                .trim_start()
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .split(|c: char| !c.is_ascii_digit() && c != '.')
+                .next()
+                .expect("a number")
+                .parse()
+                .expect("a number")
+        };
+
+        let width = number("width:", ".tun-switch {");
+        let padding = number("padding:", ".tun-switch {");
+        let knob = number("width:", ".tun-knob {");
+        let travel = number("translateX(", ".tun-switch.on .tun-knob {");
+
+        assert_eq!(knob, (width - 2.0 * padding) / 2.0, "the knob is one half");
+        assert_eq!(travel, knob, "and it moves by exactly its own width");
     }
 
     /// Bands, not a gradient — and the distinctions that have to survive
@@ -4339,7 +4595,7 @@ fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
 /// Name and address never grow past their share, for the reason given at
 /// `CONNECTION_COLUMNS`.
 const SERVER_COLUMNS: &str =
-    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 118px 78px 30px;gap:12px";
+    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 30px;gap:12px";
 
 /// A run of the server list: the servers added by hand, or one subscription's.
 #[derive(Clone, Debug, PartialEq)]
@@ -4450,11 +4706,17 @@ fn ServerLine(
             }
             span {
                 style: "overflow:hidden;white-space:nowrap;font-size:13px;color:var(--color-neutral-500)",
+                title: "{server.detail}",
                 "{server.kind}"
             }
             span {
                 style: "text-align:right;font-size:13.5px;\
                         font-variant-numeric:tabular-nums;color:{ping_tone(server.ping)}",
+                title: if server.ping == Ping::Udp {
+                    "Сервер работает по UDP — рукопожатие TCP до него ничего не измерит"
+                } else {
+                    ""
+                },
                 "{ping_text(server.ping)}"
             }
             div { class: "srv-tools",

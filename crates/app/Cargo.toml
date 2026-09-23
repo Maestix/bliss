@@ -18,6 +18,7 @@ mimalloc = ["dep:mimalloc"]
 [dependencies]
 bliss-core = { path = "../core" }
 bliss-proto = { path = "../proto" }
+bliss-tun = { path = "../tun" }
 bliss-xray = { path = "../xray" }
 base64.workspace = true                                # the status card's picture, inlined into the stylesheet
 clap = { workspace = true, features = ["derive"] }
@@ -49,6 +50,8 @@ windows = { workspace = true, features = [
     "Win32_System_Ole",
     # Starting with Windows: bliss's value under the user's Run key; see startup.rs.
     "Win32_System_Registry",
+    # One window at a time: a named mutex, held by whichever copy has it.
+    "Win32_System_Threading",
 ] }
 
 [build-dependencies]

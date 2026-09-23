@@ -59,6 +59,38 @@ pub fn Shield(size: u32, color: String) -> Element {
     }
 }
 
+/// One side of the TUN switch: only what is plugged into bliss goes through
+/// it — the programs pointed at its two ports.
+#[component]
+pub fn Plug(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M9 3 V7.6" }
+            path { d: "M15 3 V7.6" }
+            path { d: "M6.6 7.6 h10.8 v3 a5.4 5.4 0 0 1-10.8 0 Z" }
+            path { d: "M12 16 V21" }
+        }
+    }
+}
+
+/// The other side: the whole machine's traffic, which is what a TUN adapter
+/// takes.
+#[component]
+pub fn Machine(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M6.2 5.4 h11.6 a1.4 1.4 0 0 1 1.4 1.4 v8 h-14.4 v-8 a1.4 1.4 0 0 1 1.4-1.4 Z" }
+            path { d: "M3 18.6 h18" }
+        }
+    }
+}
+
 #[component]
 pub fn Globe(size: u32, color: String) -> Element {
     rsx! {

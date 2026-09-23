@@ -745,6 +745,7 @@ dependencies = [
  "base64",
  "bliss-core",
  "bliss-proto",
+ "bliss-tun",
  "bliss-xray",
  "clap",
  "color-eyre",
@@ -786,6 +787,7 @@ dependencies = [
  "insta",
  "percent-encoding",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
  "url",
@@ -803,12 +805,15 @@ dependencies = [
 name = "bliss-tun"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bliss-core",
  "ipstack",
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
+ "windows 0.62.2",
  "wintun-bindings",
 ]
 
@@ -7911,6 +7916,7 @@ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "libc",
  "pin-project-lite",

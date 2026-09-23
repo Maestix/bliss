@@ -30,11 +30,11 @@ const USER_AGENT: &str = concat!("bliss/", env!("CARGO_PKG_VERSION"));
 /// The server links in a text.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Links {
-    /// vless:// links that parse, in order, each once.
+    /// Server links that parse, in order, each once.
     pub links: Vec<String>,
-    /// Links to protocols bliss does not speak: vmess://, trojan://, ss://.
+    /// Links to protocols xray-core does not speak: tuic://, anytls://, ssr://.
     pub foreign: usize,
-    /// vless:// links that do not parse.
+    /// Server links that do not parse.
     pub broken: usize,
 }
 
@@ -48,7 +48,7 @@ pub fn links_in(text: &str) -> Links {
             continue;
         };
         let scheme = scheme.to_ascii_lowercase();
-        if scheme != "vless" {
+        if !bliss_proto::is_server_scheme(&scheme) {
             // The address of a page is not a server in another protocol.
             if !scheme.is_empty() && scheme != "http" && scheme != "https" {
                 found.foreign += 1;
@@ -211,14 +211,14 @@ fn nothing_usable(text: &str, links: &Links) -> String {
     }
     if links.foreign > 0 {
         return format!(
-            "в списке {} других протоколов и ни одной ссылки vless://",
+            "в списке {} — и все на протоколах, которых нет в xray-core",
             crate::ui::plural(links.foreign as u64, "сервер", "сервера", "серверов")
         );
     }
     if links.broken > 0 {
-        return "ссылки vless:// в списке не читаются".to_owned();
+        return "ссылки в списке не читаются".to_owned();
     }
-    "в ответе нет ссылок vless://".to_owned()
+    "в ответе нет ссылок на серверы".to_owned()
 }
 
 fn too_large() -> String {
@@ -260,9 +260,17 @@ mod tests {
     #[test]
     fn a_base64_list_and_a_plain_one_read_the_same() {
         use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-        let plain = format!("{ONE}\r\n{TWO}\nvmess://AAAA\ntrojan://x@c.example:443\n\n");
+        // Every protocol xray speaks is read; the ones it does not are counted.
+        let plain = format!(
+            "{ONE}\r\n{TWO}\ntuic://AAAA@d.example:443\ntrojan://x@c.example:443\n\
+             anytls://x@e.example:443\n\n"
+        );
         let expect = Links {
-            links: vec![ONE.to_owned(), TWO.to_owned()],
+            links: vec![
+                ONE.to_owned(),
+                TWO.to_owned(),
+                "trojan://x@c.example:443".to_owned(),
+            ],
             foreign: 2,
             broken: 0,
         };

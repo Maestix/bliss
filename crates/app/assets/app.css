@@ -256,6 +256,45 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .ring:hover { filter: brightness(1.22); }
 .ring:active { transform: scale(.96); }
 
+/* --- The switch under the ring: ports only, or the whole machine ----------
+   Two positions with a knob that slides between them. Everything the state
+   changes lives here rather than inline, or Dioxus would restore the position
+   it was in when the style attribute is next written (rule 1 in AGENTS.md).
+   The pill is the ring's width, so the two read as one column. */
+.tun-switch {
+  position: relative;
+  width: 78px; height: 28px; padding: 2px;
+  border-radius: 14px;
+  cursor: pointer;
+  background-color: rgba(239, 232, 245, .06);
+  box-shadow: inset 0 0 0 1px rgba(203, 186, 244, .16);
+  transition: box-shadow .16s ease, background-color .16s ease, transform .08s ease;
+}
+.tun-switch:hover { background-color: rgba(239, 232, 245, .10); }
+.tun-switch:active { transform: scale(.96); }
+.tun-switch.on { box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .34); }
+/* Asked for, not arrived: no administrator rights, or the adapter failed. */
+.tun-switch.on.waiting { box-shadow: inset 0 0 0 1px rgba(169, 140, 232, .34); }
+.tun-knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 37px; height: 24px;
+  border-radius: 12px;
+  background-color: rgba(238, 130, 196, .16);
+  transition: transform .18s ease, background-color .18s ease;
+}
+.tun-switch.on .tun-knob { transform: translateX(37px); }
+.tun-switch.on.waiting .tun-knob { background-color: rgba(169, 140, 232, .16); }
+.tun-side { position: relative; flex: 1; display: grid; place-items: center; }
+
+/* --- Digits that keep still ------------------------------------------------
+   Comfortaa carries no tabular figures, so `font-variant-numeric` has never
+   done anything in this program: its digits are 378 to 647 units of 1000, and
+   the clock on the status card shifted the rest of its line by up to twenty
+   pixels a second. A digit centred in a box of the widest digit's width is a
+   tabular figure; `Ticking` in ui.rs puts each one in this box, and the width
+   follows `FIGURE_EM` there. */
+.figure { display: inline-block; width: 0.65em; text-align: center; }
+
 /* --- A line about what just happened, on any screen ------------------------ */
 .toast {
   position: fixed; left: 50%; bottom: 22px; z-index: 40;
@@ -458,11 +497,14 @@ body { font-size: 16px; user-select: none; cursor: default; }
   flex: none; font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
   color: var(--color-neutral-600);
 }
-/* The list is the only part that gives: four servers fit, the rest scroll. */
+/* The list is the only part that gives: six servers and the edge of a seventh
+   fit in MENU_SIZE (ui.rs), the rest scroll. With fewer, the buttons keep to
+   the bottom edge rather than hang in the middle of the bunny. */
 .tray-list {
   display: flex; flex-direction: column; gap: 2px; min-height: 0;
-  max-height: 120px; overflow-y: scroll; overflow-x: hidden;
+  max-height: 190px; overflow-y: scroll; overflow-x: hidden;
 }
+.tray-foot { margin-top: auto; }
 .tray-act {
   flex: 1; display: flex; align-items: center; justify-content: center;
   padding: 7px; border-radius: 4px; font-size: 13.5px;

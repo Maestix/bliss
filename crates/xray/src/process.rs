@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 
+use crate::config::Version;
 use crate::job::Job;
 
 #[derive(Debug, Error)]
@@ -32,12 +33,10 @@ pub enum XrayError {
     Version(String),
 
     /// The failure this check exists to prevent looks like a broken server:
-    /// an older xray accepts the config, then simply never connects.
-    #[error(
-        "xray {found} is too old for this server — it needs {needed}.x or newer \
-         for VLESS Encryption (encryption=mlkem768x25519plus…)"
-    )]
-    TooOld { found: String, needed: u32 },
+    /// an older xray accepts the config, then simply never connects — or
+    /// refuses a field it has never heard of, in words about the field.
+    #[error("xray {found} is too old for this server — it needs {needed} or newer")]
+    TooOld { found: Version, needed: Version },
 
     #[error("xray exited immediately ({status}) — see the log above for its reason")]
     ExitedEarly { status: std::process::ExitStatus },
@@ -298,7 +297,7 @@ where
 }
 
 /// Ask the binary what it is, and refuse early if it cannot do the job.
-pub async fn check_version(exe: &Path, needs_major: Option<u32>) -> Result<String, XrayError> {
+pub async fn check_version(exe: &Path, needs: Option<Version>) -> Result<Version, XrayError> {
     if !exe.is_file() {
         return Err(XrayError::NotFound(exe.to_path_buf()));
     }
@@ -316,24 +315,22 @@ pub async fn check_version(exe: &Path, needs_major: Option<u32>) -> Result<Strin
     let first = text.lines().next().unwrap_or_default();
 
     // "Xray 26.7.28 (Xray, Penetrates Everything.) …"
-    let version = first
+    let word = first
         .split_whitespace()
         .nth(1)
-        .ok_or_else(|| XrayError::Version(format!("unexpected output: {first:?}")))?
-        .to_owned();
+        .ok_or_else(|| XrayError::Version(format!("unexpected output: {first:?}")))?;
+    // Parsed whether or not anything is needed: the config itself is written
+    // for the version (mKCP's masks changed names in 26.6).
+    let version = Version::parse(word)
+        .ok_or_else(|| XrayError::Version(format!("unparsable version {word:?}")))?;
 
-    if let Some(needs) = needs_major {
-        let major: u32 = version
-            .split('.')
-            .next()
-            .and_then(|m| m.parse().ok())
-            .ok_or_else(|| XrayError::Version(format!("unparsable version {version:?}")))?;
-        if major < needs {
-            return Err(XrayError::TooOld {
-                found: version,
-                needed: needs,
-            });
-        }
+    if let Some(needed) = needs
+        && version < needed
+    {
+        return Err(XrayError::TooOld {
+            found: version,
+            needed,
+        });
     }
 
     Ok(version)
