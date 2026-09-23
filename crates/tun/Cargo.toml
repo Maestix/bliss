@@ -6,14 +6,23 @@ authors.workspace = true
 description = "The TUN adapter: Wintun, a userspace stack, and its traffic handed to the same outbound as every other inbound"
 
 [dependencies]
+async-trait.workspace = true
 bliss-core = { path = "../core" }
 thiserror.workspace = true
 tokio = { workspace = true }
+tokio-util.workspace = true
 tracing.workspace = true
 
 [target."cfg(windows)".dependencies]
 ipstack.workspace = true
 wintun-bindings.workspace = true
+windows = { workspace = true, features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
 
 [dev-dependencies]
 sha2.workspace = true

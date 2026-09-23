@@ -8,9 +8,16 @@ use crate::tracker::Connection;
 
 /// Per-direction buffer. Two of these per connection, so a thousand live
 /// connections is ~32 MB of buffers — the point at which a pool stops being an
-/// optimisation and starts being the fix. Noted rather than done: the shape of
-/// the pool depends on the TUN path, which does not exist yet.
+/// optimisation and starts being the fix. Noted rather than done, and the TUN
+/// path takes two more per flow of datagrams, so the number to measure it
+/// against is now connections plus flows.
 const BUFFER: usize = 16 * 1024;
+
+/// Per-direction buffer for a flow of datagrams, and therefore the largest one
+/// bliss carries: a bigger datagram would be cut, and cutting one is worse
+/// than refusing it. Nothing that arrives through an adapter with a 1500-byte
+/// MTU comes close, and a flow costs two of these rather than one.
+const DATAGRAM: usize = 16 * 1024;
 
 /// Pump both directions until either side closes, keeping the connection's
 /// counters current as the bytes pass.
@@ -48,6 +55,58 @@ where
     // every proxy has it; the answer is an idle timeout, which bliss does not
     // have yet.
     tokio::try_join!(upstream, downstream).map(|_| ())
+}
+
+/// One datagram per read, one per write, for as long as the flow lives.
+///
+/// Apart from `relay` because a datagram has edges. A stream's buffer may hold
+/// half of the next message and nobody minds; here half a message is a broken
+/// packet, so nothing is ever split or joined, and a buffer too small to hold
+/// one would silently cut it.
+///
+/// It also ends differently: a flow is over when the program stops sending,
+/// because the far side has no way to say it has finished. Whichever direction
+/// stops first ends the other, which for `relay` would truncate a response and
+/// here is the only way out.
+pub async fn relay_datagrams<C>(
+    client: C,
+    server: crate::outbound::BoxedDatagram,
+    conn: Arc<Connection>,
+) -> std::io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let (mut from_client, mut to_client) = tokio::io::split(client);
+    let server = &*server;
+
+    let out = {
+        let conn = Arc::clone(&conn);
+        async move {
+            let mut buf = vec![0u8; DATAGRAM];
+            loop {
+                let n = from_client.read(&mut buf).await?;
+                if n == 0 {
+                    return Ok::<_, std::io::Error>(());
+                }
+                server.send(&buf[..n]).await?;
+                conn.add_up(n as u64);
+            }
+        }
+    };
+
+    let back = async move {
+        let mut buf = vec![0u8; DATAGRAM];
+        loop {
+            let n = server.recv(&mut buf).await?;
+            to_client.write_all(&buf[..n]).await?;
+            conn.add_down(n as u64);
+        }
+    };
+
+    tokio::select! {
+        result = out => result,
+        result = back => result,
+    }
 }
 
 async fn pump<R, W>(
@@ -159,5 +218,69 @@ mod tests {
 
         let _ = task.await;
         assert_eq!(conn.down(), 10);
+    }
+
+    /// A flow of datagrams is carried both ways and counted like a connection,
+    /// so a call shows up in the table with the rest of the traffic rather
+    /// than as nothing at all.
+    #[tokio::test]
+    async fn a_flow_of_datagrams_is_carried_and_counted() {
+        struct Fake {
+            sent: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+            back: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::outbound::Datagram for Fake {
+            async fn send(&self, payload: &[u8]) -> std::io::Result<()> {
+                let _ = self.sent.send(payload.to_vec());
+                Ok(())
+            }
+            async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let Some(next) = self.back.lock().await.recv().await else {
+                    return Err(std::io::Error::other("the flow ended"));
+                };
+                buf[..next.len()].copy_from_slice(&next);
+                Ok(next.len())
+            }
+        }
+
+        let (sent, mut arrived) = tokio::sync::mpsc::unbounded_channel();
+        let (answer, back) = tokio::sync::mpsc::unbounded_channel();
+        let fake = Fake {
+            sent,
+            back: tokio::sync::Mutex::new(back),
+        };
+
+        let (client, mut client_peer) = tokio::io::duplex(4096);
+        let tracker = Tracker::new();
+        let conn = tracker.open(
+            Target::Socket("203.0.113.9:443".parse().unwrap()),
+            Route::Proxy,
+            "test",
+            None,
+        );
+        let task = tokio::spawn(relay_datagrams(client, Box::new(fake), Arc::clone(&conn)));
+
+        client_peer.write_all(b"a request").await.unwrap();
+        assert_eq!(arrived.recv().await.unwrap(), b"a request");
+
+        // Only now, so the two answers cannot arrive as one read and the test
+        // is about edges rather than about timing.
+        answer.send(b"first".to_vec()).unwrap();
+        let mut seen = [0u8; 5];
+        client_peer.read_exact(&mut seen).await.unwrap();
+        assert_eq!(&seen, b"first");
+        answer.send(b"second".to_vec()).unwrap();
+        let mut seen = [0u8; 6];
+        client_peer.read_exact(&mut seen).await.unwrap();
+        assert_eq!(&seen, b"second");
+
+        // The flow ends when the program stops sending, which is the only end
+        // a datagram has.
+        drop(client_peer);
+        let _ = task.await;
+        assert_eq!(conn.up(), 9);
+        assert_eq!(conn.down(), 11);
     }
 }

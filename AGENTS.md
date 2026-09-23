@@ -6,7 +6,10 @@ claim was fact-checked against the code, git and this machine when the file was
 written — if you find one that has gone stale, fix the file in the same commit
 as the code. Read the whole file before the first edit.
 
-bliss is a VLESS + REALITY proxy client for Windows, written in Rust. Stage 1
+bliss is a proxy client for Windows, written in Rust. It began as a VLESS +
+REALITY client and now reads a link for every kind of server xray-core can
+reach: VLESS, VMess, Trojan, Shadowsocks, SOCKS, Hysteria 2 and WireGuard, over
+every transport xray still has. Stage 1
 (current) drives an external `xray-core` process and owns everything around it:
 its own SOCKS5/HTTP inbound, a relay with per-connection accounting, routing,
 the machine's proxy settings, and a Dioxus desktop window. Stage 3 replaces xray
@@ -26,15 +29,18 @@ The long-form plan, in Russian, lives outside the repo at
   - the generated engine config, `%LOCALAPPDATA%\bliss\data\xray.json`
     (written from `crates/xray/src/config.rs`);
   - v2rayN's generated `binConfigs/config.json`;
-  - any `vless://` link.
+  - any server link — `vless://`, `vmess://`, `trojan://`, `ss://`,
+    `socks://`, `hysteria2://`, `wireguard://` — and a subscription's address.
 
   The last four live outside the repository; never copy them in. To learn the
   xray config schema, read `config.rs`, not a generated file.
 - **Test data is fake by construction**: reserved names (`example.net`,
   `a.example`), TEST-NET-3 addresses (`203.0.113.0/24`), private ranges, literals
-  such as `1.2.3.4`, the UUID `11111111-2222-…`, and repeated-letter keys
-  (`AAAA…`). Keep new fixtures in that style so nobody has to wonder whether a
-  random-looking key is real.
+  such as `1.2.3.4`, the UUID `11111111-2222-…`, and repeated-letter keys and
+  passwords (`AAAA…`, `PPPP…`). Keep new fixtures in that style so nobody has
+  to wonder whether a random-looking key is real. The one exception is
+  `crates/xray/tests/engine.rs`, which needs working key pairs and has xray
+  derive them, at run time, from fixed repeated-byte private keys.
 - **The user usually has another proxy running and may be working.** v2rayN's
   `xray` typically listens on 10808 and owns the Windows system proxy. Do not
   start the GUI or `bliss run` without a reason, never change the system proxy,
@@ -58,18 +64,25 @@ The long-form plan, in Russian, lives outside the repo at
 
 | crate | package | what lives there |
 |---|---|---|
-| `crates/proto` | `bliss-proto` | pure data: `vless://` parsing (`server.rs`), TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
+| `crates/proto` | `bliss-proto` | pure data: the parsed server — protocol, security, transport — and its redacting types (`server.rs`); share links, one parser per scheme in `link/` (`vless.rs`, `vmess.rs`, `trojan.rs`, `shadowsocks.rs`, `socks.rs`, `hysteria2.rs`, `wireguard.rs`) and the transport and TLS parameters they share (`link/stream.rs`); TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`) |
-| `crates/xray` | `bliss-xray` | xray config generation, process supervision in a Job Object, GitHub downloader |
-| `crates/tun` | `bliss-tun` | stage 2, started: `wintun.dll` carried inside the binary and written out beside the engine (`lib.rs`); the adapter and the userspace stack land here |
+| `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision in a Job Object, GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
+| `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`), the machine's addresses and routes (`net.rs`), and packets turned into connections and flows (`stack.rs`) |
 | `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with Windows (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
 the `bliss` binary (`main.rs`, `engine.rs`) calls into it. Existing xray
 knowledge outside `bliss-xray`, not to be extended: the `[engine] xray` path in
-`profile.rs`, Xray's `tcp`/`raw` alias in `server.rs`, and the decoder for Xray's
-`.dat` files in `geo.rs`.
+`profile.rs`, and the decoder for Xray's `.dat` files in `geo.rs`. One kind is
+there on purpose: **`link/` knows what xray can carry.** Share links are the
+Xray ecosystem's own format, and bliss carries only what its engine does, so a
+link xray cannot serve — a transport it removed (`h2`, `quic`), REALITY over
+anything but raw, XHTTP or gRPC, a Shadowsocks stream cipher, a protocol it
+never had (`tuic://`) — is refused when it is pasted rather than when xray
+refuses the config at start, in words the window cannot show. The shape of the
+config xray reads stays in `config.rs`. Stage 3's native stack will speak VLESS
+alone; everything else stays on xray, so this list does not move then.
 
 Runtime paths on Windows:
 
@@ -94,6 +107,28 @@ cargo build -p bliss         # target/debug/bliss.exe
   whatever the user had copied: run `cargo test -- --skip
   text_survives_the_round_trip` while they may be working. The xray readiness
   tests bind loopback ports.
+- **Every link bliss reads is carried end to end by a real xray** in
+  `crates/xray/tests/engine.rs`, ignored by default:
+
+  ```bash
+  cargo test -p bliss-xray --test engine -- --ignored --nocapture
+  ```
+
+  Per case, a server xray configured by hand from Xray's own config code, a
+  client xray configured by `bliss_xray::build` from a share link, and a TCP
+  and a UDP echo, reached through the client's SOCKS port as bliss reaches it:
+  27 cases, every protocol, every transport, TLS pinned by `pcs`, REALITY with
+  Vision and VLESS Encryption, mKCP masks, Salamander and port hopping. Keys and
+  a certificate are made per run by xray itself (`tls cert`, `tls hash`, `wg -i`,
+  `x25519 -i`, `vlessenc`) and deleted after. `BLISS_ENGINE_CASE=<part of a
+  name>` runs a subset, `BLISS_ENGINE_DEBUG=1` has both xrays log at debug,
+  `BLISS_XRAY` names another executable. Everything stays on 127.0.0.1, which
+  on Windows also keeps it out of any TUN adapter another client has up — the
+  user ran it next to Throne's. `xray run -test` would not do: a config that
+  dials the wrong way passes it. Run this after any change to `config.rs` or
+  `link/`. Its first runs found a bug no unit test could — a port hop without
+  an interval kills the whole engine — and two ways a hand-made server differs
+  from a real one (§10).
 - `crates/proto/tests/links.rs` snapshots the whole `Debug` output of a parsed
   `ServerConfig`. Changing its fields or the redacting `Debug` impls fails that
   test. `cargo-insta` is **not installed**: insta writes a `.snap.new` next to the
@@ -111,7 +146,7 @@ bliss check [PATH] | check --link             validate a profile, or one link fr
 bliss engine list [--limit N]
 bliss engine install [--version VERSION] [--newest] [--via ADDR]
 bliss route <TARGET> [PATH] [--process NAME]  which rule decides; no network
-bliss run [PROFILE] [--server TAG] [--engine-log ENGINE_LOG]
+bliss run [PROFILE] [--server TAG] [--engine-log ENGINE_LOG] [--tun]
 ```
 
 `bliss.exe` is a **windows-subsystem** program: a double-click opens the window
@@ -235,9 +270,18 @@ These cost the most time on this project. None of them announce themselves.
 **Security and privacy**
 
 - **Credentials are redacted at the type**: custom `Debug` for `UserId`,
-  `PublicKey`, `VlessEncryption` and `EncryptionKey`. The UUID and public key are
-  guarded by `debug_does_not_leak_credentials`; the encryption key only by the
-  `parsed_reality_link_matches_snapshot` snapshot.
+  `PublicKey`, `VlessEncryption` and `EncryptionKey`, which show both ends of
+  the value, and for `Hidden` and `PrivateKey`, which show nothing at all.
+  A UUID's ends are safe to show; eight characters of a sixteen-character
+  password are most of it, so every password, Hysteria auth, mKCP seed,
+  WireGuard private key, and any JSON a link carries (`extra`, `fm` — either
+  can hold a password) is `Hidden`. The UUID and public key are guarded by
+  `debug_does_not_leak_credentials`, the passwords and keys of every protocol
+  by `no_protocol_leaks_its_secret_into_debug`, the encryption key only by the
+  `parsed_reality_link_matches_snapshot` snapshot. A refusal never quotes what
+  it refuses when that can be secret: a VMess blob that is not JSON is
+  "something else", and a Shadowsocks cipher xray dropped is named without the
+  password written beside it.
 - **Names are never resolved locally for proxied traffic** — `Target` keeps
   domains as names so DNS does not leak. Direct routes resolve locally, on
   purpose. Consequence: `geoip` rules only match connections that name an
@@ -461,6 +505,20 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     (`the_font_is_inlined_and_licensed`). Its Cyrillic uses Latin-like shapes
     (д like g, т like m); the user chose it over Nunito, whose Cyrillic is
     conventional, after seeing both in the window.
+
+    **It has no tabular figures**, so every `font-variant-numeric:tabular-nums`
+    in `ui.rs` — thirteen of them — has never done anything: the property asks
+    for a `tnum` feature the file does not carry. Its digits run 378 to 647
+    units of 1000, a spread of 0.269em, and the clock on the status card moved
+    the rest of its line by 7.4px between `00:00:11` and `00:00:44`, measured
+    in the window at 14px. The user saw it as text hopping about. `Ticking`
+    puts each digit in `.figure`, a box as wide as the widest digit and
+    centred — which is what a tabular figure is — and the same measurement
+    then reads 0. Modifying the font instead was refused on purpose: the OFL
+    reserves the name "Comfortaa", so a changed file would have to be renamed,
+    and it is a variable font where advances live in `hmtx`, `HVAR` and `gvar`
+    at once. `the_numbers_that_tick_stand_still` holds the box's width in
+    app.css to the measurement in `FIGURE_EM`.
 12. **An inline property outranks every class rule, `:hover` and `:focus`
     included.** The action cards carried their resting tint inline, so hovering
     them changed nothing, and an inline `cursor:default` kept the arrow over
@@ -604,6 +662,13 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       goes, but only once it has had the focus (`MENU_HELD`) and 250ms after it
       opened. Windows hands the focus around as a window appears, and without
       them the menu opened and vanished inside 50ms.
+    - **The menu has one shape.** tao lets a borderless window be dragged by
+      its edges while it is resizable (its own `WM_NCHITTEST`), and Win+Up
+      maximizes anything with a maximize box, so the user could stretch the
+      menu. `into_menu` turns both off and `out_of_menu` back on
+      (`the_menu_keeps_its_shape`). It is 460px tall: everything but the
+      server list takes about 270px, and the list, the one part that gives,
+      shows six servers and the edge of a seventh.
     - The close button and Alt+F4 hide the window
       (`WindowCloseBehaviour::WindowHides`), so bliss goes on serving; leaving
       is "Выход" in the menu, which sets `WindowCloses` first and then closes
@@ -612,6 +677,48 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       window, and `display` lives in `.shell` rather than in the inline style:
       `.shell.folded { display: none }` did nothing until the inline
       `display:flex` moved out of its way (rule 12).
+24. **One window per executable, and a second copy leaves at once.** WebView2
+    gives one browser process to one user data folder, and dioxus-desktop names
+    that folder after the executable — so a second `bliss.exe` **never gets a
+    webview and therefore never shows a window at all**, while still taking a
+    turn at the profile, the ports and the work dir. Measured on 20 September:
+    the second and third starts each sat there with a window handle, no child
+    process and no page, while the first went on working untouched. That is
+    what the user had been fighting for an evening: they always have one bliss
+    running, every copy they started after it was invisible, and the window
+    they were clicking belonged to an older build with no switch in it.
+    `only_window` in `main.rs` takes a session-local named mutex before the
+    window is built and leaves quietly when another copy holds it, raising that
+    copy's window if it is on screen (`SetForegroundWindow` only — a window in
+    the tray belongs to tao and is not shown from outside, rule 20). The claim
+    is named after the executable, like the folder it stands for, so a renamed
+    probe copy is a separate claim and may run beside the user's bliss (§7);
+    `only_one_copy_holds_the_window` takes a claim of its own rather than
+    fighting whatever is running.
+
+25. **An elevated window works; what froze it was a mouse script.** On 20
+    September an elevated bliss drew its first frame and then took no click at
+    all: not the page, not its own title bar, not even the taskbar while it had
+    the focus. What was measured then was real — `bliss.exe` at high
+    integrity, its six `msedgewebview2.exe` at medium, the renderer idle at
+    0.000s of CPU — and the conclusion drawn from it was wrong: that Windows
+    passes nothing between the two levels. For two days `window()` refused to
+    open elevated and TUN was sent to a console. The cause was the user's
+    AutoHotkey script against a bouncing mouse button, which swallowed every
+    real click and sent a synthetic one in its place; Windows does not let a
+    medium-integrity program inject input into a high-integrity window, so
+    with an elevated window in front the clicks went nowhere at all. The user
+    found it: with the script stopped, an elevated copy answered every click.
+    The refusal is gone, and the TUN switch and its toast say to restart bliss
+    as administrator. What stands:
+    - **An idle renderer is the symptom of input that never arrived**, not
+      proof that the page cannot receive it.
+    - **When nothing on the machine takes clicks, bliss is not the only
+      suspect.** Ask what else is running that hooks the mouse or keyboard.
+    - The debugging port of §7 did not open in the elevated run, with
+      `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` set in a `.cmd` file started
+      through `Start-Process -Verb RunAs` (which does not carry the caller's
+      environment across). Why was never established.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -631,14 +738,17 @@ not move: the work dir (engine, `xray.json`, `bliss.log`) stays where it is. A
 scratch profile whose `[engine] xray` names a file that does not exist makes
 any start fail before an engine is spawned or its config written.
 
-**The user may be running bliss while you check.** Look for a `bliss.exe` first
-(`Get-CimInstance Win32_Process`, which shows the path). A second copy shares
+**The user may be running bliss while you check**, and a second copy under the
+same name will now refuse to start (rule 24). Look for a `bliss.exe` first
+(`Get-CimInstance Win32_Process`, which shows the path). A copy shares
 `%LOCALAPPDATA%\bliss` with the first twice over: the work dir, and WebView2's
 data folder, which dioxus-desktop names after the executable
 (`%LOCALAPPDATA%\<exe stem>`, `webview.rs`), so moving the binary does not
-separate them. Two copies with different WebView2 arguments in one data folder
-do not start cleanly. To check next to a running copy, run a copy of the debug
-build under another name (`bliss-probe.exe`), or ask the user to close theirs.
+separate them. **To check next to a running copy, run the build under another
+name** (`bliss-probe.exe`): that is a data folder of its own and a claim of its
+own, and both copies then have a window. Verified on 20 September — one
+`bliss.exe` with its webview, a second `bliss.exe` gone within a second, and
+`bliss-probe.exe` beside them with a webview of its own.
 
 From Python with `websocket-client` (installed), after removing the proxy
 variables and with `suppress_origin=True`: `Runtime.evaluate` to read classes,
@@ -738,22 +848,164 @@ Two more probes that worked:
   quirk was found in
   `~/.cargo/registry/src/*/dioxus-interpreter-js-0.7.10/src/ts/set_attribute.ts`.
 
-## 9. xray-core facts
+## 9. The TUN adapter (stage 2)
+
+A TUN adapter is another way in, not another program: packets become
+connections and flows, and from there they take the path the SOCKS and HTTP
+inbounds take — `Router::decide`, the dialer, `relay`, the same connection
+table.
+
+- **Asked for in three places, honoured in one.** `[tun] enabled` in the
+  profile is the setting; the switch under the ring on the main screen writes
+  it (`TunSwitch` -> `Command::Tun`, applied to a live tunnel without
+  restarting it — the adapter is another way in, and the connections through
+  the two ports have no reason to be dropped for it); and `bliss run --tun`
+  turns it on for one run without writing anything. None of that creates an
+  adapter without administrator rights: `bliss_tun::elevated()` is asked
+  first, and a copy without them serves the two ports as usual. It never fails
+  the tunnel — a bliss started from the Run key at sign-in has no rights and
+  no way to ask for them, and one that refused to start over that would take
+  away more than it explains.
+  **A window started as administrator raises the adapter itself** (rule 25:
+  the elevated window works). One started without rights saves the choice and
+  says to restart bliss as administrator, which then raises it from the saved
+  choice. The plan's stage-2 helper or service is what would let an ordinary
+  window have TUN without running elevated.
+- **Raising the adapter leaves the loop and comes back through it.**
+  `Tun::up` is blocking work — loading the library, creating the adapter (a
+  driver install the first time), writing routes — and the first version
+  called it from the engine loop. The window then answered nothing at all:
+  not the switch, not the heart, not the proxy choice, because every command
+  waits its turn in that loop. The user reported it as "everything freezes",
+  and it is the same rule the subscription fetch already follows. It now runs
+  in `spawn_blocking` inside a task, and the finished adapter arrives as
+  `Command::TunUp` — which carries the `Serving` it was built for, because a
+  restart in between leaves an adapter pointed at a tunnel nobody serves
+  (`Arc::ptr_eq` decides). `Running.tun_rising` stops a second click starting
+  a second adapter while the first is still installing.
+- **A switch that moved and changed nothing has to say why.** The pill's two
+  positions are "the ports" and "the whole machine", and the knob moves to
+  where the adapter was *asked* to be: `.tun-switch.on.waiting` is the violet
+  "on its way" tone for a click that saved the choice and could not act on it.
+  The reason goes in a toast at that moment, because a colour and a tooltip
+  are not an answer to a click. The three facts are separate in `TunView` —
+  asked for, allowed, carrying — since they come apart in every combination.
+
+- **Everything the tunnel needs must go around the tunnel.** Two traps, two
+  different answers, and each one is a loop without it.
+  - The engine's connection to the server is another process's socket, so it
+    is kept out by a route: the server's addresses go `/32` through the old
+    default gateway (`Routes::around_tunnel`). The name is resolved on this
+    machine to write it, which is the second place bliss resolves anything —
+    the latency probe is the first.
+  - A connection bliss dials itself for a `direct` rule is this process's
+    socket, and a route per destination would be absurd. It is bound to the
+    real interface with `IP_UNICAST_IF` (`net::outside`), the one socket
+    option that overrides the destination lookup. Without it a direct route
+    dials, the packet comes back in through the adapter, is decided `direct`
+    again, and dials again for as long as the machine has sockets.
+  - **`IP_UNICAST_IF` takes the interface index in network byte order** for
+    IPv4 and in host order for IPv6. Swapped, it names an interface that does
+    not exist and fails with "the requested address is not valid in its
+    context", which says nothing about byte order
+    (`the_interface_index_travels_backwards`).
+- **The routes are the two halves `0.0.0.0/1` and `128.0.0.0/1`**, not a
+  replacement default route: a longer prefix wins on its own, so the machine's
+  own default route is never touched and a bliss that dies leaves it where it
+  was.
+- **Nothing is written down to be undone.** The routes into the adapter die
+  with the adapter, and wintun removes the adapter when the process ends,
+  however it ends — so unlike the system proxy there is no snapshot on disk
+  and no recovery path. `Tun` holds the routes and the device, in that
+  declaration order, so dropping it takes the routes away first.
+- **A TUN destination is always an address.** The name the program looked up
+  is gone by the time a packet exists, so `domain` and `geosite` rules do not
+  match TUN traffic at all; `ip`, `geoip`, `port` and `process` do. Answering
+  the DNS query and handing out an address bliss can recognise again — fake-IP
+  — is what makes the rest of the rules work, and it is not written yet.
+  While the adapter is on, the routing screen names the rules this silences
+  (`blind_under_tun`): the ones whose only conditions are domains and geosite
+  sets. A rule that also has an address, a port or a program still decides
+  with those, so it is left out rather than buried in the list. The user's own
+  DNS is `dnscrypt-proxy` on loopback, which never enters the adapter, so
+  intercepting port 53 would see none of it: for that machine the next step is
+  the name out of the connection itself (SNI, `Host:`), not fake-IP.
+- **Datagrams have their own port table.** `name_for_port` reads the TCP
+  table; a flow's program comes from `name_for_datagram_port`, which reads the
+  UDP one. Without it `process:Discord.exe` would match everything Discord
+  loads and none of what it says.
+- **UDP goes out over SOCKS5 UDP ASSOCIATE** (`Outbound::bind_udp`): a TCP
+  connection asks for the association and must be held for its whole life,
+  because the proxy drops it when that connection closes. Each datagram
+  carries `[RSV RSV FRAG][address][payload]`; a fragment is refused rather
+  than passed on as if it were whole. `relay_datagrams` is `relay`'s
+  counterpart and differs in two ways that are both UDP's: one datagram per
+  read and per write, never split or joined, and the flow ends when either
+  direction does, because nothing can say it has finished.
+- **The libraries disagree about two things, quietly.** wintun-bindings hands
+  out `windows_sys`' `NET_LUID_LH` while IP Helper here is the `windows`
+  crate's — the same eight bytes declared twice, so the number crosses and the
+  type does not. And its session speaks the *futures* `AsyncRead`/`AsyncWrite`
+  while ipstack wants tokio's, which is what `tokio-util`'s `compat` is for.
+- **ipstack ends a connection with `block_in_place`**, so it must run on a
+  multi-threaded runtime. Both of bliss's are.
+- **Still missing, and each is a visible hole:** IPv6 is neither carried nor
+  blocked, so a machine with working IPv6 reaches IPv6 sites around the
+  tunnel; DNS still goes out the physical interface, which is a leak Windows
+  makes worse by asking every adapter at once; and there is no service or
+  helper, so TUN needs the whole of bliss running as administrator.
+
+## 10. xray-core facts
 
 - Nearly every release is flagged prerelease, so "latest" can be months old. The
   downloader installs the newest **stable** release; `--newest` takes any.
 - Checksums in `.dgst` are labelled `SHA2-256=`.
 - Xray now calls `streamSettings.network` `raw` where it used to be `tcp`
-  (`config.rs` emits `raw`, `server.rs` accepts both); the `mixed` inbound serves
-  SOCKS and HTTP on one port.
+  (`config.rs` emits `raw`, `link/stream.rs` accepts both); the `mixed` inbound
+  serves SOCKS and HTTP on one port.
 - `kill_on_drop` does not survive `TerminateProcess` of the parent; the engine
   runs in a Job Object with kill-on-close (`job.rs`).
 - "Ready" means three things (`process.rs`): the bridge port was free before
   spawn, the child is still alive, and whatever answers speaks SOCKS5.
-- VLESS Encryption (`encryption=mlkem768x25519plus…`) needs a recent engine:
-  `minimum_xray_version` (`config.rs`) says which (25.0), and `check_version`
-  (`process.rs`) enforces it in `engine::start` before spawning — major version
-  only, so any 25.x passes.
+- **A config is written for one engine version.** `check_version` reads it
+  (`Version`, compared as numbers: 26.10 is after 26.9) and refuses an engine
+  older than `minimum_xray_version` asks for, in `engine::start` before
+  spawning; `build` takes it too. VLESS Encryption
+  (`encryption=mlkem768x25519plus…`) needs 25.0; Hysteria 2, mKCP and a
+  link's own `fm` need 26.2, where finalmask arrived; `pcs` needs 26.1.
+- **The schema moves under a link, release by release.** Checked in Xray's
+  `infra/conf` at each tag, and what bliss does about it:
+  - `allowInsecure` is refused outright after 2026-06-01 — a date check inside
+    26.3.27 itself, which fails the whole config. bliss never writes it; a
+    certificate is pinned with `pinnedPeerCertSha256` (`pcs` in a link, and
+    Hysteria's `pinSHA256`) or checked against other names
+    (`verifyPeerCertByName`, `vcn`). A link that asks for insecure with no pin
+    gets a warning in the log at start, because a self-signed server will
+    then be refused and nothing else would say why.
+  - mKCP's `header` and `seed` left `kcpSettings` in 26.2 for finalmask masks,
+    innermost first: `mkcp-aes128gcm` with the seed as password (or
+    `mkcp-original` without one) under a `header-*` disguise. In 26.6 both
+    became `mkcp-legacy`, with `value` and `header`. `kcp_masks` writes
+    whichever the engine reads; only the 26.2–26.5 form was ever run (on
+    26.3.27), the other is v2rayN's and untested here.
+  - HTTP/2 (`h2`, `http`) and QUIC transports are gone; such links are refused
+    when pasted. REALITY works over RAW, XHTTP and gRPC only.
+  - Hysteria 2 (26.1) is the `hysteria` protocol over the `hysteria`
+    transport: the password goes in `hysteriaSettings.auth`, Salamander and
+    port hopping in `finalmask`. **A hop needs an interval**: without one
+    26.3.27 panics on the first connection ("non-positive interval for
+    NewTicker") and takes the engine with it. No link carries one, so it is
+    Hysteria's own 30 s. Its ALPN is not ours to set — quic-go's HTTP/3
+    transport writes `h3` over any — but a *server* must offer `h3`, or it
+    refuses every client with `CRYPTO_ERROR 0x178 … no application protocol`;
+    the engine test's first hand-made server did.
+  - WireGuard has no `streamSettings`, and xray's WireGuard server hands its
+    packets to gVisor, which drops any addressed to loopback as martian: the
+    handshake succeeds and nothing else does. The engine test asks for a
+    TEST-NET-3 address and lets the server's `freedom` redirect it.
+- **A server reached over UDP has no ping.** The list's ping is a TCP
+  handshake, which Hysteria 2, WireGuard and mKCP servers never answer, so
+  they show «UDP» rather than «нет» (`ServerConfig::over_udp`, `Ping::Udp`).
 - **xray answers a SOCKS CONNECT as soon as it accepts it, not when the server is
   reached.** Timing `Outbound::connect_tcp` measured 0 ms (`measure_latency` in
   `engine.rs`): a successful dial proves nothing about the tunnel, and an
@@ -764,7 +1016,7 @@ Two more probes that worked:
   health checks on either assumption. Latency is two `HEAD` requests on one
   kept-alive connection, timing the second; the first pays for the handshakes.
 
-## 10. Where things stand
+## 11. Where things stand
 
 **Done in stage 1:** renderer spike; profile and link parsing; xray management
 and download; relay and connection table; system proxy (three modes, crash-safe
@@ -783,12 +1035,34 @@ subscription's servers grouped under its name, a rule filter for the
 connections table, and log levels in colour; a settings screen, which so far
 starts bliss with Windows, minimized or not; scrollbars that draw only a thumb;
 the traffic chart as a gliding curve with the rate under the pointer; the tray,
-which the window hides into and whose menu bliss draws itself. The tunnel
-already starts with the window (`Setup.autostart`).
+which the window hides into and whose menu bliss draws itself; one window at a
+time, a second copy leaving at once (rule 24); links for every kind of
+server xray reaches — VLESS, VMess (v2rayN's JSON and the URL form), Trojan,
+Shadowsocks (SIP002, the old base64 shape, the 2022 ciphers, obfs-local and
+v2ray-plugin as xray transports), SOCKS, Hysteria 2 and WireGuard — over RAW
+(with its HTTP disguise), WebSocket, HTTPUpgrade, XHTTP, gRPC and mKCP, under
+TLS (pinned, checked by name, ECH) or REALITY (with ML-DSA verification),
+each carried end to end through a real xray 26.3.27 in the engine test (§2).
+The tunnel already starts with the window (`Setup.autostart`).
 
-**Open:** renaming servers; the rest of the settings screen (ports, the
-engine, installing it with a button); UDP ASSOCIATE; an idle timeout for
-half-open connections; the first-run wizard (1.8); the 12-hour memory run.
+**Started in stage 2:** the TUN adapter — wintun inside the binary, the
+adapter and its routes, TCP and UDP carried through the same rules and the
+same table, a switch under the ring on the main screen (`[tun] enabled`)
+and `bliss run --tun`, both honoured only by a copy with administrator rights
+(§9) — which the window can be (rule 25). **Never yet run against the real network**: every claim about it here
+comes from the code and the unit tests, and the first elevated run is the
+user's to make.
+
+**Open:** UDP through the SOCKS inbound (`UDP ASSOCIATE` is implemented for
+the *outbound* side only, so a program pointed at the SOCKS port still has no
+UDP); the name out of the connection itself (SNI, `Host:`) so domain rules
+reach TUN traffic, and fake-IP after it; a privileged helper or service
+that owns the adapter and the routes, so TUN no longer needs all of bliss
+elevated; IPv6 in the TUN, either carried or blocked; renaming servers;
+turning a link that asks for an unchecked certificate into a pinned one (xray
+no longer has `allowInsecure`, §10); the rest of the settings screen (ports, the
+engine, installing it with a button); an idle timeout for half-open
+connections; the first-run wizard (1.8); the 12-hour memory run.
 
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes

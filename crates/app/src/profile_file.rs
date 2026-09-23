@@ -19,7 +19,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use bliss_proto::{Action, LinkError, Profile, Rule, ServerConfig, ServerEntry, Subscription};
+use bliss_proto::{
+    Action, LinkError, Profile, Rule, ServerConfig, ServerEntry, Subscription, Unsupported,
+};
 
 use crate::subscription::Fetched;
 use crate::ui::plural;
@@ -185,7 +187,7 @@ fn free_backup_path(path: &Path) -> PathBuf {
 pub fn add_server(profile: &mut Profile, link: &str) -> Result<ServerConfig, String> {
     let link = link.trim();
     if link.is_empty() {
-        return Err("вставьте ссылку vless://".to_owned());
+        return Err("вставьте ссылку на сервер".to_owned());
     }
     let config: ServerConfig = link.parse().map_err(|e| link_problem(link, &e))?;
     if profile.servers.iter().any(|s| s.link.trim() == link) {
@@ -263,7 +265,7 @@ pub struct Imported {
     pub added: Vec<ServerConfig>,
     /// Already in the profile.
     pub known: usize,
-    /// Links to other protocols, and vless:// links that do not parse.
+    /// Links to protocols xray-core does not speak, and links that do not parse.
     pub skipped: usize,
 }
 
@@ -303,13 +305,13 @@ pub fn import_servers(profile: &mut Profile, text: &str) -> Result<Imported, Str
             });
         }
         return Err(match (found.foreign, found.broken) {
-            (0, 0) => "в тексте нет ссылок vless://".to_owned(),
+            (0, 0) => "в тексте нет ссылок на серверы".to_owned(),
             (foreign, 0) => format!(
-                "{} других протоколов, а bliss понимает только vless://",
+                "{} на протоколы, которых нет в xray-core",
                 plural(foreign as u64, "ссылка", "ссылки", "ссылок")
             ),
             (_, broken) => format!(
-                "{} vless:// не читаются — скопируйте заново",
+                "{} не читаются — скопируйте заново",
                 plural(broken as u64, "ссылка", "ссылки", "ссылок")
             ),
         });
@@ -614,11 +616,16 @@ fn link_problem(link: &str, e: &LinkError) -> String {
              «Подписки»"
                 .to_owned()
         }
-        LinkError::Scheme(scheme) => {
-            format!("ссылки {scheme}:// bliss пока не понимает — нужна ссылка vless://")
+        LinkError::Scheme(scheme) => format!(
+            "{scheme}:// — не ссылка на сервер. bliss понимает vless, vmess, trojan, ss, socks, \
+             hysteria2 и wireguard"
+        ),
+        LinkError::NotInXray(scheme) => {
+            format!("это сервер {scheme}, а такой протокол движок xray-core не поддерживает")
         }
         LinkError::Url(_) if !link.contains("://") => {
-            "это не похоже на ссылку — она начинается с vless://".to_owned()
+            "это не похоже на ссылку — она начинается с vless://, trojan:// и тому подобного"
+                .to_owned()
         }
         LinkError::Url(_) => "ссылка повреждена — скопируйте её заново целиком".to_owned(),
         LinkError::MissingUuid | LinkError::Uuid(_) => {
@@ -626,6 +633,17 @@ fn link_problem(link: &str, e: &LinkError) -> String {
         }
         LinkError::MissingHost => "в ссылке нет адреса сервера".to_owned(),
         LinkError::MissingPort => "в ссылке нет порта сервера".to_owned(),
+        LinkError::Missing(what) => {
+            let what = match *what {
+                "password" => "пароля",
+                "method and password" => "шифра и пароля",
+                "private key" => "закрытого ключа",
+                "publickey" => "ключа сервера (publickey)",
+                "obfs-password" => "пароля обфускации (obfs-password)",
+                other => other,
+            };
+            format!("в ссылке нет {what} — скопируйте её заново целиком")
+        }
         LinkError::RealityMissing(param) => {
             format!("для REALITY в ссылке не хватает параметра {param}")
         }
@@ -635,8 +653,25 @@ fn link_problem(link: &str, e: &LinkError) -> String {
             format!("в ссылке неверный параметр {param}: ожидается {expected}")
         }
         LinkError::UnsupportedTransport(transport) => {
-            format!("транспорт {transport} bliss пока не поддерживает — только TCP")
+            format!(
+                "транспорта {transport} в xray-core больше нет — попросите у провайдера новую ссылку"
+            )
         }
+        LinkError::Unsupported(what) => match what {
+            Unsupported::Cipher(cipher) => format!(
+                "шифр {cipher} устарел, и xray-core его больше не поддерживает — \
+                 попросите у провайдера ссылку с AEAD-шифром"
+            ),
+            Unsupported::Plugin(plugin) => format!(
+                "плагин {plugin} xray-core заменить не может — нужен сам плагин, а bliss их не запускает"
+            ),
+            Unsupported::Obfs(obfs) => {
+                format!("обфускацию {obfs} xray-core не умеет — только salamander")
+            }
+            Unsupported::LegacyXtls => {
+                "старый XTLS (security=xtls) убран из xray-core — нужна ссылка с Vision".to_owned()
+            }
+        },
         LinkError::Encryption(_) => "в ссылке не разбирается параметр encryption".to_owned(),
     }
 }
@@ -831,7 +866,12 @@ mod tests {
                 "https://sub.example/api/subscribe?token=SECRETTOKEN",
                 "подписк",
             ),
-            ("trojan://SECRETTOKEN@a.example:443", "trojan"),
+            ("tuic://SECRETTOKEN@a.example:443", "xray-core"),
+            // A cipher xray dropped is named; the password beside it is not.
+            (
+                "ss://YWVzLTI1Ni1jZmI6U0VDUkVUVE9LRU4@a.example:8388",
+                "aes-256-cfb",
+            ),
             ("SECRETTOKEN", "не похоже на ссылку"),
             (
                 "vless://11111111-2222-3333-4444-555555555555@a.example:443?security=reality&sni=b.example&sid=SECRETTOKEN",
@@ -885,10 +925,10 @@ mod tests {
         let again = import_servers(&mut profile, &list).expect_err("nothing new");
         assert!(again.contains("уже есть"), "{again}");
         // One line keeps the precise reason a single link gets.
-        let one = import_servers(&mut profile, "trojan://SECRETTOKEN@a.example:443")
-            .expect_err("not ours");
+        let one = import_servers(&mut profile, "tuic://SECRETTOKEN@a.example:443")
+            .expect_err("not xray's");
         assert!(
-            one.contains("trojan") && !one.contains("SECRETTOKEN"),
+            one.contains("tuic") && !one.contains("SECRETTOKEN"),
             "{one}"
         );
     }

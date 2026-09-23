@@ -1,13 +1,11 @@
-//! A server as described by a `vless://` share link.
+//! A server as described by a share link: what it speaks, how it hides, and
+//! what carries it. The links themselves are read in `link/`.
 
 use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
-use url::Url;
 use uuid::Uuid;
 
 use crate::encryption::Encryption;
@@ -44,11 +42,23 @@ pub struct ServerConfig {
     pub tag: String,
     pub address: Address,
     pub port: u16,
-    pub user: UserId,
-    pub encryption: Encryption,
-    pub flow: Flow,
+    pub protocol: Protocol,
     pub security: Security,
     pub transport: Transport,
+    /// `fm`: xray's own `finalmask` object, carried as written. It replaces
+    /// the one bliss would build, the way v2rayN treats it.
+    pub finalmask: Option<Hidden>,
+}
+
+impl ServerConfig {
+    /// Whether the server is reached over UDP, where a TCP handshake — the
+    /// server list's ping — measures nothing.
+    pub fn over_udp(&self) -> bool {
+        matches!(
+            self.protocol,
+            Protocol::Hysteria2 { .. } | Protocol::WireGuard(_)
+        ) || matches!(self.transport, Transport::Kcp { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,11 +67,113 @@ pub enum Address {
     Domain(String),
 }
 
+/// What the server speaks, and the credentials it takes.
+#[derive(Debug, Clone)]
+pub enum Protocol {
+    Vless {
+        user: UserId,
+        encryption: Encryption,
+        flow: Flow,
+    },
+    /// AEAD VMess only: xray dropped the legacy handshake, so a link's
+    /// `alterId` is read and ignored.
+    Vmess {
+        user: UserId,
+        cipher: VmessCipher,
+    },
+    Trojan {
+        password: Hidden,
+    },
+    /// `method` is one xray knows, checked when the link is read.
+    Shadowsocks {
+        method: String,
+        password: Hidden,
+    },
+    Socks {
+        login: Option<Login>,
+    },
+    Hysteria2 {
+        auth: Hidden,
+    },
+    WireGuard(WireGuard),
+}
+
+impl Protocol {
+    /// The protocol's name as people write it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Vless { .. } => "VLESS",
+            Self::Vmess { .. } => "VMess",
+            Self::Trojan { .. } => "Trojan",
+            Self::Shadowsocks { .. } => "Shadowsocks",
+            Self::Socks { .. } => "SOCKS",
+            Self::Hysteria2 { .. } => "Hysteria2",
+            Self::WireGuard(_) => "WireGuard",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Flow {
     #[default]
     None,
     XtlsRprxVision,
+    /// Vision that lets UDP to port 443 through, where plain Vision blocks it
+    /// to push browsers from QUIC back to TCP.
+    XtlsRprxVisionUdp443,
+}
+
+impl Flow {
+    pub fn as_param(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::XtlsRprxVision => Some("xtls-rprx-vision"),
+            Self::XtlsRprxVisionUdp443 => Some("xtls-rprx-vision-udp443"),
+        }
+    }
+}
+
+/// VMess's own cipher, `scy` in a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VmessCipher {
+    #[default]
+    Auto,
+    Aes128Gcm,
+    Chacha20Poly1305,
+    None,
+    Zero,
+}
+
+impl VmessCipher {
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Aes128Gcm => "aes-128-gcm",
+            Self::Chacha20Poly1305 => "chacha20-poly1305",
+            Self::None => "none",
+            Self::Zero => "zero",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Login {
+    pub user: Hidden,
+    pub pass: Hidden,
+}
+
+#[derive(Debug, Clone)]
+pub struct WireGuard {
+    /// This side's key: the link's user part.
+    pub secret_key: PrivateKey,
+    /// The server's key.
+    pub peer_key: PublicKey,
+    pub pre_shared_key: Option<PrivateKey>,
+    /// This side's addresses inside the tunnel, with their prefixes.
+    pub addresses: Vec<String>,
+    /// Three bytes some servers (Cloudflare's WARP) expect in every packet.
+    pub reserved: Option<[u8; 3]>,
+    pub mtu: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,12 +183,30 @@ pub enum Security {
     Reality(Reality),
 }
 
+impl Security {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Tls(_) => "tls",
+            Self::Reality(_) => "reality",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Tls {
     pub sni: Option<String>,
     pub alpn: Vec<String>,
     pub fingerprint: Fingerprint,
+    /// Asked for by the link and never passed on: xray refuses the option
+    /// since June 2026 and wants the certificate pinned (`pcs`) instead.
     pub allow_insecure: bool,
+    /// `pcs`: SHA-256 of the certificates to accept, in hex.
+    pub pinned: Vec<String>,
+    /// `vcn`: names to check the certificate against instead of the SNI.
+    pub verify_names: Vec<String>,
+    /// `ech`: an ECHConfigList, base64.
+    pub ech: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +220,8 @@ pub struct Reality {
     /// `spx` — the path the client crawls on the real site when auth fails.
     /// Camouflage only; it never carries our traffic.
     pub spider_x: Option<String>,
+    /// `pqv`: the server's ML-DSA-65 key, to verify its post-quantum signature.
+    pub mldsa65_verify: Option<Long>,
 }
 
 /// Which browser's ClientHello to parrot.
@@ -109,30 +241,129 @@ pub enum Fingerprint {
     Other(String),
 }
 
+/// What carries the protocol's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
-    Tcp { header: TcpHeader },
+    /// Plain TCP, which xray now calls `raw`.
+    Tcp {
+        header: TcpHeader,
+    },
+    Ws {
+        path: String,
+        host: Option<String>,
+    },
+    HttpUpgrade {
+        path: String,
+        host: Option<String>,
+    },
+    Xhttp {
+        path: String,
+        host: Option<String>,
+        /// `auto`, `packet-up`, `stream-up` or `stream-one`.
+        mode: String,
+        /// The link's `extra`: the rest of xray's XHTTP settings, as JSON.
+        extra: Option<Hidden>,
+    },
+    Grpc {
+        service_name: String,
+        authority: Option<String>,
+        multi: bool,
+    },
+    Kcp {
+        header: KcpHeader,
+        seed: Option<Hidden>,
+        mtu: Option<u32>,
+    },
+    /// Hysteria 2's own QUIC; only a `hysteria2://` link has it.
+    Hysteria {
+        /// Salamander's password, when the packets are obfuscated.
+        obfs: Option<Hidden>,
+        /// The ports to hop between, as xray writes them: `20000-30000,443`.
+        hop: Option<String>,
+    },
+    /// No stream at all: WireGuard carries itself.
+    None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+impl Transport {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Tcp { .. } => "tcp",
+            Self::Ws { .. } => "ws",
+            Self::HttpUpgrade { .. } => "httpupgrade",
+            Self::Xhttp { .. } => "xhttp",
+            Self::Grpc { .. } => "grpc",
+            Self::Kcp { .. } => "kcp",
+            Self::Hysteria { .. } => "quic",
+            Self::None => "udp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TcpHeader {
     #[default]
     None,
-    Http,
+    /// The first bytes dressed as an HTTP request to one of these hosts.
+    Http {
+        host: Vec<String>,
+        path: Vec<String>,
+    },
+}
+
+/// What mKCP's packets are dressed as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KcpHeader {
+    #[default]
+    None,
+    Srtp,
+    Utp,
+    /// `wechat-video` in a link.
+    Wechat,
+    Dtls,
+    WireGuard,
+}
+
+impl KcpHeader {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Srtp => "srtp",
+            Self::Utp => "utp",
+            Self::Wechat => "wechat",
+            Self::Dtls => "dtls",
+            Self::WireGuard => "wireguard",
+        }
+    }
 }
 
 // --- credential-bearing newtypes ------------------------------------------
 //
 // These exist for one reason: `Debug`. A ServerConfig is printed into the log
 // pane, into error reports and into bug reports, and a plain derive would
-// spill a live UUID and Reality key every time. Redacting at the type means we
-// cannot forget at a call site.
+// spill a live UUID, password or key every time. Redacting at the type means
+// we cannot forget at a call site.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct UserId(pub Uuid);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey(pub [u8; 32]);
+
+/// A key that must never be shown, not even in part: a WireGuard private key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PrivateKey(pub [u8; 32]);
+
+/// A value `Debug` never shows: passwords, and anything that may hold one.
+///
+/// Unlike a UUID, a password has no shape that makes part of it safe to
+/// print — eight characters of a sixteen-character password are most of it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Hidden(pub String);
+
+/// A long public value, shown by its two ends: enough to tell two apart.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Long(pub String);
 
 /// REALITY's `sid`: up to 8 bytes of hex, zero-padded on the right.
 ///
@@ -156,6 +387,24 @@ impl fmt::Debug for UserId {
 impl fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&crate::redact::b64(&self.0))
+    }
+}
+
+impl fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("‹key›")
+    }
+}
+
+impl fmt::Debug for Hidden {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("‹hidden›")
+    }
+}
+
+impl fmt::Debug for Long {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&crate::redact::head_tail(&self.0))
     }
 }
 
@@ -216,130 +465,8 @@ impl FromStr for ServerConfig {
     type Err = LinkError;
 
     fn from_str(link: &str) -> Result<Self, Self::Err> {
-        let url = Url::parse(link.trim())?;
-        if url.scheme() != "vless" {
-            return Err(LinkError::Scheme(url.scheme().to_owned()));
-        }
-
-        let user = match url.username() {
-            "" => return Err(LinkError::MissingUuid),
-            raw => UserId(Uuid::parse_str(
-                &percent_decode_str(raw).decode_utf8_lossy(),
-            )?),
-        };
-
-        let host = url.host_str().ok_or(LinkError::MissingHost)?;
-        let address = match host.trim_start_matches('[').trim_end_matches(']').parse() {
-            Ok(ip) => Address::Ip(ip),
-            Err(_) => Address::Domain(host.to_owned()),
-        };
-        let port = url.port().ok_or(LinkError::MissingPort)?;
-
-        let q: std::collections::HashMap<String, String> = url
-            .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        let get = |k: &str| q.get(k).map(String::as_str).filter(|v| !v.is_empty());
-
-        let encryption = Encryption::parse(get("encryption").unwrap_or("none"))?;
-
-        let flow = match get("flow") {
-            None => Flow::None,
-            Some("xtls-rprx-vision") => Flow::XtlsRprxVision,
-            Some(other) => {
-                return Err(LinkError::BadValue {
-                    param: "flow",
-                    expected: "xtls-rprx-vision or empty",
-                    got: other.to_owned(),
-                });
-            }
-        };
-
-        let fingerprint = get("fp").map(Fingerprint::from).unwrap_or_default();
-        let security = match get("security") {
-            None | Some("none") => Security::None,
-            Some("tls") => Security::Tls(Tls {
-                sni: get("sni").map(str::to_owned),
-                alpn: get("alpn")
-                    .map(|a| a.split(',').map(str::to_owned).collect())
-                    .unwrap_or_default(),
-                fingerprint,
-                allow_insecure: get("allowInsecure") == Some("1"),
-            }),
-            Some("reality") => Security::Reality(Reality {
-                sni: get("sni")
-                    .ok_or(LinkError::RealityMissing("sni"))?
-                    .to_owned(),
-                fingerprint,
-                public_key: parse_public_key(get("pbk").ok_or(LinkError::RealityMissing("pbk"))?)?,
-                short_id: match get("sid") {
-                    Some(hex) => ShortId::parse_hex(hex)?,
-                    None => ShortId::EMPTY,
-                },
-                spider_x: get("spx").map(str::to_owned),
-            }),
-            Some(other) => {
-                return Err(LinkError::BadValue {
-                    param: "security",
-                    expected: "none, tls or reality",
-                    got: other.to_owned(),
-                });
-            }
-        };
-
-        let transport = match get("type").unwrap_or("tcp") {
-            // Xray renamed "tcp" to "raw" in 25.x; links in the wild use both.
-            "tcp" | "raw" => Transport::Tcp {
-                header: match get("headerType") {
-                    None | Some("none") => TcpHeader::None,
-                    Some("http") => TcpHeader::Http,
-                    Some(other) => {
-                        return Err(LinkError::BadValue {
-                            param: "headerType",
-                            expected: "none or http",
-                            got: other.to_owned(),
-                        });
-                    }
-                },
-            },
-            other => return Err(LinkError::UnsupportedTransport(other.to_owned())),
-        };
-
-        let tag = url
-            .fragment()
-            .map(|f| percent_decode_str(f).decode_utf8_lossy().into_owned())
-            .filter(|f| !f.is_empty())
-            .unwrap_or_else(|| format!("{address}:{port}"));
-
-        Ok(Self {
-            tag,
-            address,
-            port,
-            user,
-            encryption,
-            flow,
-            security,
-            transport,
-        })
+        crate::link::parse(link.trim())
     }
-}
-
-fn parse_public_key(raw: &str) -> Result<PublicKey, LinkError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(raw)
-        .map_err(|_| LinkError::BadValue {
-            param: "pbk",
-            expected: "base64url without padding",
-            got: raw.to_owned(),
-        })?;
-    let len = bytes.len();
-    Ok(PublicKey(bytes.try_into().map_err(|_| {
-        LinkError::BadValue {
-            param: "pbk",
-            expected: "32 bytes",
-            got: format!("{len} bytes"),
-        }
-    })?))
 }
 
 impl From<&str> for Fingerprint {
@@ -363,6 +490,16 @@ impl fmt::Display for Address {
             Self::Ip(IpAddr::V6(ip)) => write!(f, "[{ip}]"),
             Self::Ip(ip) => write!(f, "{ip}"),
             Self::Domain(d) => f.write_str(d),
+        }
+    }
+}
+
+impl Address {
+    /// The host part of a URL, with an IPv6 literal's brackets taken off.
+    pub(crate) fn from_host(host: &str) -> Self {
+        match host.trim_start_matches('[').trim_end_matches(']').parse() {
+            Ok(ip) => Self::Ip(ip),
+            Err(_) => Self::Domain(host.to_owned()),
         }
     }
 }

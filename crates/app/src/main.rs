@@ -27,7 +27,7 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use bliss_proto::{Encryption, Profile, Security, ServerConfig};
+use bliss_proto::{Encryption, Profile, Protocol, Security, ServerConfig};
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Context, Result, bail, eyre};
 use tracing_error::ErrorLayer;
@@ -51,7 +51,8 @@ enum Command {
     Check {
         /// Profile to check. Defaults to the one in the bliss config directory.
         path: Option<PathBuf>,
-        /// Read one vless:// link from stdin instead of reading a profile.
+        /// Read one server link (vless://, vmess://, trojan://, ss://, …) from
+        /// stdin instead of reading a profile.
         ///
         /// stdin rather than an argument: a link carries a live UUID and Reality
         /// keys, and an argument lands in shell history and the process table.
@@ -86,6 +87,14 @@ enum Command {
         /// How talkative the engine should be: warning, info, debug.
         #[arg(long, default_value = "warning")]
         engine_log: String,
+        /// Also carry the machine's traffic through a TUN adapter, which is
+        /// the only way UDP goes through the tunnel — calls, games, QUIC.
+        ///
+        /// Needs administrator rights: the adapter and its routes are not
+        /// something a normal process may create. Run it from an elevated
+        /// console.
+        #[arg(long)]
+        tun: bool,
     },
 }
 
@@ -185,8 +194,131 @@ async fn cli(command: Command) -> Result<()> {
             path,
             server,
             engine_log,
-        } => run(path, server, &engine_log).await,
+            tun,
+        } => run(path, server, &engine_log, tun).await,
     }
+}
+
+/// The claim on being *the* bliss window, held for as long as the process runs.
+///
+/// A second copy is worse than useless: it shares the work dir, the profile,
+/// the ports and — through dioxus-desktop, which names WebView2's data folder
+/// after the executable — that folder too. WebView2 will not give a second
+/// process an environment over the same folder, so the second copy **never
+/// gets a webview and therefore never shows a window**. Measured on 20
+/// September: the second and third starts each sat there with no child process
+/// and no page while the first went on working, and from the outside that is a
+/// program that started and did nothing. The user spent an evening on it,
+/// clicking a window that belonged to the copy already running.
+#[cfg(windows)]
+struct OnlyWindow(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for OnlyWindow {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateMutexW and is closed once, here.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Take the claim, or answer `None` when another window already has it.
+///
+/// Session-local (`Local\`), not machine-wide: another user signed in at the
+/// same time has their own profile and their own ports, and has every right to
+/// their own window.
+///
+/// Named after the executable, because that is what the thing being protected
+/// is named after: dioxus-desktop calls WebView2's data folder
+/// `%LOCALAPPDATA%\<exe stem>`, and it is one browser process per folder. Two
+/// copies of `bliss.exe` anywhere on the disk share it and must not both run;
+/// a copy renamed `bliss-probe.exe` has a folder of its own and may (§7).
+#[cfg(windows)]
+fn only_window() -> Option<OnlyWindow> {
+    claim(&claim_name())
+}
+
+/// `bliss-window-<exe stem>`, with anything a mutex name cannot hold replaced.
+///
+/// A name may not contain a backslash — that separates the namespace — and
+/// the stem comes from the file system, so it is filtered rather than trusted.
+#[cfg(windows)]
+fn claim_name() -> String {
+    let stem = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "bliss".to_owned());
+    let kept: String = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    format!(
+        "Local\\bliss-window-{}",
+        if kept.is_empty() { "bliss" } else { &kept }
+    )
+}
+
+/// The claim itself, by name, so a test can take one of its own instead of
+/// fighting whichever bliss the person has open — the same trick as
+/// `BLISS_STARTUP_KEY` for the Run key.
+#[cfg(windows)]
+fn claim(name: &str) -> Option<OnlyWindow> {
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::HSTRING;
+
+    let name = HSTRING::from(name);
+    // SAFETY: a named mutex with no security attributes; the name is ours, and
+    // lives until the call returns.
+    let claim = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) }.ok()?;
+    // The handle is valid either way: what says whether it is ours is the last
+    // error, which has to be read before anything else can overwrite it.
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // Closed here rather than held: this copy is leaving. What to do about
+        // it is the caller's, so that taking the claim is all this does.
+        drop(OnlyWindow(claim));
+        return None;
+    }
+    Some(OnlyWindow(claim))
+}
+
+/// Bring the window that is already running to the front, if it is on screen.
+///
+/// Best effort, and only that: a copy hiding in the tray cannot be shown from
+/// out here. Its window belongs to tao, which keeps its own idea of whether it
+/// is visible and undoes anything done behind its back (rule 20 in AGENTS.md),
+/// so this raises a window that is already up and never tries to show one.
+#[cfg(windows)]
+fn raise_the_running_window() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, IsWindowVisible, SetForegroundWindow,
+    };
+    use windows::core::w;
+
+    // tao's class for every window it makes, and the title `launch` gives ours.
+    // SAFETY: both arguments are literals; a window that has gone since is
+    // reported as not found rather than used.
+    let Ok(window) = (unsafe { FindWindowW(w!("Window Class"), w!("bliss")) }) else {
+        tracing::info!("the running bliss is in the tray; its icon is by the clock");
+        return;
+    };
+    if unsafe { IsWindowVisible(window) }.as_bool() {
+        let _ = unsafe { SetForegroundWindow(window) };
+    } else {
+        tracing::info!("the running bliss is in the tray; its icon is by the clock");
+    }
+}
+
+#[cfg(not(windows))]
+struct OnlyWindow;
+
+#[cfg(not(windows))]
+fn only_window() -> Option<OnlyWindow> {
+    Some(OnlyWindow)
 }
 
 /// Open the window.
@@ -194,6 +326,12 @@ async fn cli(command: Command) -> Result<()> {
 /// This thread belongs to the event loop from here on — every windowing library
 /// insists on the main thread — so the engine gets a runtime of its own.
 fn window(minimized: bool) -> Result<()> {
+    // Only one window at a time, and this is where a second copy stops.
+    let Some(_only) = only_window() else {
+        tracing::info!("another bliss already has the window; leaving it to that one");
+        raise_the_running_window();
+        return Ok(());
+    };
     let setup = window_setup()?;
     let work_dir = setup.work_dir.clone();
     let controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
@@ -252,13 +390,16 @@ fn window_setup() -> Result<engine::Setup> {
         tracing::warn!("server #{} in the profile is unusable - {err}", i + 1);
     }
     Ok(engine::Setup {
-        profile,
         servers,
         selected: 0,
         work_dir: work_dir()?,
         profile_path: path,
         engine_log: bliss_xray::LogLevel::Warning,
         autostart: true,
+        // Honoured only by a copy that has the rights for it; the settings
+        // screen says so when this one does not.
+        tun: profile.tun.enabled,
+        profile,
         problem,
     })
 }
@@ -298,7 +439,7 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
                     path.display()
                 ),
                 None => bail!(
-                    "no server in {}. Add one in the bliss window, or paste a vless:// link into the file — the [[server]] block at the bottom shows where.",
+                    "no server in {}. Add one in the bliss window, or paste a server link into the file — the [[server]] block at the bottom shows where.",
                     path.display()
                 ),
             }
@@ -309,6 +450,8 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
     Ok(engine::Setup {
         work_dir: work_dir()?,
         engine_log: parse_log_level(engine_log)?,
+        // The profile's choice; `run --tun` turns it on for this run alone.
+        tun: profile.tun.enabled,
         autostart: true,
         profile_path: path,
         profile,
@@ -492,8 +635,16 @@ bliss uses it automatically — no engine.xray needed in the profile."
 
 // --- run ------------------------------------------------------------------
 
-async fn run(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Result<()> {
-    let setup = prepare(path, want, engine_log)?;
+async fn run(
+    path: Option<PathBuf>,
+    want: Option<String>,
+    engine_log: &str,
+    tun: bool,
+) -> Result<()> {
+    let mut setup = prepare(path, want, engine_log)?;
+    // The flag turns it on for this run; it never turns off what the profile
+    // asks for, because leaving it out is not the same as saying no.
+    setup.tun |= tun;
     // Before the engine thread, so a missing engine is reported here rather
     // than as a failed start a moment later.
     engine::engine_path(&setup).map_err(|e| eyre!(e))?;
@@ -790,13 +941,13 @@ fn check_one_link() -> Result<()> {
         .read_to_string(&mut link)
         .wrap_err("failed to read a link from stdin")?;
     if link.trim().is_empty() {
-        bail!("nothing on stdin — paste a vless:// link, then Ctrl-Z Enter");
+        bail!("nothing on stdin — paste a server link, then Ctrl-Z Enter");
     }
 
     let config: ServerConfig = link
         .trim()
         .parse()
-        .wrap_err("this is not a vless:// link bliss can use")?;
+        .wrap_err("this is not a server link bliss can use")?;
 
     println!("{}", describe(&config));
     Ok(())
@@ -871,17 +1022,31 @@ fn describe(c: &ServerConfig) -> String {
         Security::Tls(t) => format!("tls sni={}", t.sni.as_deref().unwrap_or("-")),
         Security::None => "plain".to_owned(),
     };
-    let encryption = match &c.encryption {
-        Encryption::None => String::new(),
-        Encryption::MlKem768X25519Plus(e) => format!("  enc={}/{}", e.mode, e.rtt),
-    };
-    let flow = match c.flow {
-        bliss_proto::Flow::XtlsRprxVision => "  vision",
-        bliss_proto::Flow::None => "",
+    let own = match &c.protocol {
+        Protocol::Vless {
+            encryption, flow, ..
+        } => {
+            let flow = flow
+                .as_param()
+                .map(|f| format!("  {f}"))
+                .unwrap_or_default();
+            let encryption = match encryption {
+                Encryption::None => String::new(),
+                Encryption::MlKem768X25519Plus(e) => format!("  enc={}/{}", e.mode, e.rtt),
+            };
+            format!("{flow}{encryption}")
+        }
+        Protocol::Vmess { cipher, .. } => format!("  scy={}", cipher.as_param()),
+        Protocol::Shadowsocks { method, .. } => format!("  {method}"),
+        _ => String::new(),
     };
     format!(
-        "{:<20} {}:{}  {security}{flow}{encryption}",
-        c.tag, c.address, c.port
+        "{:<20} {:<11} {}:{}  {} {security}{own}",
+        c.tag,
+        c.protocol.name(),
+        c.address,
+        c.port,
+        c.transport.name()
     )
 }
 
@@ -911,6 +1076,45 @@ fn work_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One window, and the claim comes back when that one lets go.
+    ///
+    /// The second copy is not merely redundant: WebView2 refuses it an
+    /// environment over the data folder the first one holds, so it never gets
+    /// a page and never shows a window, while still taking a turn at the
+    /// profile and the ports. Measured on 20 September, three copies deep.
+    #[cfg(windows)]
+    #[test]
+    fn only_one_copy_holds_the_window() {
+        let name = r"Local\bliss-window-test";
+        let first = claim(name).expect("the first copy takes the claim");
+        assert!(
+            claim(name).is_none(),
+            "a second copy is refused while the first holds it"
+        );
+        drop(first);
+        let again = claim(name);
+        assert!(
+            again.is_some(),
+            "and the claim is free again once that copy lets go"
+        );
+        drop(again);
+
+        // A copy under another name has a WebView2 folder of its own, so it is
+        // not the same claim and must not be refused — that is how a probe
+        // runs beside the user's bliss (§7 of AGENTS.md).
+        let ours = claim(name).expect("taken again");
+        let beside = claim(r"Local\bliss-window-test-probe");
+        assert!(beside.is_some(), "another name is another claim");
+        drop(beside);
+        drop(ours);
+
+        // And the name really does follow the executable, or every copy would
+        // share one claim however it was named.
+        let mine = claim_name();
+        assert!(mine.starts_with(r"Local\bliss-window-"), "{mine}");
+        assert!(!mine[r"Local\bliss-window-".len()..].is_empty(), "{mine}");
+    }
 
     /// A console follows a command, not the presence of an argument: the
     /// startup entry's `--minimized` on its own is still the window.

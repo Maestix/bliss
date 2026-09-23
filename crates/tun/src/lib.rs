@@ -9,7 +9,19 @@
 //! routes does. See §7 of AGENTS.md for how it is probed.
 
 use std::io;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[cfg(windows)]
+mod device;
+#[cfg(windows)]
+mod net;
+#[cfg(windows)]
+mod stack;
+
+#[cfg(windows)]
+pub use device::MTU;
 
 /// The signed library, carried inside bliss.exe.
 ///
@@ -43,6 +55,152 @@ pub fn place(work_dir: &Path) -> io::Result<PathBuf> {
     std::fs::write(&beside, LIBRARY)?;
     std::fs::rename(&beside, &library)?;
     Ok(library)
+}
+
+/// Whether this copy of bliss could create an adapter at all.
+///
+/// Asked before trying, so the settings screen can say why the switch has no
+/// effect rather than leaving a failed start to explain it. A window started
+/// from the Run key at sign-in is never elevated, which is exactly the case
+/// this exists to describe.
+#[cfg(windows)]
+pub fn elevated() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = windows::Win32::Foundation::HANDLE::default();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
+        return false;
+    }
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut size = 0u32;
+    let asked = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    asked.is_ok() && elevation.TokenIsElevated != 0
+}
+
+#[cfg(not(windows))]
+pub fn elevated() -> bool {
+    false
+}
+
+/// The tunnel, for as long as this is held.
+///
+/// Dropping it puts the machine back: the routes go first, so nothing is being
+/// steered at an adapter that is about to vanish, and then the adapter itself
+/// goes and Windows forgets everything that pointed at it. There is nothing to
+/// undo after a crash, which is the one thing this has over the system proxy —
+/// the adapter cannot outlive the process that made it.
+#[cfg(windows)]
+pub struct Tun {
+    /// Declared before the device so it is dropped before the device.
+    _routes: net::Routes,
+    _device: device::Device,
+    carrying: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(windows)]
+impl Tun {
+    /// Bring the adapter up and start carrying traffic through `serving`.
+    ///
+    /// `around` is every address the engine itself talks to — the server, and
+    /// each address its name resolves to. Those get a route out the ordinary
+    /// way, because the tunnel cannot carry the connection that is the tunnel.
+    ///
+    /// Needs administrator rights, and says so when it does not have them.
+    /// Must be called from a multi-threaded tokio runtime: the stack ends a
+    /// connection with a blocking wait, which a current-thread runtime panics
+    /// on.
+    pub fn up(
+        work_dir: &Path,
+        serving: Arc<bliss_core::Serving>,
+        around: &[Ipv4Addr],
+    ) -> io::Result<Self> {
+        let library = place(work_dir)?;
+        let device = device::Device::open(&library)?;
+        let interface = device.interface();
+        net::set_address(interface, device::ADDRESS, device::PREFIX)?;
+
+        // Read before the routes are added, or the best default route is the
+        // one bliss is about to install.
+        let Some(gateway) = net::gateway(interface)? else {
+            return Err(io::Error::other(
+                "this machine has no default route, so there is nothing for the tunnel itself to go out by",
+            ));
+        };
+
+        let mut routes = net::Routes::new();
+        // The two halves of the address space, which beat the machine's own
+        // default route by being longer without replacing it.
+        routes.through_tunnel(interface, Ipv4Addr::UNSPECIFIED, 1)?;
+        routes.through_tunnel(interface, Ipv4Addr::new(128, 0, 0, 0), 1)?;
+        for address in around {
+            routes.around_tunnel(gateway, *address)?;
+        }
+        tracing::info!(
+            "tun: up on {} via {}, {} address(es) kept outside",
+            device::ADDRESS,
+            gateway,
+            around.len()
+        );
+
+        let session = device.session();
+        let carrying = tokio::spawn(async move {
+            let carrying = Arc::new(stack::Carrying { serving, gateway });
+            if let Err(e) = stack::serve(session, carrying).await {
+                tracing::error!("tun: {e}");
+            }
+        });
+
+        Ok(Self {
+            _routes: routes,
+            _device: device,
+            carrying,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Tun {
+    fn drop(&mut self) {
+        // The task is parked on a read from a session that is about to be shut
+        // down, and would otherwise sit there until the process ends.
+        self.carrying.abort();
+    }
+}
+
+/// Everywhere else, so that the code around it needs no `cfg`.
+///
+/// Wintun is a Windows driver, and the rest of this crate is written against
+/// it; a TUN adapter elsewhere is a different implementation behind the same
+/// name, not a missing feature to paper over.
+#[cfg(not(windows))]
+pub struct Tun;
+
+#[cfg(not(windows))]
+impl Tun {
+    pub fn up(
+        _work_dir: &Path,
+        _serving: Arc<bliss_core::Serving>,
+        _around: &[Ipv4Addr],
+    ) -> io::Result<Self> {
+        Err(io::Error::other(
+            "bliss carries a TUN adapter on Windows only",
+        ))
+    }
 }
 
 #[cfg(test)]

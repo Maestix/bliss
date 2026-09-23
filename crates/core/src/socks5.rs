@@ -17,7 +17,12 @@ use crate::target::Target;
 const VERSION: u8 = 5;
 const NO_AUTH: u8 = 0;
 const CMD_CONNECT: u8 = 1;
+const CMD_UDP: u8 = 3;
 const RESERVED: u8 = 0;
+
+/// The header every datagram carries: two reserved bytes, a fragment number,
+/// then the address it is going to or came from.
+const DATAGRAM_HEAD: usize = 3;
 
 const ATYP_IPV4: u8 = 1;
 const ATYP_DOMAIN: u8 = 3;
@@ -103,6 +108,87 @@ where
     // the tunnel proper begins.
     read_target(stream).await?;
     Ok(())
+}
+
+/// Ask the proxy where to send datagrams, and answer with that address.
+///
+/// `from` is where they will be sent from. Nothing is bound yet when this is
+/// asked, so it is the unspecified address: the proxy is told "expect them
+/// from wherever this connection came from", which is what every client does
+/// and what xray accepts.
+///
+/// The association lives exactly as long as `stream`. SOCKS5 says so, and a
+/// proxy drops it the moment that connection closes — so whoever asks has to
+/// keep the stream, not just the address.
+pub async fn associate_udp<S>(stream: &mut S, from: SocketAddr) -> Result<Target, SocksError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    stream.write_all(&[VERSION, 1, NO_AUTH]).await?;
+    stream.flush().await?;
+
+    let mut greeting = [0u8; 2];
+    stream.read_exact(&mut greeting).await?;
+    if greeting[0] != VERSION {
+        return Err(SocksError::Version(greeting[0]));
+    }
+    if greeting[1] != NO_AUTH {
+        return Err(SocksError::Auth(greeting[1]));
+    }
+
+    let mut request = vec![VERSION, CMD_UDP, RESERVED];
+    write_target(&mut request, &Target::Socket(from))?;
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+
+    let mut head = [0u8; 3];
+    stream.read_exact(&mut head).await?;
+    if head[0] != VERSION {
+        return Err(SocksError::Version(head[0]));
+    }
+    if head[1] != 0 {
+        return Err(SocksError::Refused(head[1]));
+    }
+    // Here the bound address is the answer, not something to be consumed: it
+    // is where the datagrams go.
+    read_target(stream).await
+}
+
+/// Put the header in front of a datagram on its way out.
+pub fn wrap_datagram(out: &mut Vec<u8>, to: &Target, payload: &[u8]) -> Result<(), SocksError> {
+    out.clear();
+    // Two reserved bytes, then the fragment number. bliss never fragments: a
+    // datagram that does not fit is the sender's problem, as it is on any
+    // other path, and reassembly is a buffer that grows.
+    out.extend_from_slice(&[RESERVED, RESERVED, 0]);
+    write_target(out, to)?;
+    out.extend_from_slice(payload);
+    Ok(())
+}
+
+/// Take one apart: who it came from, and where its payload starts.
+///
+/// Parsed with the same reader as every other address on this wire, over a
+/// cursor that is never going to pend. Two parsers for one format is how the
+/// two ends of it drift apart.
+pub async fn unwrap_datagram(packet: &[u8]) -> Result<(Target, usize), SocksError> {
+    if packet.len() < DATAGRAM_HEAD {
+        return Err(SocksError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a datagram too short to hold its own header",
+        )));
+    }
+    if packet[2] != 0 {
+        // A fragment. Dropped rather than held: keeping them means a buffer
+        // per sender with a timer on it, and nothing bliss talks to sends any.
+        return Err(SocksError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a fragmented datagram, which bliss does not reassemble",
+        )));
+    }
+    let mut cursor = std::io::Cursor::new(&packet[DATAGRAM_HEAD..]);
+    let from = read_target(&mut cursor).await?;
+    Ok((from, DATAGRAM_HEAD + cursor.position() as usize))
 }
 
 // --- server: accept a SOCKS5 client ---------------------------------------
@@ -245,6 +331,39 @@ mod tests {
         let mut out = Vec::new();
         write_target(&mut out, &Target::Socket("1.2.3.4:80".parse().unwrap())).unwrap();
         assert_eq!(out, vec![ATYP_IPV4, 1, 2, 3, 4, 0, 80]);
+    }
+
+    /// A datagram says where it is going in front of what it carries, and the
+    /// header is three bytes plus an address — which is what `recv` moves the
+    /// payload down over.
+    #[tokio::test]
+    async fn a_datagram_carries_its_address_in_front_of_its_payload() {
+        let to = Target::Socket("203.0.113.9:53".parse().unwrap());
+        let mut wire = Vec::new();
+        wrap_datagram(&mut wire, &to, b"a query").unwrap();
+        assert_eq!(&wire[..3], &[RESERVED, RESERVED, 0], "reserved, then FRAG");
+
+        let (from, start) = unwrap_datagram(&wire).await.unwrap();
+        assert_eq!(from, to);
+        assert_eq!(&wire[start..], b"a query");
+        // Three header bytes, the address type, four octets and a port.
+        assert_eq!(start, 3 + 1 + 4 + 2);
+    }
+
+    /// A fragment is refused rather than passed on as if it were whole.
+    /// Carried through, its payload would be half a packet with a header that
+    /// looked fine.
+    #[tokio::test]
+    async fn a_fragment_is_refused() {
+        let mut wire = Vec::new();
+        wrap_datagram(
+            &mut wire,
+            &Target::Socket("203.0.113.9:53".parse().unwrap()),
+            b"half",
+        )
+        .unwrap();
+        wire[2] = 1;
+        assert!(unwrap_datagram(&wire).await.is_err());
     }
 
     #[tokio::test]

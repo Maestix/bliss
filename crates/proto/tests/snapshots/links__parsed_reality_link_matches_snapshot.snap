@@ -1,6 +1,7 @@
 ---
 source: crates/proto/tests/links.rs
-expression: reality(REALITY_LINK)
+assertion_line: 97
+expression: parse(REALITY_LINK)
 ---
 ServerConfig {
     tag: "test-reserved",
@@ -8,18 +9,20 @@ ServerConfig {
         203.0.113.10,
     ),
     port: 443,
-    user: 11111111…5555,
-    encryption: MlKem768X25519Plus(
-        VlessEncryption {
-            mode: Native,
-            rtt: Zero,
-            keys: [
-                X25519(AAAAAAAA…AAAA),
-            ],
-            ..
-        },
-    ),
-    flow: XtlsRprxVision,
+    protocol: Vless {
+        user: 11111111…5555,
+        encryption: MlKem768X25519Plus(
+            VlessEncryption {
+                mode: Native,
+                rtt: Zero,
+                keys: [
+                    X25519(AAAAAAAA…AAAA),
+                ],
+                ..
+            },
+        ),
+        flow: XtlsRprxVision,
+    },
     security: Reality(
         Reality {
             sni: "store.steampowered.com",
@@ -29,9 +32,11 @@ ServerConfig {
             spider_x: Some(
                 "/deadbeef",
             ),
+            mldsa65_verify: None,
         },
     ),
     transport: Tcp {
         header: None,
     },
+    finalmask: None,
 }

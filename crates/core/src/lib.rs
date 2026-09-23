@@ -19,9 +19,11 @@ pub mod routing;
 pub mod sysproxy;
 
 pub use inbound::{Bound, Inbound, Serving, serve};
-pub use outbound::{BoxedStream, EngineInfo, Outbound, SocksOutbound};
-pub use process::name_for_port;
-pub use relay::relay;
+pub use outbound::{
+    BoxedDatagram, BoxedStream, DIAL_TIMEOUT, Datagram, EngineInfo, Outbound, SocksOutbound,
+};
+pub use process::{name_for_datagram_port, name_for_port};
+pub use relay::{relay, relay_datagrams};
 pub use routing::{Decision, Router};
 pub use target::{Target, TargetError};
 pub use tracker::{Connection, ConnectionId, Route, Snapshot, Tracker};

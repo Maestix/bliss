@@ -21,6 +21,8 @@ pub struct Profile {
     #[serde(default)]
     pub inbound: Inbound,
     #[serde(default)]
+    pub tun: Tun,
+    #[serde(default)]
     pub routing: crate::Routing,
     /// Server lists a provider publishes at an address. Their servers are the
     /// `[[server]]` entries whose `group` is the subscription's `id`.
@@ -117,6 +119,20 @@ pub struct Inbound {
     /// What bliss does with the machine's own proxy settings.
     #[serde(default)]
     pub system_proxy: ProxyMode,
+}
+
+/// Whether bliss carries the machine's traffic through a TUN adapter.
+///
+/// Off by default, like every setting that reaches outside bliss. It is also
+/// the one setting bliss cannot act on by itself: creating the adapter and
+/// writing routes need administrator rights, and neither the window nor a
+/// start from the Run key has them. Asked for here and honoured whenever the
+/// copy that reads it does have them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tun {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// What to do with the machine-wide proxy settings, the three choices every

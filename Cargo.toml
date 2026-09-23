@@ -30,7 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
-serde_json = "1"                                       # only to feed xray-core its config
+serde_json = "1"                                       # xray-core's config, and the JSON inside some share links
 base64 = "0.22"
 percent-encoding = "2"
 url = "2"
@@ -53,7 +53,9 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 async-trait = "0.1"                                    # Outbound must be dyn-compatible;
                                                        # native async-in-trait is not, yet
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io"] }    # CancellationToken: one clean shutdown path
+# compat: wintun speaks the futures traits and ipstack wants tokio's, so the
+# adapter's session is wrapped once on its way into the stack.
+tokio-util = { version = "0.7", features = ["compat"] }
 bytes = "1"                                            # relay buffers without copying
 
 # --- the TUN adapter ------------------------------------------------------
@@ -61,7 +63,9 @@ bytes = "1"                                            # relay buffers without c
 # and it ships inside bliss.exe (crates/tun). These are the maintained bindings
 # — the older `wintun` crate is the same idea with less upkeep — and the async
 # feature is what lets a session be read and written from tokio.
-wintun-bindings = { version = "0.7", features = ["async"] }
+# `verify_binary_signature` checks WireGuard's signature on the DLL before
+# the first call into it, without touching the network (WTD_REVOKE_NONE).
+wintun-bindings = { version = "0.7", features = ["async", "verify_binary_signature"] }
 # The userspace stack: IP packets in, TCP streams and UDP datagrams out, which
 # is exactly what the relay already takes. Writing our own on smoltcp is the
 # fallback if this does not hold up; the TCP state machine is the expensive

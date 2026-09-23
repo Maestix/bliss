@@ -30,6 +30,22 @@ http = 10809
 # exactly like a broken internet connection.
 system_proxy = "unchanged"
 
+[tun]
+# Carry the machine's whole traffic through a TUN adapter, rather than only
+# what is pointed at the ports above. This is the only way UDP goes through the
+# tunnel — voice calls, games, QUIC — because the Windows proxy settings never
+# carried UDP at all.
+#
+# It needs administrator rights: creating the adapter and writing routes are
+# not something an ordinary process may do. A bliss without them leaves it off
+# and says so on the settings screen.
+#
+# One thing to know before turning it on: a TUN sees packets, and a packet
+# holds an address, not a name. Rules made of `domain` and `geosite` therefore
+# do not match traffic that comes in this way; `ip`, `geoip`, `port` and
+# `process` do. Programs pointed at the SOCKS and HTTP ports are unaffected.
+enabled = false
+
 # --- Маршрутизация ---------------------------------------------------------
 #
 # С каждым соединением можно сделать одно из трёх:
@@ -119,5 +135,9 @@ system_proxy = "unchanged"
 # Point it at an xray.exe you already have if you would rather:
 # xray = "C:/path/to/xray.exe"
 
+# One block per server, its share link as the provider gave it: vless://,
+# vmess://, trojan://, ss://, socks://, hysteria2:// (or hy2://) and
+# wireguard:// are read. A link is a credential; keep this file private.
+#
 # [[server]]
 # link = "vless://…paste yours here…"
