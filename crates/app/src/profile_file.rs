@@ -227,27 +227,19 @@ fn starting_rules() -> Vec<Rule> {
         Rule {
             name: Some("Реклама и трекеры".to_owned()),
             action: Action::Block,
-            domain: Vec::new(),
-            ip: Vec::new(),
-            port: Vec::new(),
-            process: Vec::new(),
             geosite: list(&["category-ads-all"]),
-            geoip: Vec::new(),
+            ..Rule::default()
         },
         Rule {
             name: Some("Локальная сеть".to_owned()),
             action: Action::Direct,
-            domain: Vec::new(),
             ip: list(&[
                 "127.0.0.0/8",
                 "10.0.0.0/8",
                 "172.16.0.0/12",
                 "192.168.0.0/16",
             ]),
-            port: Vec::new(),
-            process: Vec::new(),
-            geosite: Vec::new(),
-            geoip: Vec::new(),
+            ..Rule::default()
         },
     ]
 }
@@ -359,8 +351,22 @@ pub fn save_rule(profile: &mut Profile, at: Option<usize>, rule: Rule) -> Result
     }
     let rules = &mut profile.routing.rules;
     match at {
-        Some(at) => *rules.get_mut(at).ok_or_else(no_such_rule)? = rule,
-        None => rules.push(rule),
+        // The editor knows the rule's words, not its id or its switch: an
+        // edited rule stays the same rule to every preset, and stays off if
+        // it was.
+        Some(at) => {
+            let old = rules.get_mut(at).ok_or_else(no_such_rule)?;
+            *old = Rule {
+                id: std::mem::take(&mut old.id),
+                enabled: old.enabled,
+                ..rule
+            };
+        }
+        None => rules.push(Rule {
+            id: String::new(),
+            enabled: true,
+            ..rule
+        }),
     }
     Ok(())
 }
@@ -370,7 +376,116 @@ pub fn delete_rule(profile: &mut Profile, at: usize) -> Result<Rule, String> {
     if at >= rules.len() {
         return Err(no_such_rule());
     }
-    Ok(rules.remove(at))
+    let rule = rules.remove(at);
+    profile.routing.forget(&rule.id);
+    Ok(rule)
+}
+
+/// Switch a rule on or off. It keeps its place, and a preset in force stays
+/// named: the window says it has changed.
+pub fn switch_rule(profile: &mut Profile, at: usize, on: bool) -> Result<(), String> {
+    profile
+        .routing
+        .rules
+        .get_mut(at)
+        .ok_or_else(no_such_rule)?
+        .enabled = on;
+    Ok(())
+}
+
+// --- presets ------------------------------------------------------------------
+
+/// The most presets a profile holds. Every one is a pill on two screens and a
+/// line in the tray's menu, which has room for four before it scrolls.
+pub const MAX_PRESETS: usize = 24;
+
+/// The longest name a preset takes; the pills elide nothing.
+pub const MAX_PRESET_NAME: usize = 32;
+
+fn preset_name(name: &str) -> Result<String, String> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err("у пресета нет названия".to_owned());
+    }
+    if name.chars().count() > MAX_PRESET_NAME {
+        return Err(format!(
+            "название длиннее {} — сократите его",
+            plural(MAX_PRESET_NAME as u64, "символа", "символов", "символов")
+        ));
+    }
+    Ok(name)
+}
+
+fn no_such_preset() -> String {
+    "этого пресета уже нет — список успел измениться".to_owned()
+}
+
+/// Keep where every switch stands now, under a name: a new preset, or the one
+/// by that name updated. True when it is new. Either way it becomes the
+/// preset in force.
+pub fn save_preset(profile: &mut Profile, name: &str) -> Result<bool, String> {
+    let name = preset_name(name)?;
+    let routing = &mut profile.routing;
+    let snapshot = routing.snapshot(&name);
+    let created = match routing.presets.iter_mut().find(|p| p.name == name) {
+        Some(known) => {
+            *known = snapshot;
+            false
+        }
+        None => {
+            if routing.presets.len() >= MAX_PRESETS {
+                return Err(format!(
+                    "пресетов уже {MAX_PRESETS} — больше bliss не держит; удалите ненужный"
+                ));
+            }
+            routing.presets.push(snapshot);
+            true
+        }
+    };
+    routing.current_preset = Some(name);
+    Ok(created)
+}
+
+/// Put every switch where a preset has it.
+pub fn apply_preset(profile: &mut Profile, name: &str) -> Result<(), String> {
+    if profile.routing.apply(name) {
+        Ok(())
+    } else {
+        Err(no_such_preset())
+    }
+}
+
+pub fn rename_preset(profile: &mut Profile, from: &str, to: &str) -> Result<String, String> {
+    let to = preset_name(to)?;
+    let routing = &mut profile.routing;
+    if to != from && routing.preset(&to).is_some() {
+        return Err(format!("пресет «{to}» уже есть"));
+    }
+    routing
+        .presets
+        .iter_mut()
+        .find(|p| p.name == from)
+        .ok_or_else(no_such_preset)?
+        .name = to.clone();
+    if routing.current_preset.as_deref() == Some(from) {
+        routing.current_preset = Some(to.clone());
+    }
+    Ok(to)
+}
+
+/// Delete a preset. The switches stay where they are.
+pub fn delete_preset(profile: &mut Profile, name: &str) -> Result<(), String> {
+    let routing = &mut profile.routing;
+    let at = routing
+        .presets
+        .iter()
+        .position(|p| p.name == name)
+        .ok_or_else(no_such_preset)?;
+    routing.presets.remove(at);
+    if routing.current_preset.as_deref() == Some(name) {
+        routing.current_preset = None;
+    }
+    Ok(())
 }
 
 /// Move a rule to another place in the order — another priority, since the
@@ -438,14 +553,8 @@ pub fn route_one(profile: &mut Profile, subject: &Subject, action: Action) -> us
         return at;
     }
     let mut rule = Rule {
-        name: None,
         action,
-        domain: Vec::new(),
-        ip: Vec::new(),
-        port: Vec::new(),
-        process: Vec::new(),
-        geosite: Vec::new(),
-        geoip: Vec::new(),
+        ..Rule::default()
     };
     match subject {
         Subject::Program(name) => rule.process.push(name.clone()),
@@ -1157,5 +1266,113 @@ mod tests {
         let before = profile.routing.rules.len();
         assert!(add_starting_rules(&mut profile).is_err());
         assert_eq!(profile.routing.rules.len(), before);
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    fn profile_with(names: &[&str]) -> Profile {
+        let mut profile = Profile::default();
+        for name in names {
+            save_rule(
+                &mut profile,
+                None,
+                Rule {
+                    name: Some((*name).to_owned()),
+                    action: Action::Direct,
+                    domain: vec![format!("{name}.example")],
+                    ..Rule::default()
+                },
+            )
+            .expect("a rule with a condition saves");
+        }
+        profile.routing.ensure_ids();
+        profile
+    }
+
+    /// The editor sends words; the rule it edits keeps its id, so every
+    /// preset still knows it, and stays off if it was off.
+    #[test]
+    fn an_edited_rule_keeps_its_id_and_its_switch() {
+        let mut profile = profile_with(&["a", "b"]);
+        switch_rule(&mut profile, 1, false).expect("switched");
+        let id = profile.routing.rules[1].id.clone();
+        save_rule(
+            &mut profile,
+            Some(1),
+            Rule {
+                name: Some("b2".to_owned()),
+                action: Action::Block,
+                domain: vec!["b2.example".to_owned()],
+                ..Rule::default()
+            },
+        )
+        .expect("edited");
+        let edited = &profile.routing.rules[1];
+        assert_eq!((edited.id.as_str(), edited.enabled), (id.as_str(), false));
+        assert_eq!(edited.action, Action::Block);
+    }
+
+    #[test]
+    fn a_deleted_rule_leaves_every_preset() {
+        let mut profile = profile_with(&["a", "b"]);
+        save_preset(&mut profile, "Дом").expect("saved");
+        delete_rule(&mut profile, 0).expect("deleted");
+        let preset = &profile.routing.presets[0];
+        assert_eq!(preset.on, [profile.routing.rules[0].id.clone()]);
+    }
+
+    #[test]
+    fn a_preset_is_made_updated_renamed_and_deleted() {
+        let mut profile = profile_with(&["a", "b"]);
+        assert_eq!(save_preset(&mut profile, "  Игры  "), Ok(true));
+        assert_eq!(profile.routing.current_preset.as_deref(), Some("Игры"));
+
+        switch_rule(&mut profile, 0, false).expect("switched");
+        assert!(profile.routing.drifted());
+        // Saved again under the same name: updated, not a second one.
+        assert_eq!(save_preset(&mut profile, "Игры"), Ok(false));
+        assert_eq!(profile.routing.presets.len(), 1);
+        assert!(!profile.routing.drifted());
+
+        save_preset(&mut profile, "Работа").expect("second");
+        assert!(
+            rename_preset(&mut profile, "Работа", "Игры").is_err(),
+            "names are unique"
+        );
+        assert_eq!(
+            rename_preset(&mut profile, "Работа", "Офис"),
+            Ok("Офис".to_owned())
+        );
+        assert_eq!(profile.routing.current_preset.as_deref(), Some("Офис"));
+
+        apply_preset(&mut profile, "Игры").expect("applied");
+        assert!(!profile.routing.rules[0].enabled);
+        delete_preset(&mut profile, "Игры").expect("deleted");
+        assert_eq!(profile.routing.current_preset, None);
+        assert!(
+            !profile.routing.rules[0].enabled,
+            "the switches stay where they are"
+        );
+        assert!(apply_preset(&mut profile, "Игры").is_err());
+
+        assert!(save_preset(&mut profile, "   ").is_err());
+        assert!(save_preset(&mut profile, &"я".repeat(MAX_PRESET_NAME + 1)).is_err());
+    }
+
+    /// Every preset is a pill on two screens and a line in the tray.
+    #[test]
+    fn presets_have_a_ceiling() {
+        let mut profile = profile_with(&["a"]);
+        for n in 0..MAX_PRESETS {
+            save_preset(&mut profile, &format!("p{n}")).expect("under the cap");
+        }
+        let refused = save_preset(&mut profile, "one more").expect_err("the cap holds");
+        assert!(refused.contains("удалите"), "{refused}");
+        // Updating one that exists is not one more.
+        assert_eq!(save_preset(&mut profile, "p0"), Ok(false));
+        assert_eq!(profile.routing.presets.len(), MAX_PRESETS);
     }
 }

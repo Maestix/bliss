@@ -394,12 +394,66 @@ body { font-size: 16px; user-select: none; cursor: default; }
 .pill-choice.on.direct { color: #72cf9e; background-color: rgba(114, 207, 158, .14); box-shadow: none; }
 .pill-choice.on.block  { color: #e56b6f; background-color: rgba(229, 107, 111, .14); box-shadow: none; }
 
+/* A preset: the same pill, in the accent while it is in force, with a violet
+   dot — the theme's "on its way" — once a switch has moved since. */
+.preset-chip {
+  padding: 4px 11px; border-radius: 12px; font-size: 13px; white-space: nowrap;
+  cursor: pointer;
+  color: var(--color-neutral-400); box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .10);
+  transition: background-color .14s ease, color .14s ease, box-shadow .14s ease;
+}
+.preset-chip:not(.on):hover { color: var(--color-neutral-200); background-color: rgba(239, 232, 245, .06); }
+.preset-chip.on {
+  color: #ee82c4; background-color: rgba(238, 130, 196, .14);
+  box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .30);
+}
+.preset-chip.on.drifted::after {
+  content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 7px;
+  border-radius: 50%; background-color: #a98ce8; vertical-align: middle;
+}
+
 .rule-row { background-color: rgba(239, 232, 245, .03); transition: background-color .14s ease; }
 .rule-row:hover { background-color: rgba(239, 232, 245, .065); }
 /* Always there, so nobody has to discover them, and quiet until the row is
    under the pointer. */
 .rule-tools { display: flex; gap: 2px; opacity: .5; transition: opacity .14s ease; }
 .rule-row:hover .rule-tools { opacity: 1; }
+
+/* A rule's switch: the switch under the ring, small, and quiet. Its track
+   takes a thin accent border while the rule decides, and its knob slides over
+   in a muted pink. Quiet because nearly every rule is on: the first knob was
+   solid pink with a glow, and a column of them down the list outshouted the
+   action pills beside them — the user said so. Chosen from four looks drawn
+   with these stylesheets. Off, the row keeps its place and its number and
+   fades, all but the switch, which is what brings it back. State by class
+   only (rule 1 in AGENTS.md). */
+.rule-switch {
+  position: relative; flex: none;
+  width: 30px; height: 18px; border-radius: 9px;
+  cursor: pointer;
+  background-color: rgba(239, 232, 245, .04);
+  box-shadow: inset 0 0 0 1px rgba(239, 232, 245, .12);
+  transition: box-shadow .16s ease, background-color .16s ease, transform .08s ease;
+}
+.rule-switch:hover { background-color: rgba(239, 232, 245, .08); }
+.rule-switch:active { transform: scale(.94); }
+.rule-switch.on {
+  background-color: rgba(238, 130, 196, .10);
+  box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .26);
+}
+.rule-switch.on:hover { background-color: rgba(238, 130, 196, .16); }
+.rule-knob {
+  position: absolute; top: 3px; left: 3px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background-color: rgba(239, 232, 245, .24);
+  transition: transform .18s ease, background-color .18s ease;
+}
+.rule-switch.on .rule-knob {
+  transform: translateX(12px);
+  background-color: rgba(238, 130, 196, .62);
+}
+.rule-body, .rule-action { transition: opacity .16s ease; }
+.rule-row.off .rule-body, .rule-row.off .rule-action { opacity: .42; }
 .icon-btn {
   width: 28px; height: 28px; flex: none; display: grid; place-items: center;
   border-radius: 4px; transition: background-color .12s ease;
@@ -505,6 +559,12 @@ body { font-size: 16px; user-select: none; cursor: default; }
   max-height: 190px; overflow-y: scroll; overflow-x: hidden;
 }
 .tray-foot { margin-top: auto; }
+/* Four presets, and the rest scroll: `menu_height` in ui.rs grows the menu by
+   this much and no more, so the server list keeps its room. */
+.tray-presets {
+  flex: none; display: flex; flex-direction: column; gap: 2px;
+  max-height: 110px; overflow-y: scroll; overflow-x: hidden;
+}
 .tray-act {
   flex: 1; display: flex; align-items: center; justify-content: center;
   padding: 7px; border-radius: 4px; font-size: 13.5px;

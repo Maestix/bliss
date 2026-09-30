@@ -213,6 +213,11 @@ These cost the most time on this project. None of them announce themselves.
    slash (`//bye`, `taskkill //F //IM python.exe`) or set `MSYS_NO_PATHCONV=1`.
 7. **Background processes you start keep files locked** — a local HTTP server, a
    probe script, an open bliss window. Kill them before cleaning up or building.
+8. **A file put back with `mv` or `cp -p` keeps its old modification time**, and
+   cargo decides what to rebuild by it: after breaking a file on purpose to see
+   a guard fail and moving the saved copy back, the test binary was still the
+   broken build, and the guard went on failing against correct code. `touch`
+   the restored file, or restore by writing it.
 
 ## 4. Commits
 
@@ -355,7 +360,28 @@ These cost the most time on this project. None of them announce themselves.
   already open keep their route. It used to restart the tunnel, which dropped
   every connection for the sake of one rule. A restart for a server must let
   `parts.stop().await` finish before `start`, or the new xray finds the bridge
-  port taken and fails for a reason unrelated to the server.
+  port taken and fails for a reason unrelated to the server. A rule's switch
+  and a preset are rule changes like any other: no restart.
+- **A rule can be switched off, and presets put the switches back.** Asked for
+  by the user with many rules and several ways of using them, so as not to
+  flip each one by hand.
+  - Off (`enabled = false`, written only when off), a rule keeps its row and
+    its number and decides nothing: `Router::build` skips it and does not even
+    load its geo categories, its warnings keep the screen's numbering, and the
+    TUN note leaves it out (`a_switched_off_rule_decides_nothing`).
+  - **A preset names rules by id**, not by place or name, both of which
+    change: every switch's position (`on`, `off`) and where everything else
+    goes, under a name. Applying one leaves a rule it has never heard of —
+    made since — as it is. `current_preset` is the one applied or saved last;
+    `drifted` is true once a switch or the fallback has moved since, which the
+    window shows as a violet dot and the tick saves into it.
+  - Ids come from `Routing::ensure_ids`, called in `commit_routing` before
+    every save, so every saved rule has one: one more than any id a rule or a
+    preset holds, so a preset that still says where a deleted rule stood is
+    never read as the next rule (`an_id_is_never_handed_out_twice`). The
+    editor sends only words, so `save_rule` keeps the id and the switch of the
+    rule it replaces; `delete_rule` takes the id out of every preset.
+  - At most `MAX_PRESETS` (24), with the test that fails without the cap.
 - **Slow work leaves the engine loop and comes back through it.** A
   subscription fetch runs in a task of its own and returns as
   `Command::Fetched` through a *weak* sender: a strong one, held by the loop
@@ -493,6 +519,14 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     `FAILED`, and tints of the accent `rgba(238,130,196,…)`) and `app.css`;
     they mirror the tokens, so change both together. Connected and "through the
     proxy" are both pink, which is why "direct" must never borrow `ON`.
+
+    **A mark repeated down a list stays quiet.** The rule switch's first knob
+    was solid pink with a glow; nearly every rule is on, so the list grew a
+    column of glowing dots louder than the action pills beside them, and the
+    user said so. It is a muted pink dot on a thin accent border now
+    (`.rule-switch`), picked from four looks drawn with the real stylesheets
+    by headless Edge (§7's static replica), and checked pixel for pixel
+    against the pick. The ring is the one thing on screen that glows.
 
     The font is Comfortaa: text at 600, headings at 700, its top weight. The
     inline `font-weight:700` and `font:700` in `ui.rs` mirror
@@ -668,7 +702,13 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       menu. `into_menu` turns both off and `out_of_menu` back on
       (`the_menu_keeps_its_shape`). It is 460px tall: everything but the
       server list takes about 270px, and the list, the one part that gives,
-      shows six servers and the edge of a seventh.
+      shows six servers and the edge of a seventh. Presets make it taller
+      rather than taking the list's room: 37px and a 28px line for each, four
+      at most, past which `.tray-presets` scrolls (`menu_height`,
+      `the_menu_grows_with_its_presets`, which holds the CSS to the same
+      numbers). The click handler that opens it is made once, so it reads the
+      frame's signal when clicked; a count captured when it was made would be
+      the count at launch.
     - The close button and Alt+F4 hide the window
       (`WindowCloseBehaviour::WindowHides`), so bliss goes on serving; leaving
       is "Выход" in the menu, which sets `WindowCloses` first and then closes
@@ -1026,7 +1066,9 @@ application icon, the status card's picture and the rail's cat; starting with no
 server and no engine, and adding a server from the window; the profile written
 by bliss itself, with the system-proxy choice remembered; the rule editor (add,
 change, reorder, delete, the fallback) with rules applied under live traffic,
-and rules from a right-click on a connection; search and sorting in the
+and rules from a right-click on a connection; a switch on every rule, and
+presets of their positions, applied from the routing screen, the main screen
+or the tray; search and sorting in the
 connections table and a resizable log; Ctrl+V for links, lists and
 subscriptions; subscriptions (1.6: base64 or plain lists, `subscription-userinfo`
 and `profile-title`, a refresh every 12 hours, through the tunnel when it is

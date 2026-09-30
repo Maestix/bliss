@@ -15,7 +15,7 @@ pub use encryption::{AppearanceMode, Encryption, EncryptionKey, RttMode, VlessEn
 pub use error::{LinkError, Unsupported};
 pub use link::is_server_scheme;
 pub use profile::{Engine, Inbound, Profile, ProxyMode, Subscription, Tun, Usage};
-pub use routing::{Action, Routing, Rule};
+pub use routing::{Action, Preset, Routing, Rule};
 pub use server::{
     Address, Fingerprint, Flow, Hidden, KcpHeader, Login, Long, PrivateKey, Protocol, PublicKey,
     Reality, Security, ServerConfig, ServerEntry, ShortId, TcpHeader, Tls, Transport, UserId,
