@@ -52,6 +52,8 @@ windows = { workspace = true, features = [
     "Win32_System_Registry",
     # One window at a time: a named mutex, held by whichever copy has it.
     "Win32_System_Threading",
+    # The tray's menu leaves at once rather than fading: see `animated` in ui.rs.
+    "Win32_Graphics_Dwm",
 ] }
 
 [build-dependencies]

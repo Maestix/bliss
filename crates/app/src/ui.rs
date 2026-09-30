@@ -545,6 +545,9 @@ fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
     // Out of sight before it changes shape. Given its size and place back while
     // still on screen, the window flashed the whole program in the middle of
     // the screen for a frame — on the way out of the menu and out of bliss.
+    // And out of sight at once rather than faded, or the fade follows the
+    // window to its new place (see `animated`).
+    animated(window, false);
     window.set_visible(false);
     window.set_always_on_top(false);
     let _ = window.set_skip_taskbar(false);
@@ -555,10 +558,47 @@ fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
         window.set_inner_size(PhysicalSize::new(width, height));
         window.set_outer_position(PhysicalPosition::new(x, y));
     }
+    // Back on for the program, which opens and minimizes the way windows do.
+    animated(window, true);
     if show {
         out_of_the_tray(window);
     }
 }
+
+/// Let Windows animate the window's showing and hiding, or not.
+///
+/// Under the frame bliss draws, the window keeps a caption style (tao keeps
+/// it, for the shadow and for snapping), so Windows fades it out when it is
+/// hidden — and the fade follows the window. `out_of_menu` hides the menu and
+/// gives the window back the program's place in the same breath, so the
+/// fading menu flashed wherever the program stands, the top-left corner for a
+/// bliss started in the tray; the user saw it on every click away from the
+/// menu. Hidden with the fade off, the menu goes at once, the way a menu does.
+#[cfg(windows)]
+fn animated(window: &dioxus::desktop::DesktopContext, on: bool) {
+    use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
+
+    // A Win32 BOOL, four bytes: true turns the animations off.
+    let off = i32::from(!on);
+    // SAFETY: the handle is this window's own and lives as long as its
+    // context; the value is the four bytes the attribute is documented to take.
+    let set = unsafe {
+        DwmSetWindowAttribute(
+            HWND(window.hwnd() as *mut core::ffi::c_void),
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            (&raw const off).cast(),
+            size_of::<i32>() as u32,
+        )
+    };
+    if let Err(e) = set {
+        tracing::debug!("window animations not switched: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn animated(_window: &dioxus::desktop::DesktopContext, _on: bool) {}
 
 /// Put the menu by the icon and keep it on the screen the pointer is on: a
 /// menu half off the edge is worse than one a little away from the click.
@@ -3294,6 +3334,29 @@ mod tests {
             !code.contains("set_minimized"),
             "launch minimizes the window before WebView2 is created in it"
         );
+    }
+
+    /// Hidden with its fade, the menu flashed at the program's place — the
+    /// fade follows the window there. The fade goes off before the window is
+    /// hidden and comes back only once it stands where the program does.
+    #[test]
+    fn the_menu_leaves_without_a_fade() {
+        let source = include_str!("ui.rs");
+        let start = source
+            .find("fn out_of_menu(")
+            .expect("out_of_menu is in ui.rs");
+        let end = start + source[start..].find("\n}\n").expect("it ends");
+        let code: String = source[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = |text: &str| {
+            code.find(text)
+                .unwrap_or_else(|| panic!("{text} in out_of_menu"))
+        };
+        assert!(at("animated(window, false)") < at("set_visible(false)"));
+        assert!(at("set_outer_position") < at("animated(window, true)"));
     }
 
     /// The menu grows by its presets rather than taking their room from the
