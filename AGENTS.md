@@ -692,6 +692,15 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       300px; reshaped while still visible on the way back, it flashed the
       program at the centre of the screen, which is what the user saw both when
       the menu closed and when bliss quit.
+    - **Hide it at once, never faded.** tao keeps a caption style under the
+      frame bliss draws (for the shadow and snapping), so Windows fades the
+      window out when it is hidden — and the fade follows the window. Hidden
+      and given back the program's place in one breath, the menu flashed at
+      that place, the top-left corner for a bliss started in the tray, on
+      every click away from it; the user saw it. `out_of_menu` turns the
+      window's animations off (`animated`, `DWMWA_TRANSITIONS_FORCEDISABLED`)
+      before hiding it and on again once it stands where the program does
+      (`the_menu_leaves_without_a_fade`).
     - **Closing on lost focus needs two guards**: the menu goes when the focus
       goes, but only once it has had the focus (`MENU_HELD`) and 250ms after it
       opened. Windows hands the focus around as a window appears, and without
