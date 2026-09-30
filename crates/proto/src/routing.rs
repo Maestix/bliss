@@ -53,10 +53,20 @@ pub struct Routing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geo_dir: Option<std::path::PathBuf>,
 
+    /// The preset applied last, by name: the one the window marks, and says
+    /// has changed once a switch has moved since. Before the lists, because a
+    /// plain key cannot follow a table in TOML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_preset: Option<String>,
+
     // Left out when empty, like every list in a rule: bliss writes the profile
     // itself, and `rule = []` is noise in a file that has no rules.
     #[serde(default, rename = "rule", skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
+
+    /// Named positions of the rules' switches, to put them all back at once.
+    #[serde(default, rename = "preset", skip_serializing_if = "Vec::is_empty")]
+    pub presets: Vec<Preset>,
 }
 
 impl Default for Routing {
@@ -64,9 +74,125 @@ impl Default for Routing {
         Self {
             fallback: Action::Proxy,
             geo_dir: None,
+            current_preset: None,
             rules: Vec::new(),
+            presets: Vec::new(),
         }
     }
+}
+
+/// Where every switch stood when a preset was saved, and where everything
+/// else went.
+///
+/// Rules are named by id, so a rule keeps its place in every preset however it
+/// is moved, renamed or edited. A rule in neither list was made after the
+/// preset: applying it leaves that rule as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preset {
+    pub name: String,
+    #[serde(default)]
+    pub fallback: Action,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub off: Vec<String>,
+}
+
+impl Routing {
+    /// Give every rule an id that names it and nothing else, ever: one more
+    /// than any id a rule or a preset holds, so a deleted rule's id is not
+    /// handed to the next rule while a preset may still say where it stood.
+    pub fn ensure_ids(&mut self) {
+        let mut next = self
+            .rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .chain(
+                self.presets
+                    .iter()
+                    .flat_map(|p| p.on.iter().chain(&p.off).map(String::as_str)),
+            )
+            .filter_map(|id| id.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        let mut seen = std::collections::HashSet::new();
+        for rule in &mut self.rules {
+            // A copied rule carries its original's id; the copy gets its own.
+            if rule.id.is_empty() || !seen.insert(rule.id.clone()) {
+                next += 1;
+                rule.id = next.to_string();
+                seen.insert(rule.id.clone());
+            }
+        }
+    }
+
+    pub fn preset(&self, name: &str) -> Option<&Preset> {
+        self.presets.iter().find(|preset| preset.name == name)
+    }
+
+    /// The switches as they stand now, under `name`. Ids first.
+    pub fn snapshot(&mut self, name: &str) -> Preset {
+        self.ensure_ids();
+        let (on, off): (Vec<&Rule>, Vec<&Rule>) = self.rules.iter().partition(|rule| rule.enabled);
+        Preset {
+            name: name.to_owned(),
+            fallback: self.fallback,
+            on: on.into_iter().map(|rule| rule.id.clone()).collect(),
+            off: off.into_iter().map(|rule| rule.id.clone()).collect(),
+        }
+    }
+
+    /// Put every switch where the preset has it. False when there is no
+    /// preset by that name.
+    pub fn apply(&mut self, name: &str) -> bool {
+        let Some(preset) = self.preset(name).cloned() else {
+            return false;
+        };
+        for rule in &mut self.rules {
+            if preset.on.contains(&rule.id) {
+                rule.enabled = true;
+            } else if preset.off.contains(&rule.id) {
+                rule.enabled = false;
+            }
+        }
+        self.fallback = preset.fallback;
+        self.current_preset = Some(preset.name);
+        true
+    }
+
+    /// Whether a switch, or where everything else goes, has moved since the
+    /// current preset was applied or saved.
+    pub fn drifted(&self) -> bool {
+        let Some(preset) = self
+            .current_preset
+            .as_deref()
+            .and_then(|name| self.preset(name))
+        else {
+            return false;
+        };
+        preset.fallback != self.fallback
+            || self.rules.iter().any(|rule| {
+                (rule.enabled && preset.off.contains(&rule.id))
+                    || (!rule.enabled && preset.on.contains(&rule.id))
+            })
+    }
+
+    /// Forget a rule's id everywhere, once the rule is gone.
+    pub fn forget(&mut self, id: &str) {
+        for preset in &mut self.presets {
+            preset.on.retain(|known| known != id);
+            preset.off.retain(|known| known != id);
+        }
+    }
+}
+
+fn on() -> bool {
+    true
+}
+
+fn is_on(enabled: &bool) -> bool {
+    *enabled
 }
 
 /// One rule: what to match, and what to do about it.
@@ -84,6 +210,16 @@ pub struct Rule {
     /// `geosite:category-ads-all` does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// What presets call it. Given by bliss (`Routing::ensure_ids`), never
+    /// shown, never changed; a rule written by hand gets one on the next save.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+
+    /// Off, the rule decides nothing and loads nothing, and keeps its place.
+    /// Written to the profile only when off.
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub enabled: bool,
 
     pub action: Action,
 
@@ -122,6 +258,24 @@ pub struct Rule {
     /// TUN mode, where bliss sees packets rather than requests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub geoip: Vec<String>,
+}
+
+/// A rule that sends nothing anywhere yet: switched on, conditions to fill in.
+impl Default for Rule {
+    fn default() -> Self {
+        Self {
+            name: None,
+            id: String::new(),
+            enabled: true,
+            action: Action::default(),
+            domain: Vec::new(),
+            ip: Vec::new(),
+            port: Vec::new(),
+            process: Vec::new(),
+            geosite: Vec::new(),
+            geoip: Vec::new(),
+        }
+    }
 }
 
 impl Rule {
@@ -163,5 +317,119 @@ impl Rule {
             return "пустое правило".to_owned();
         }
         parts.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(name: &str) -> Rule {
+        Rule {
+            name: Some(name.to_owned()),
+            domain: vec![format!("{name}.example")],
+            ..Rule::default()
+        }
+    }
+
+    fn routing(names: &[&str]) -> Routing {
+        let mut routing = Routing {
+            rules: names.iter().map(|name| rule(name)).collect(),
+            ..Routing::default()
+        };
+        routing.ensure_ids();
+        routing
+    }
+
+    /// An id names one rule for good: a preset that still says where a
+    /// deleted rule stood must not come to mean the next rule made.
+    #[test]
+    fn an_id_is_never_handed_out_twice() {
+        let mut r = routing(&["a", "b", "c"]);
+        assert_eq!(
+            r.rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+        let preset = r.snapshot("all");
+        r.presets.push(preset);
+        r.rules.pop();
+        r.rules.push(rule("d"));
+        r.ensure_ids();
+        assert_eq!(r.rules[2].id, "4", "3 is still named by the preset");
+
+        // A rule copied with its id gets one of its own.
+        let copy = r.rules[0].clone();
+        r.rules.push(copy);
+        r.ensure_ids();
+        assert_eq!(r.rules[3].id, "5");
+    }
+
+    #[test]
+    fn a_preset_puts_every_switch_back() {
+        let mut r = routing(&["a", "b", "c"]);
+        r.rules[1].enabled = false;
+        r.fallback = Action::Direct;
+        let games = r.snapshot("Игры");
+        r.presets.push(games);
+        r.current_preset = Some("Игры".to_owned());
+        assert!(!r.drifted());
+
+        // Moved by hand: the preset is still named, and has drifted.
+        r.rules[0].enabled = false;
+        r.rules[1].enabled = true;
+        assert!(r.drifted());
+        // A rule made since is none of the preset's business.
+        r.rules.push(rule("new"));
+        r.ensure_ids();
+        r.rules[3].enabled = false;
+
+        assert!(r.apply("Игры"));
+        let on: Vec<bool> = r.rules.iter().map(|rule| rule.enabled).collect();
+        assert_eq!(on, [true, false, true, false]);
+        assert_eq!(r.fallback, Action::Direct);
+        assert!(!r.drifted());
+
+        // Where everything else goes is part of it too.
+        r.fallback = Action::Proxy;
+        assert!(r.drifted());
+        assert!(!r.apply("нет такого"));
+    }
+
+    #[test]
+    fn forgetting_a_rule_takes_it_out_of_every_preset() {
+        let mut r = routing(&["a", "b"]);
+        let both = r.snapshot("оба");
+        r.presets.push(both);
+        r.forget("1");
+        assert_eq!(r.presets[0].on, ["2"]);
+    }
+
+    /// The profile says `enabled = false` for a rule that is off and nothing
+    /// for one that is on, and reads a rule written before switches existed
+    /// as on.
+    #[test]
+    fn switches_and_presets_survive_the_profile() {
+        let mut r = routing(&["a", "b"]);
+        r.rules[1].enabled = false;
+        let preset = r.snapshot("Дом");
+        r.presets.push(preset);
+        r.current_preset = Some("Дом".to_owned());
+
+        let text = toml::to_string_pretty(&r).expect("routing serialises");
+        assert_eq!(text.matches("enabled").count(), 1, "{text}");
+        assert!(text.contains("enabled = false"), "{text}");
+        let back: Routing = toml::from_str(&text).expect("and reads back");
+        assert_eq!(back.rules, r.rules);
+        assert_eq!(back.presets, r.presets);
+        assert_eq!(back.current_preset.as_deref(), Some("Дом"));
+
+        let old: Routing =
+            toml::from_str("[[rule]]\naction = \"direct\"\ndomain = [\"a.example\"]\n")
+                .expect("an old rule reads");
+        assert!(old.rules[0].enabled);
+        assert!(old.rules[0].id.is_empty());
     }
 }

@@ -98,6 +98,8 @@ pub struct RuleView {
     pub action: Action,
     /// What it matches, in the words the profile used.
     pub conditions: Vec<String>,
+    /// Off, it keeps its row and decides nothing.
+    pub enabled: bool,
 }
 
 /// The rule table, for the screen.
@@ -109,6 +111,12 @@ pub struct RoutingView {
     pub source: Vec<Rule>,
     /// Rules that cannot work, said out loud. See `Router::warnings`.
     pub warnings: Vec<String>,
+    /// The presets, by name, in the order they were made.
+    pub presets: Vec<String>,
+    /// The one applied or saved last.
+    pub current_preset: Option<String>,
+    /// A switch, or where everything else goes, has moved since.
+    pub drifted: bool,
 }
 
 /// The answer to "what happens to this destination?"
@@ -322,6 +330,20 @@ pub enum Command {
     },
     /// What happens to a connection no rule matched.
     Fallback(Action),
+    /// Switch the rule at `at` on or off.
+    SwitchRule {
+        at: usize,
+        on: bool,
+    },
+    /// Put every switch where a preset has it.
+    ApplyPreset(String),
+    /// Keep the switches as they stand under a name, new or known.
+    SavePreset(String),
+    RenamePreset {
+        from: String,
+        to: String,
+    },
+    DeletePreset(String),
     /// Send one program, site or address somewhere, from a row of the
     /// connections table, which is `target` from `process`.
     RouteOne {
@@ -871,6 +893,65 @@ async fn drive(
                             {
                                 toaster.show(&frames, format!("выбор не сохранился: {e}"), true);
                             }
+                        }
+                    }
+                    Command::SwitchRule { at, on } => {
+                        let mut next = setup.profile.clone();
+                        let switched = crate::profile_file::switch_rule(&mut next, at, on).and_then(|()| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                        });
+                        if let Err(e) = switched {
+                            toaster.show(&frames, format!("правило не переключилось: {e}"), true);
+                        }
+                    }
+                    Command::ApplyPreset(name) => {
+                        let mut next = setup.profile.clone();
+                        let applied = crate::profile_file::apply_preset(&mut next, &name).and_then(|()| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                        });
+                        match applied {
+                            Ok(()) => {
+                                tracing::info!("routing: preset {name:?} applied");
+                                toaster.show(&frames, format!("Пресет «{name}»"), false);
+                            }
+                            Err(e) => toaster.show(&frames, format!("пресет не применился: {e}"), true),
+                        }
+                    }
+                    Command::SavePreset(name) => {
+                        let mut next = setup.profile.clone();
+                        let saved = crate::profile_file::save_preset(&mut next, &name).and_then(|created| {
+                            let name = next.routing.current_preset.clone().unwrap_or_default();
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                                .map(|()| (created, name))
+                        });
+                        match saved {
+                            Ok((true, name)) => toaster.show(&frames, format!("Пресет «{name}» сохранён"), false),
+                            Ok((false, name)) => toaster.show(&frames, format!("Пресет «{name}» обновлён"), false),
+                            Err(e) => toaster.show(&frames, format!("пресет не сохранился: {e}"), true),
+                        }
+                    }
+                    Command::RenamePreset { from, to } => {
+                        let mut next = setup.profile.clone();
+                        let renamed = crate::profile_file::rename_preset(&mut next, &from, &to).and_then(|to| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                                .map(|()| to)
+                        });
+                        match renamed {
+                            Ok(to) if to != from => {
+                                toaster.show(&frames, format!("Пресет «{from}» теперь «{to}»"), false)
+                            }
+                            Ok(_) => {}
+                            Err(e) => toaster.show(&frames, format!("пресет не переименовался: {e}"), true),
+                        }
+                    }
+                    Command::DeletePreset(name) => {
+                        let mut next = setup.profile.clone();
+                        let deleted = crate::profile_file::delete_preset(&mut next, &name).and_then(|()| {
+                            commit_routing(next, &mut store, &mut setup, &mut rules, running.as_ref(), &frames)
+                        });
+                        match deleted {
+                            Ok(()) => toaster.show(&frames, format!("Пресет «{name}» удалён"), false),
+                            Err(e) => toaster.show(&frames, format!("пресет не удалился: {e}"), true),
                         }
                     }
                     Command::RouteOne { subject, action, target, process } => {
@@ -1429,10 +1510,14 @@ impl Rules {
                     name: rule.display_name(),
                     action: rule.action,
                     conditions: describe_conditions(rule),
+                    enabled: rule.enabled,
                 })
                 .collect(),
             source: self.config.rules.clone(),
             warnings,
+            presets: self.config.presets.iter().map(|p| p.name.clone()).collect(),
+            current_preset: self.config.current_preset.clone(),
+            drifted: self.config.drifted(),
         }
     }
 }
@@ -1451,7 +1536,8 @@ fn blind_under_tun(rules: &[Rule]) -> Option<String> {
         .iter()
         .enumerate()
         .filter(|(_, rule)| {
-            !(rule.domain.is_empty() && rule.geosite.is_empty())
+            rule.enabled
+                && !(rule.domain.is_empty() && rule.geosite.is_empty())
                 && rule.ip.is_empty()
                 && rule.geoip.is_empty()
                 && rule.port.is_empty()
@@ -1528,6 +1614,9 @@ fn commit_routing(
     running: Option<&Running>,
     frames: &watch::Sender<Frame>,
 ) -> Result<(), String> {
+    let mut next = next;
+    // Every rule saved has an id, so a preset saved later can name it.
+    next.routing.ensure_ids();
     save_profile(store, &next)?;
     setup.profile = next;
     forget_problem(setup, frames);
@@ -2655,10 +2744,7 @@ mod tests {
             action: Action::Proxy,
             domain: domain.into_iter().map(str::to_owned).collect(),
             ip: ip.into_iter().map(str::to_owned).collect(),
-            port: Vec::new(),
-            process: Vec::new(),
-            geosite: Vec::new(),
-            geoip: Vec::new(),
+            ..Rule::default()
         };
         let names = rule("сайты", vec!["a.example"], vec![]);
         let both = rule("и то и то", vec!["b.example"], vec!["203.0.113.0/24"]);
@@ -2677,6 +2763,13 @@ mod tests {
         assert!(two.contains("правила #1, #3"), "{two}");
         assert!(two.contains("не сработают"), "{two}");
         assert_eq!(blind_under_tun(&[]), None, "nothing to warn about");
+
+        // A switched-off rule decides nothing anywhere, so it is not named.
+        let off = Rule {
+            enabled: false,
+            ..rule("выключено", vec!["c.example"], vec![])
+        };
+        assert_eq!(blind_under_tun(&[off]), None);
     }
 
     /// And the note is there only while the adapter is: the same rules are
@@ -2685,17 +2778,13 @@ mod tests {
     fn the_note_about_names_comes_and_goes_with_the_adapter() {
         let routing = bliss_proto::Routing {
             fallback: Action::Proxy,
-            geo_dir: None,
             rules: vec![Rule {
                 name: Some("сайты".to_owned()),
                 action: Action::Proxy,
                 domain: vec!["a.example".to_owned()],
-                ip: Vec::new(),
-                port: Vec::new(),
-                process: Vec::new(),
-                geosite: Vec::new(),
-                geoip: Vec::new(),
+                ..Rule::default()
             }],
+            ..bliss_proto::Routing::default()
         };
         let rules = Rules::compile(routing, std::path::Path::new("nonexistent"));
         assert!(rules.view(false).warnings.is_empty());

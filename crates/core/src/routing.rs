@@ -242,15 +242,19 @@ impl Router {
     pub fn build(config: &Routing, geo_dir: &Path) -> Self {
         let mut warnings = Vec::new();
 
-        // Load every category any rule mentions, once, rather than per rule.
+        // Load every category any rule mentions, once, rather than per rule —
+        // and none for a rule that is switched off, which decides nothing and
+        // is no reason to hold a country's addresses in memory.
         let wanted_sites: Vec<String> = config
             .rules
             .iter()
+            .filter(|r| r.enabled)
             .flat_map(|r| r.geosite.iter().cloned())
             .collect();
         let wanted_ips: Vec<String> = config
             .rules
             .iter()
+            .filter(|r| r.enabled)
             .flat_map(|r| r.geoip.iter().cloned())
             .collect();
 
@@ -273,7 +277,12 @@ impl Router {
         let mut site_names: Option<Option<std::collections::HashSet<String>>> = None;
 
         let mut rules = Vec::with_capacity(config.rules.len());
+        // Numbered by place in the whole list, switched-off rules counted, so
+        // "#3" in a warning is the third row on the screen.
         for (index, rule) in config.rules.iter().enumerate() {
+            if !rule.enabled {
+                continue;
+            }
             let name = rule.display_name();
             let where_ = format!("правило #{} ({name})", index + 1);
 
@@ -546,12 +555,7 @@ mod tests {
         Rule {
             name: Some(name.to_owned()),
             action,
-            domain: Vec::new(),
-            ip: Vec::new(),
-            port: Vec::new(),
-            process: Vec::new(),
-            geosite: Vec::new(),
-            geoip: Vec::new(),
+            ..Rule::default()
         }
     }
 
@@ -559,11 +563,31 @@ mod tests {
         Router::build(
             &Routing {
                 fallback,
-                geo_dir: None,
                 rules,
+                ..Routing::default()
             },
             Path::new("nonexistent"),
         )
+    }
+
+    /// A switched-off rule keeps its row and decides nothing; the rules after
+    /// it keep their numbers, so a warning's "#2" is still the second row.
+    #[test]
+    fn a_switched_off_rule_decides_nothing() {
+        let mut off = rule(Action::Block, "off");
+        off.domain = vec!["example.com".into()];
+        off.enabled = false;
+        let empty = rule(Action::Direct, "empty");
+        let r = router(vec![off, empty], Action::Proxy);
+
+        let d = r.decide(&Target::domain("example.com", 443), None);
+        assert_eq!((d.route, d.rule.as_str()), (Route::Proxy, "по умолчанию"));
+        assert_eq!(r.rule_count(), 0);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("#2 (empty)")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     #[test]
@@ -812,6 +836,7 @@ mod tests {
             fallback: Action::Proxy,
             geo_dir: None,
             rules: vec![sites, lan, ru, whole],
+            ..Routing::default()
         };
         let r = Router::build(&routing, &dir);
 

@@ -308,16 +308,13 @@ mod tests {
             name: Some("no".to_owned()),
             action: Action::Block,
             domain: vec!["a.example".to_owned()],
-            ip: Vec::new(),
-            port: Vec::new(),
-            process: Vec::new(),
-            geosite: Vec::new(),
-            geoip: Vec::new(),
+            ..Rule::default()
         };
         let routing = Routing {
             fallback: Action::Proxy,
             geo_dir: None,
             rules: vec![block],
+            ..Routing::default()
         };
         serving.set_router(Arc::new(Router::build(
             &routing,

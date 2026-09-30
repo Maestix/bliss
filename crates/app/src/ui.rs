@@ -373,7 +373,7 @@ fn app_icon(_side: Option<u32>) -> Option<Icon> {
 /// A prop rather than the frame, so this runs only when the words change, which
 /// is exactly when the shell has to be told (rule 17 of AGENTS.md §6).
 #[component]
-fn Tray(tooltip: String) -> Element {
+fn Tray(tooltip: String, frame: Signal<Frame>) -> Element {
     use dioxus::desktop::trayicon::{
         MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
     };
@@ -441,7 +441,10 @@ fn Tray(tooltip: String) -> Element {
                 } else if clicked.is_visible() {
                     out_of_the_tray(&clicked);
                 } else {
-                    into_menu(&clicked, (position.x, position.y));
+                    // Read now, not captured: this handler is made once,
+                    // and the presets change under it.
+                    let presets = frame.peek().routing.presets.len();
+                    into_menu(&clicked, (position.x, position.y), presets);
                 }
             }
             MouseButton::Middle => {}
@@ -474,6 +477,22 @@ fn Tray(tooltip: String) -> Element {
     rsx! {}
 }
 
+/// How tall the menu is with this many presets: its own shape, and a heading
+/// and a line for each preset, four at most — more scroll (`.tray-presets`).
+/// Grown rather than taken from the server list, which is what the menu was
+/// made taller for.
+fn menu_height(presets: usize) -> f64 {
+    match presets {
+        0 => MENU_SIZE.1,
+        n => MENU_SIZE.1 + 37.0 + PRESET_LINE * n.min(PRESET_LINES) as f64,
+    }
+}
+
+/// A preset's line in the menu, gap included, and how many show before the
+/// list scrolls; `.tray-presets` in app.css is that tall, less the last gap.
+const PRESET_LINE: f64 = 28.0;
+const PRESET_LINES: usize = 4;
+
 /// How big the tray's menu is, in logical pixels, and the smallest the program
 /// itself may be — the menu has to undo that floor to fit.
 ///
@@ -486,7 +505,7 @@ const MIN_SIZE: (f64, f64) = (880.0, 560.0);
 
 /// Lend the window to the tray's menu: small, above everything, out of the
 /// taskbar, beside the icon, with the program's screen folded away under it.
-fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64)) {
+fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64), presets: usize) {
     use dioxus::desktop::tao::dpi::LogicalSize;
 
     if !TRAY_MENU() {
@@ -510,8 +529,9 @@ fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64)) {
     window.set_resizable(false);
     window.set_maximizable(false);
     window.set_min_inner_size(None::<LogicalSize<f64>>);
-    window.set_inner_size(LogicalSize::new(MENU_SIZE.0, MENU_SIZE.1));
-    window.set_outer_position(menu_corner(window, near));
+    let height = menu_height(presets);
+    window.set_inner_size(LogicalSize::new(MENU_SIZE.0, height));
+    window.set_outer_position(menu_corner(window, near, height));
 }
 
 /// Give the window back: the program's shape, and shown or away.
@@ -545,11 +565,12 @@ fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
 fn menu_corner(
     window: &dioxus::desktop::DesktopContext,
     near: (f64, f64),
+    height: f64,
 ) -> dioxus::desktop::tao::dpi::PhysicalPosition<i32> {
     use dioxus::desktop::tao::dpi::PhysicalPosition;
 
     let scale = window.scale_factor();
-    let (width, height) = ((MENU_SIZE.0 * scale) as i32, (MENU_SIZE.1 * scale) as i32);
+    let (width, height) = ((MENU_SIZE.0 * scale) as i32, (height * scale) as i32);
     let (x, y) = (near.0 as i32, near.1 as i32);
     let screen = window
         .available_monitors()
@@ -625,6 +646,16 @@ fn TrayMenu(frame: Frame) -> Element {
     let on = frame.state.is_on();
     let (tone, outer, inner) = tones(frame.state);
     let chosen = frame.proxy_mode;
+    let drifted = frame.routing.drifted;
+    let presets: Vec<(String, bool)> = frame
+        .routing
+        .presets
+        .iter()
+        .map(|name| {
+            let current = frame.routing.current_preset.as_deref() == Some(name.as_str());
+            (name.clone(), current)
+        })
+        .collect();
 
     rsx! {
         div { class: "tray-card",
@@ -680,6 +711,48 @@ fn TrayMenu(frame: Frame) -> Element {
                         span {
                             style: "font-size:12.5px;color:{ping_tone(server.ping)}",
                             "{ping_text(server.ping)}"
+                        }
+                    }
+                }
+            }
+
+            if !presets.is_empty() {
+                div { class: "tray-sep" }
+                span { class: "tray-head", "Пресеты правил" }
+                div { class: "tray-presets",
+                    for (name, current) in presets {
+                        div {
+                            key: "{name}",
+                            class: if current { "act choice on" } else { "act choice" },
+                            style: "display:flex;align-items:center;gap:9px;padding:5px 8px;\
+                                    border-radius:4px;font-size:13px;color:{choice_tint(current)}",
+                            onclick: {
+                                let controller = controller.clone();
+                                let name = name.clone();
+                                move |_| {
+                                    controller.send(Command::ApplyPreset(name.clone()));
+                                    close_menu();
+                                }
+                            },
+                            div {
+                                style: "width:11px;height:11px;flex:none;border-radius:50%;\
+                                        box-shadow:inset 0 0 0 1px {choice_ring(current)};\
+                                        display:grid;place-items:center",
+                                if current {
+                                    div {
+                                        style: "width:5px;height:5px;border-radius:50%;\
+                                                background-color:var(--color-accent)",
+                                    }
+                                }
+                            }
+                            span { style: "min-width:0;overflow:hidden;white-space:nowrap", "{name}" }
+                            if current && drifted {
+                                span {
+                                    title: "Правила сдвинулись с этого пресета",
+                                    style: "width:5px;height:5px;flex:none;border-radius:50%;\
+                                            background-color:#a98ce8",
+                                }
+                            }
                         }
                     }
                 }
@@ -891,13 +964,14 @@ fn App() -> Element {
         let _ = document::eval(CHART_HOVER);
     });
 
+    let live = frame;
     let frame = frame();
 
     rsx! {
         Styles {}
         WindowIcons {}
         WindowZoom {}
-        Tray { tooltip: tray_tooltip(&frame) }
+        Tray { tooltip: tray_tooltip(&frame), frame: live }
         ToastLine { toast: frame.toast.clone() }
         if TRAY_MENU() {
             TrayMenu { frame: frame.clone() }
@@ -1251,6 +1325,9 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Подключение" }
                 span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{elide(&frame.server_tag, 40)}"
+                }
+                if !frame.routing.presets.is_empty() {
+                    PresetPills { view: frame.routing.clone() }
                 }
             }
 
@@ -2376,8 +2453,7 @@ fn Routing(frame: Frame) -> Element {
             div { style: "display:flex;align-items:baseline;gap:10px",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Маршрутизация" }
                 span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
-                    "{plural(view.rules.len() as u64, \"правило\", \"правила\", \"правил\")} · \
-                     остальное {view.fallback.label()}"
+                    "{rule_count(view)} · остальное {view.fallback.label()}"
                 }
                 div { style: "margin-left:auto;flex:none;align-self:center",
                     Button {
@@ -2387,6 +2463,10 @@ fn Routing(frame: Frame) -> Element {
                         icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
                     }
                 }
+            }
+
+            if !view.rules.is_empty() || !view.presets.is_empty() {
+                PresetBar { view: view.clone() }
             }
 
             // No rules at all: offer the starting set rather than an empty list.
@@ -2459,6 +2539,277 @@ fn Routing(frame: Frame) -> Element {
     }
 }
 
+/// One preset's pill, on the routing screen and the main one. A click puts
+/// every switch where the preset has it — for the one in force whose switches
+/// have moved since, back where they were.
+#[component]
+fn PresetChip(name: String, current: bool, drifted: bool) -> Element {
+    let controller = use_context::<Controller>();
+    let class = match (current, drifted) {
+        (false, _) => "preset-chip",
+        (true, false) => "preset-chip on",
+        (true, true) => "preset-chip on drifted",
+    };
+    let title = match (current, drifted) {
+        (false, _) => format!("Включить пресет «{name}»: правила встанут, как в нём"),
+        (true, false) => format!("Пресет «{name}» в силе"),
+        (true, true) => format!("Правила сдвинулись с «{name}» — нажмите, чтобы вернуть как было"),
+    };
+    let label = name.clone();
+    rsx! {
+        span {
+            class,
+            title,
+            onclick: move |_| controller.send(Command::ApplyPreset(name.clone())),
+            "{label}"
+        }
+    }
+}
+
+/// What the name box is for: a new preset, or the one in force renamed.
+#[derive(Clone, Debug, PartialEq)]
+enum Naming {
+    New,
+    Rename(String),
+}
+
+/// The presets on the routing screen: a pill each, the tools of the one in
+/// force beside them, and a box to name a new one.
+///
+/// A preset is where every switch stood, and where everything else went, when
+/// it was saved. The one in force wears a violet dot once a switch has moved
+/// since; the tick takes the new positions into it.
+#[component]
+fn PresetBar(view: crate::engine::RoutingView) -> Element {
+    let controller = use_context::<Controller>();
+    let mut naming = use_signal(|| None::<Naming>);
+    let mut text = use_signal(String::new);
+    // The preset whose delete was clicked once; the second click deletes it.
+    let mut armed = use_signal(|| None::<String>);
+
+    let mut submit = {
+        let controller = controller.clone();
+        move || {
+            let name = text();
+            match naming() {
+                Some(Naming::New) => controller.send(Command::SavePreset(name)),
+                Some(Naming::Rename(from)) => {
+                    controller.send(Command::RenamePreset { from, to: name })
+                }
+                None => {}
+            }
+            naming.set(None);
+        }
+    };
+    // Cloned before rsx!, which builds the handlers in an order of its own
+    // (rule 13 in AGENTS.md).
+    let mut submit_on_key = submit.clone();
+    let (save, delete) = (controller.clone(), controller.clone());
+    let current = view.current_preset.clone().filter(|_| naming().is_none());
+    let pills: Vec<(String, bool)> = view
+        .presets
+        .iter()
+        .map(|name| {
+            (
+                name.clone(),
+                view.current_preset.as_deref() == Some(name.as_str()),
+            )
+        })
+        .collect();
+
+    rsx! {
+        div {
+            style: "flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px",
+            span {
+                style: "margin-right:4px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;\
+                        color:var(--color-neutral-500)",
+                "Пресеты"
+            }
+            for (name, current) in pills {
+                PresetChip { key: "{name}", name: name.clone(), current, drifted: view.drifted }
+            }
+            if view.presets.is_empty() && naming().is_none() {
+                span { style: "font-size:13px;color:var(--color-neutral-600)",
+                    "положения переключателей под именем — переключаются одним кликом"
+                }
+            }
+            if let Some(name) = current {
+                div { style: "display:flex;align-items:center;gap:2px",
+                    IconButton {
+                        title: if view.drifted {
+                            format!("Сохранить новые положения в «{name}»")
+                        } else {
+                            format!("«{name}» сохранён как есть")
+                        },
+                        enabled: view.drifted,
+                        onclick: {
+                            let name = name.clone();
+                            move |_| save.send(Command::SavePreset(name.clone()))
+                        },
+                        icon: rsx! {
+                            crate::icons::Check { size: 16, color: if view.drifted { ACCENT } else { MUTED } }
+                        },
+                    }
+                    IconButton {
+                        title: format!("Переименовать «{name}»"),
+                        enabled: true,
+                        onclick: {
+                            let name = name.clone();
+                            move |_| {
+                                text.set(name.clone());
+                                naming.set(Some(Naming::Rename(name.clone())));
+                            }
+                        },
+                        icon: rsx! { crate::icons::Pencil { size: 15, color: MUTED } },
+                    }
+                    IconButton {
+                        title: if armed().as_deref() == Some(name.as_str()) {
+                            format!("Нажмите ещё раз, чтобы удалить «{name}»")
+                        } else {
+                            format!("Удалить пресет «{name}» — правила останутся как есть")
+                        },
+                        enabled: true,
+                        danger: true,
+                        onclick: {
+                            let name = name.clone();
+                            move |_| {
+                                if armed().as_deref() == Some(name.as_str()) {
+                                    armed.set(None);
+                                    delete.send(Command::DeletePreset(name.clone()));
+                                } else {
+                                    armed.set(Some(name.clone()));
+                                }
+                            }
+                        },
+                        icon: rsx! {
+                            crate::icons::Trash {
+                                size: 15,
+                                color: if armed().as_deref() == Some(name.as_str()) { BAD } else { MUTED },
+                            }
+                        },
+                    }
+                }
+            }
+            if naming().is_none() {
+                div { style: "margin-left:auto",
+                    Button {
+                        label: "Сохранить как пресет",
+                        enabled: true,
+                        onclick: move |_| {
+                            text.set(String::new());
+                            naming.set(Some(Naming::New));
+                        },
+                        icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                    }
+                }
+            } else {
+                div { style: "display:flex;align-items:center;gap:4px",
+                    input {
+                        class: "field",
+                        r#type: "text",
+                        value: "{text}",
+                        maxlength: "{crate::profile_file::MAX_PRESET_NAME}",
+                        placeholder: if matches!(naming(), Some(Naming::New)) {
+                            "Название, например «Игры»"
+                        } else {
+                            "Новое название"
+                        },
+                        autocomplete: "off",
+                        spellcheck: "false",
+                        style: "width:200px;padding:6px 9px;border-radius:4px;border:none;\
+                                color:var(--color-text);font-size:13.5px",
+                        onmounted: move |e: MountedEvent| async move {
+                            let _ = e.data().set_focus(true).await;
+                        },
+                        oninput: move |e| text.set(e.value()),
+                        onkeydown: move |e: KeyboardEvent| match e.key() {
+                            Key::Enter => {
+                                e.prevent_default();
+                                if !text().trim().is_empty() {
+                                    submit_on_key();
+                                }
+                            }
+                            Key::Escape => naming.set(None),
+                            _ => {}
+                        },
+                    }
+                    IconButton {
+                        title: "Сохранить",
+                        enabled: !text().trim().is_empty(),
+                        onclick: move |_| submit(),
+                        icon: rsx! { crate::icons::Check { size: 16, color: ACCENT } },
+                    }
+                    IconButton {
+                        title: "Отмена",
+                        enabled: true,
+                        onclick: move |_| naming.set(None),
+                        icon: rsx! { crate::icons::Close { size: 14, color: MUTED } },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The presets on the main screen, beside its heading: one line, and those
+/// that do not fit are hidden rather than wrapped into a second (rule 19).
+#[component]
+fn PresetPills(view: crate::engine::RoutingView) -> Element {
+    let pills: Vec<(String, bool)> = view
+        .presets
+        .iter()
+        .map(|name| {
+            (
+                name.clone(),
+                view.current_preset.as_deref() == Some(name.as_str()),
+            )
+        })
+        .collect();
+    rsx! {
+        div {
+            style: "margin-left:auto;align-self:center;flex:0 1 auto;min-width:0;height:26px;\
+                    overflow:hidden;display:flex;flex-wrap:wrap;justify-content:flex-end;\
+                    align-items:center;gap:6px",
+            span { style: "font-size:12.5px;color:var(--color-neutral-600);white-space:nowrap",
+                "пресет"
+            }
+            for (name, current) in pills {
+                PresetChip { key: "{name}", name: name.clone(), current, drifted: view.drifted }
+            }
+        }
+    }
+}
+
+/// `5 правил`, or `5 правил, 2 выключены` when some are off.
+fn rule_count(view: &crate::engine::RoutingView) -> String {
+    let total = plural(view.rules.len() as u64, "правило", "правила", "правил");
+    match view.rules.iter().filter(|rule| !rule.enabled).count() {
+        0 => total,
+        off => format!(
+            "{total}, {}",
+            plural(off as u64, "выключено", "выключены", "выключено")
+        ),
+    }
+}
+
+/// A rule's switch: the TUN switch's look, small, and pink while the rule
+/// decides. The click stops here — the row under it opens the editor.
+#[component]
+fn RuleSwitch(at: usize, on: bool) -> Element {
+    let controller = use_context::<Controller>();
+    rsx! {
+        div {
+            class: if on { "rule-switch on" } else { "rule-switch" },
+            title: if on { "Правило работает — выключить" } else { "Правило выключено — включить" },
+            onclick: move |e: MouseEvent| {
+                e.stop_propagation();
+                controller.send(Command::SwitchRule { at, on: !on });
+            },
+            div { class: "rule-knob" }
+        }
+    }
+}
+
 #[component]
 fn RuleList(view: crate::engine::RoutingView) -> Element {
     let controller = use_context::<Controller>();
@@ -2495,7 +2846,9 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                 for (at, rule) in view.rules.iter().enumerate() {
                     div {
                         key: "{at}",
-                        class: "rule-row",
+                        // Off by class, not by inline style (rule 1): the text and
+                        // the action fade, the switch does not.
+                        class: if rule.enabled { "rule-row" } else { "rule-row off" },
                         // Wraps: the action and the tools go under the text
                         // when they do not fit beside the number and 240px of
                         // text. Beside it at any width, the text column
@@ -2518,7 +2871,9 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                         },
                         // The number and the text wrap as one: as two items,
                         // the number took a line of its own in a narrow window.
-                        div { style: "flex:1 1 270px;min-width:0;display:flex;align-items:flex-start;gap:11px",
+                        div {
+                            class: "rule-body",
+                            style: "flex:1 1 270px;min-width:0;display:flex;align-items:flex-start;gap:11px",
                             // The number is the rule: first match wins, so the
                             // order is not decoration.
                             span {
@@ -2540,7 +2895,8 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                             }
                         }
                         div { style: "flex:none;margin-left:auto;display:flex;align-items:center;gap:8px",
-                            ActionPill { action: rule.action }
+                            RuleSwitch { at, on: rule.enabled }
+                            div { class: "rule-action", ActionPill { action: rule.action } }
                             div { class: "rule-tools",
                                 IconButton {
                                     title: "Выше: решает раньше",
@@ -2938,6 +3294,28 @@ mod tests {
             !code.contains("set_minimized"),
             "launch minimizes the window before WebView2 is created in it"
         );
+    }
+
+    /// The menu grows by its presets rather than taking their room from the
+    /// server list, four lines at most, and the list's height in app.css is
+    /// those four lines.
+    #[test]
+    fn the_menu_grows_with_its_presets() {
+        assert_eq!(menu_height(0), MENU_SIZE.1);
+        assert!(menu_height(1) > MENU_SIZE.1);
+        assert!(menu_height(3) > menu_height(1));
+        assert_eq!(
+            menu_height(PRESET_LINES),
+            menu_height(24),
+            "past four it scrolls"
+        );
+        let block = APP_CSS
+            .split(".tray-presets {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect(".tray-presets is in app.css");
+        let tall = format!("max-height: {}px", PRESET_LINE as usize * PRESET_LINES - 2);
+        assert!(block.contains(&tall), "{tall} in {block}");
     }
 
     /// The tray's menu is the window in a small shape, and tao lets a
@@ -3398,6 +3776,7 @@ mod tests {
             name: name.to_owned(),
             action: Action::Direct,
             conditions: Vec::new(),
+            enabled: true,
         };
         let routing = crate::engine::RoutingView {
             rules: vec![rule(1, "Реклама"), rule(2, "Локальная сеть")],

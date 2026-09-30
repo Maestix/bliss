@@ -55,12 +55,7 @@ pub fn parse(name: &str, action: Action, text: &str) -> Result<Rule, String> {
     let mut rule = Rule {
         name: (!name.is_empty()).then(|| name.to_owned()),
         action,
-        domain: Vec::new(),
-        ip: Vec::new(),
-        port: Vec::new(),
-        process: Vec::new(),
-        geosite: Vec::new(),
-        geoip: Vec::new(),
+        ..Rule::default()
     };
     for entry in text
         .split(['\n', ',', ';'])
