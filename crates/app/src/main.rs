@@ -594,7 +594,7 @@ async fn install_engine(
 
     let dir = work_dir()?;
     let mut last_shown = 0u64;
-    let path = bliss_xray::install(&client, &release, &dir, |done, total| {
+    let installed = bliss_xray::install(&client, &release, &dir, |done, total| {
         // Redraw at most every 512 KB: a progress line that repaints on every
         // chunk costs more than the download.
         if done - last_shown < 512 * 1024 && done != total {
@@ -614,9 +614,22 @@ async fn install_engine(
         }
         let _ = std::io::stdout().flush();
     })
-    .await
-    .wrap_err("could not install the engine")?;
+    .await;
     println!();
+    let path = match installed {
+        Ok(path) => path,
+        // ERROR_SHARING_VIOLATION: the engine of a running bliss.
+        Err(bliss_xray::DownloadError::Write { path, source })
+            if source.raw_os_error() == Some(32) =>
+        {
+            bail!(
+                "{} is in use by a running engine. Stop the tunnel in the bliss window, or \
+                 leave bliss (tray menu → Выход), and run this again.",
+                path.display()
+            )
+        }
+        Err(e) => return Err(e).wrap_err("could not install the engine"),
+    };
 
     let installed = bliss_xray::check_version(&path, None)
         .await
@@ -629,7 +642,8 @@ installed xray-core {installed}
     );
     println!(
         "
-bliss uses it automatically — no engine.xray needed in the profile."
+bliss uses it automatically — no engine.xray needed in the profile.
+A bliss window that is open and waiting for an engine connects within seconds."
     );
     Ok(())
 }
@@ -1070,7 +1084,14 @@ fn default_profile_path() -> Result<PathBuf> {
 }
 
 /// Where generated configs and the managed engine live.
+///
+/// `BLISS_WORK_DIR` moves it, for probes: one that needs a work dir without
+/// the engine in it, or one that should share nothing with the user's bliss —
+/// its log, its engine's config, its system-proxy snapshot.
 fn work_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("BLISS_WORK_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     Ok(project_dirs()?.data_local_dir().to_path_buf())
 }
 

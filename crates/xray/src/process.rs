@@ -298,18 +298,40 @@ where
 
 /// Ask the binary what it is, and refuse early if it cannot do the job.
 pub async fn check_version(exe: &Path, needs: Option<Version>) -> Result<Version, XrayError> {
+    check_version_within(exe, needs, VERSION_WAIT).await
+}
+
+/// How long `xray version` has to answer. It answers at once; the first run
+/// of a newly downloaded one can take seconds while an antivirus looks it
+/// over. Without a bound, an engine that never answered held the engine loop
+/// — and with it every click in the window — for good.
+const VERSION_WAIT: Duration = Duration::from_secs(20);
+
+async fn check_version_within(
+    exe: &Path,
+    needs: Option<Version>,
+    wait: Duration,
+) -> Result<Version, XrayError> {
     if !exe.is_file() {
         return Err(XrayError::NotFound(exe.to_path_buf()));
     }
 
     let mut command = Command::new(exe);
     command.arg("version");
+    // A child left to run after the wait gave up on it is a process nobody owns.
+    command.kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
 
-    let out = command
-        .output()
+    let out = tokio::time::timeout(wait, command.output())
         .await
+        .map_err(|_| {
+            XrayError::Version(format!(
+                "{} did not answer `version` within {} s",
+                exe.display(),
+                wait.as_secs()
+            ))
+        })?
         .map_err(|e| XrayError::Version(e.to_string()))?;
     let text = String::from_utf8_lossy(&out.stdout);
     let first = text.lines().next().unwrap_or_default();
@@ -409,6 +431,34 @@ mod readiness_tests {
         // being remembered as taken.
         drop(squatter);
         assert!(claim_bridge_port(port).is_ok());
+    }
+
+    /// An engine that never answers `version` is given up on, and ended
+    /// rather than left running with nobody to end it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_engine_that_does_not_answer_is_given_up_on() {
+        fn waiting() -> usize {
+            let out = std::process::Command::new("tasklist")
+                .args(["/FI", "IMAGENAME eq waitfor.exe", "/NH"])
+                .output()
+                .expect("tasklist runs");
+            String::from_utf8_lossy(&out.stdout)
+                .matches("waitfor.exe")
+                .count()
+        }
+        // `waitfor version` waits for a signal called "version", for ever.
+        let hangs = Path::new(r"C:\Windows\System32\waitfor.exe");
+        let before = waiting();
+        let started = std::time::Instant::now();
+        let said = check_version_within(hangs, None, Duration::from_millis(500)).await;
+        assert!(matches!(said, Err(XrayError::Version(_))), "{said:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "it waited on");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            waiting() <= before,
+            "the one that did not answer is still running"
+        );
     }
 
     /// "Something accepted the connection" is not "the engine is up". A SOCKS5

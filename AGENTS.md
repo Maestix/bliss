@@ -120,7 +120,7 @@ Runtime paths on Windows:
 ```bash
 cargo fmt --all
 cargo clippy --all-targets   # no warnings (default members; --workspace adds the spike)
-cargo test                   # default members, ~225 tests
+cargo test                   # default members, ~230 tests
 cargo build -p bliss         # target/debug/bliss.exe
 ```
 
@@ -294,6 +294,14 @@ These cost the most time on this project. None of them announce themselves.
    - A sandbox switched off for one command (`dangerouslyDisableSandbox`) is
      still inside the package: the first probe tried that and failed the
      same way.
+10. **A child a test leaves running keeps cargo waiting for ever.** A process
+    started with inherited handles holds the test binary's own output pipe,
+    and cargo waits for that pipe to close. Breaking `kill_on_drop` on purpose,
+    to see `an_engine_that_does_not_answer_is_given_up_on` fail, left a
+    `waitfor.exe` running and the whole `cargo test` hung for ten minutes,
+    until the `waitfor` was ended by hand. When a guard is about a child being
+    ended, run its check against the broken code in the background, and end
+    the child yourself.
 
 ## 4. Commits
 
@@ -330,8 +338,12 @@ These cost the most time on this project. None of them announce themselves.
   list brings (2 000, `subscription.rs`), servers in a profile however they
   arrive (5 000, `MAX_PROFILE_SERVERS`), names the VPN's DNS answered (256,
   `dns.rs`), an OpenVPN profile (256 KB, `MAX_PROFILE`, measured before the
-  file is read). The project exists because another client's GUI reached
-  7.8 GB this way.
+  file is read), the engine's archive (128 MB, the announced length checked
+  before anything is allocated for it and the bytes as they arrive), a file
+  unpacked from it (256 MB, whatever its zip header says) and its checksum
+  file (64 KB) in `download.rs` — the archive was read whole into a buffer
+  sized by the server's word, and each file by the header's. The project
+  exists because another client's GUI reached 7.8 GB this way.
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
@@ -985,6 +997,17 @@ server and a local HTTP server reached through a `direct` rule; that start
 writes `xray.json` in the shared work dir, which the next real start rewrites.
 Ctrl+V needs the real clipboard: put fake data on it and empty it afterwards.
 
+**`BLISS_WORK_DIR` moves the work dir** — the engine, `xray.json`,
+`bliss.log`, the system-proxy snapshot, `openvpn\` — for the window and the
+CLI alike. Pointed at an absolute folder in `Temp`, a probe shares nothing
+with the user's bliss, needs no WMI (§3, trap 9: `Temp` is written through),
+and can start with no engine at all. The probe of 7 October did: the
+missing engine offered for install, the install refused in words (its proxy
+variables pointed at a dead port, so nothing was downloaded), the engine
+copied in from outside and taken up 2.8 s later, then the subscription
+editor. It did not click «Скопировать адрес»: the user's clipboard held more
+than text, and a probe leaves such a clipboard alone.
+
 A narrow window is sized from the script, with `SetWindowPos` from a DPI-aware
 process (`SetProcessDpiAwarenessContext(-4)`). The rect includes the window's
 invisible resize borders, 16px wide and 9px tall at 96 dpi, and a size set this
@@ -1201,6 +1224,30 @@ table.
 - Nearly every release is flagged prerelease, so "latest" can be months old. The
   downloader installs the newest **stable** release; `--newest` takes any.
 - Checksums in `.dgst` are labelled `SHA2-256=`.
+- **The window installs the engine itself, and takes up one installed from
+  outside.** A missing engine used to be one red line naming
+  `bliss engine install`; run from PowerShell, that windowed program gives the
+  prompt back at once and prints after it, and once it had finished the
+  window went on waiting for a click to look again — the user ran it and saw
+  nothing happen. Now the line has a button, «Установить движок»
+  (`EngineInstall`, `Command::InstallEngine`): the newest stable release —
+  the newest of any kind when none of the last thirty is stable — fetched off
+  the loop with its progress in `Frame.engine_setup`, a failure said in
+  Russian by kind (`install_problem`), the tunnel started after. And the
+  ticker takes up an engine that appears while the window waits for one,
+  two seconds after it shows, for the archive's other files to land.
+  Either way the rules are compiled again (`took_up_engine`): geoip.dat and
+  geosite.dat came in the same archive, and rules about countries had been
+  compiled from none.
+- **Downloads are timed by silence**, not length: 20 s to connect and 60 s
+  without a byte. The 300 s on the whole request cut off a 15 MB archive on
+  any link under 50 KB/s.
+- **`xray version` has 20 s to answer** (`check_version`), and is ended if it
+  does not (`kill_on_drop`). The first run of a downloaded engine can wait on
+  an antivirus, and `start` awaits this check in the engine loop: unbounded,
+  it held every click in the window
+  (`an_engine_that_does_not_answer_is_given_up_on`, seen failing without the
+  kill).
 - Xray now calls `streamSettings.network` `raw` where it used to be `tcp`
   (`config.rs` emits `raw`, `link/stream.rs` accepts both); the `mixed` inbound
   serves SOCKS and HTTP on one port.
@@ -1407,7 +1454,8 @@ up); zoom with the window size; no console window; deleting servers, a
 subscription's servers grouped under its name, a rule filter for the
 connections table, and log levels in colour; a settings screen, which so far
 starts bliss with Windows, minimized or not; subscriptions renamed, given a
-new address and copied; scrollbars that draw only a thumb;
+new address and copied; the engine installed from the window, and taken up
+when installed from a console; scrollbars that draw only a thumb;
 the traffic chart as a gliding curve with the rate under the pointer; the tray,
 which the window hides into and whose menu bliss draws itself; one window at a
 time, a second copy leaving at once (rule 24); links for every kind of
@@ -1451,8 +1499,10 @@ that owns the adapter and the routes, so TUN no longer needs all of bliss
 elevated; IPv6 in the TUN, either carried or blocked; renaming servers;
 turning a link that asks for an unchecked certificate into a pinned one (xray
 no longer has `allowInsecure`, §10); the rest of the settings screen (ports, the
-engine, installing it with a button); an idle timeout for half-open
-connections; the first-run wizard (1.8); the 12-hour memory run.
+engine — updating it, since the button only installs a missing one); an idle
+timeout for half-open connections; the first-run wizard (1.8); the 12-hour
+memory run. The window's install has been run against a dead proxy only: a
+real download from GitHub through it has not been made.
 
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes

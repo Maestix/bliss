@@ -1556,7 +1556,12 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                 }
                 span {
                     style: "font-size:14px",
-                    if frame.engine.is_empty() { "не запущен" } else { "{frame.engine}" }
+                    match (&frame.engine_setup, frame.engine.is_empty()) {
+                        (crate::engine::EngineSetup::Installing { .. }, _) => "устанавливается…".to_owned(),
+                        (crate::engine::EngineSetup::Missing { .. }, true) => "не установлен".to_owned(),
+                        (_, true) => "не запущен".to_owned(),
+                        (_, false) => frame.engine.clone(),
+                    }
                 }
                 // Honest rather than aspirational: in stage 1 the engine really
                 // is someone else's process running alongside us.
@@ -1644,7 +1649,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
             // the log, which is one screen away and not where anyone looks first.
             if !reason.is_empty() {
                 div {
-                    style: "flex:none;display:flex;align-items:flex-start;gap:9px;\
+                    style: "flex:none;display:flex;flex-direction:column;gap:9px;\
                             padding:10px 13px;border-radius:8px;\
                             background-color:rgba(229,107,111,.10);\
                             box-shadow:inset 0 0 0 1px rgba(229,107,111,.26)",
@@ -1653,6 +1658,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                                 min-width:0;word-break:break-word",
                         "{reason}"
                     }
+                    EngineInstall { setup: frame.engine_setup.clone() }
                 }
             }
 
@@ -1710,6 +1716,57 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 }
             }
         }
+    }
+}
+
+/// What the window can do about a missing engine: fetch it, and show how far
+/// that has got. It used to name a console command and nothing else — run
+/// from PowerShell, a command of this windowed program gives the prompt back
+/// at once and prints later — and a window waiting for a click to look again.
+#[component]
+fn EngineInstall(setup: crate::engine::EngineSetup) -> Element {
+    use crate::engine::EngineSetup;
+    let controller = use_context::<Controller>();
+    match setup {
+        EngineSetup::Present => rsx! {},
+        EngineSetup::Missing { problem } => rsx! {
+            div { style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px",
+                Button {
+                    label: "Установить движок",
+                    enabled: true,
+                    onclick: move |_| controller.send(Command::InstallEngine),
+                    icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                }
+                span { style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-500)",
+                    "xray-core с GitHub, около 15 МБ; подключусь сразу после"
+                }
+                if let Some(problem) = problem {
+                    span {
+                        style: "flex-basis:100%;font-size:12.5px;line-height:1.45;color:#f2a7ad;\
+                                word-break:break-word",
+                        "Не вышло: {problem}"
+                    }
+                }
+            }
+        },
+        EngineSetup::Installing { stage, percent } => rsx! {
+            div { style: "display:flex;flex-direction:column;gap:6px;max-width:420px",
+                span { style: "font-size:13px;color:var(--color-accent-2-300)",
+                    match percent {
+                        Some(percent) => format!("{stage} — {percent}%"),
+                        None => format!("{stage}…"),
+                    }
+                }
+                div {
+                    style: "height:5px;border-radius:3px;overflow:hidden;\
+                            background-color:rgba(239,232,245,.08)",
+                    div {
+                        style: "height:100%;width:{percent.unwrap_or(0)}%;border-radius:3px;\
+                                background-color:#a98ce8",
+                    }
+                }
+            }
+        },
     }
 }
 

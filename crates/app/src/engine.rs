@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -199,6 +199,22 @@ pub struct Frame {
     pub tun: TunView,
     /// The VPN beside the tunnel.
     pub vpn: VpnView,
+    /// Whether there is an engine to start, and one on its way if not.
+    pub engine_setup: EngineSetup,
+}
+
+/// The engine, as the window can do something about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EngineSetup {
+    /// There is one, or nothing has looked yet.
+    #[default]
+    Present,
+    /// bliss's own copy is not there, so the window offers to fetch it; with
+    /// why the last attempt failed, if one did.
+    Missing { problem: Option<String> },
+    /// Being fetched: what is happening, and how far along, in percent, once
+    /// that is known.
+    Installing { stage: String, percent: Option<u8> },
 }
 
 /// The VPN beside the tunnel, as the window shows it.
@@ -401,6 +417,11 @@ pub enum Command {
     /// Put a subscription's whole address on the clipboard: the window never
     /// has it, since only its host is shown.
     CopySubscription(String),
+    /// Fetch the engine into the work dir, as `bliss engine install` does.
+    InstallEngine,
+    /// The fetch finished: the version installed, or why not. Only the
+    /// engine sends this, to itself.
+    EngineInstalled(Result<String, String>),
     /// Remove the server at this place in the list. Its tag travels with the
     /// index, so a list that changed in the meantime is noticed rather than
     /// the server that moved into that place deleted.
@@ -569,8 +590,8 @@ pub fn engine_path(setup: &Setup) -> Result<PathBuf, String> {
         Ok(managed)
     } else {
         Err(
-            "движок не установлен. Скачайте его командой «bliss engine install» \
-             — bliss найдёт его при следующем подключении"
+            "движок не установлен. Установите его кнопкой «Установить движок» или \
+             командой «bliss engine install» — открытое окно подхватит его само"
                 .to_owned(),
         )
     }
@@ -834,6 +855,10 @@ async fn drive(
     // Whether the connections screen is open, and so whether the frame
     // carries the table (`Command::Table`).
     let mut table = false;
+
+    // When an engine first showed up in the work dir while the window was
+    // waiting for one; see the ticker.
+    let mut engine_seen: Option<Instant> = None;
 
     // The VPN beside the tunnel lives here too, and for the same reason: it is
     // up or down on its own switch, whatever the tunnel does.
@@ -1276,6 +1301,38 @@ async fn drive(
                             Err(e) => toaster.show(&frames, e, true),
                         }
                     }
+                    Command::InstallEngine => {
+                        if matches!(frames.borrow().engine_setup, EngineSetup::Installing { .. }) {
+                            continue;
+                        }
+                        tracing::info!("engine: installing it, from the window");
+                        frames.send_modify(|f| {
+                            f.engine_setup = EngineSetup::Installing {
+                                stage: "ищу последнюю версию".to_owned(),
+                                percent: None,
+                            };
+                        });
+                        fetch_engine(setup.work_dir.clone(), via(running.as_ref()), frames.clone(), own.clone());
+                    }
+                    Command::EngineInstalled(outcome) => match outcome {
+                        Ok(version) => {
+                            tracing::info!("engine: xray-core {version} installed");
+                            frames.send_modify(|f| f.engine_setup = EngineSetup::Present);
+                            toaster.show(&frames, format!("Движок xray-core {version} установлен"), false);
+                            took_up_engine(&setup, &mut rules, running.as_ref(), &frames);
+                            if running.is_none() {
+                                running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
+                                apply_proxy(proxy, &setup, running.is_some(), &frames);
+                            }
+                        }
+                        Err(why) => {
+                            tracing::error!("engine: not installed: {why}");
+                            frames.send_modify(|f| {
+                                f.engine_setup = EngineSetup::Missing { problem: Some(why.clone()) };
+                            });
+                            toaster.show(&frames, format!("Движок не установлен: {why}"), true);
+                        }
+                    },
                     Command::CopySubscription(id) => {
                         match setup.profile.subscriptions.iter().find(|s| s.id == id) {
                             Some(subscription) if crate::clipboard::copy(&subscription.url) => toaster.show(
@@ -1625,6 +1682,26 @@ async fn drive(
                     // The machine must not be left pointed at a port that has
                     // just stopped listening.
                     apply_proxy(proxy, &setup, false, &frames);
+                }
+                // An engine installed from outside — `bliss engine install`
+                // in a console — while the window waited for one is taken up
+                // without anyone asking again. It used to wait for a click
+                // nobody knew to make, and the user saw the command finish and
+                // nothing happen. Two seconds after it first shows: the
+                // archive's other files land just behind it.
+                let missing = matches!(frames.borrow().engine_setup, EngineSetup::Missing { .. });
+                if running.is_none() && missing && engine_path(&setup).is_ok() {
+                    let seen = *engine_seen.get_or_insert_with(Instant::now);
+                    if seen.elapsed() >= Duration::from_secs(2) {
+                        engine_seen = None;
+                        tracing::info!("engine: one was installed while the window waited; connecting");
+                        frames.send_modify(|f| f.engine_setup = EngineSetup::Present);
+                        took_up_engine(&setup, &mut rules, None, &frames);
+                        running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
+                        apply_proxy(proxy, &setup, running.is_some(), &frames);
+                    }
+                } else {
+                    engine_seen = None;
                 }
                 publish(&frames, &tracker, &mut last, running.as_ref(), table);
                 toaster.expire(&frames);
@@ -2293,6 +2370,132 @@ fn fetch_subscription(
     });
 }
 
+/// What changes once an engine has arrived: the geo databases came in the
+/// same archive, and rules about countries and site sets were compiled from
+/// none — inert, with a warning, until bliss was started again.
+fn took_up_engine(
+    setup: &Setup,
+    rules: &mut Rules,
+    running: Option<&Running>,
+    frames: &watch::Sender<Frame>,
+) {
+    *rules = Rules::from_setup(setup);
+    publish_routing(frames, rules, setup.tun);
+    if let Some(parts) = running {
+        parts.serving.set_router(Arc::clone(&rules.router));
+    }
+}
+
+/// Fetch the engine off the loop, as `bliss engine install` does, showing in
+/// the frame how far it has got, and hand the outcome back through the loop.
+fn fetch_engine(
+    dir: PathBuf,
+    via: Option<SocketAddr>,
+    frames: watch::Sender<Frame>,
+    own: mpsc::WeakUnboundedSender<Command>,
+) {
+    tokio::spawn(async move {
+        let outcome = install_engine(&dir, via, &frames).await;
+        if let Some(own) = own.upgrade() {
+            let _ = own.send(Command::EngineInstalled(outcome));
+        }
+    });
+}
+
+/// The newest stable xray-core into `dir`: its version, or why not, in words
+/// for the window.
+///
+/// The newest of any kind when none of the recent ones is stable: xray-core
+/// flags nearly all of its releases as prereleases, and a window cannot ask
+/// what `--newest` would.
+async fn install_engine(
+    dir: &Path,
+    via: Option<SocketAddr>,
+    frames: &watch::Sender<Frame>,
+) -> Result<String, String> {
+    let stage = |stage: String, percent: Option<u8>| {
+        frames.send_modify(|f| f.engine_setup = EngineSetup::Installing { stage, percent });
+    };
+    let failed = |e: bliss_xray::DownloadError| {
+        tracing::warn!("engine: could not install it: {}", error_chain(&e));
+        install_problem(&e)
+    };
+    let client = bliss_xray::client(via).map_err(failed)?;
+    let release = match bliss_xray::select(&client, bliss_xray::Channel::Stable, None).await {
+        Err(bliss_xray::DownloadError::NoStable(_)) => {
+            bliss_xray::select(&client, bliss_xray::Channel::Newest, None).await
+        }
+        found => found,
+    }
+    .map_err(failed)?;
+    let version = release.version().to_owned();
+    let downloading = format!("скачиваю xray-core {version}");
+    stage(downloading.clone(), Some(0));
+    let mut shown = 0u8;
+    let path = bliss_xray::install(&client, &release, dir, |done, total| {
+        if total == 0 {
+            return;
+        }
+        let percent = (done.saturating_mul(100) / total).min(100) as u8;
+        if percent != shown {
+            shown = percent;
+            stage(downloading.clone(), Some(percent));
+        }
+    })
+    .await
+    .map_err(failed)?;
+    stage("проверяю скачанный движок".to_owned(), None);
+    let installed = bliss_xray::check_version(&path, None)
+        .await
+        .map_err(|e| format!("скачанный движок не запускается: {e}"))?;
+    Ok(installed.to_string())
+}
+
+/// An error with everything it was caused by, for the log.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+/// Why the engine could not be fetched, in words for the window: by kind, as
+/// a refused link is explained, since the errors' own words are English and
+/// meant for the log.
+fn install_problem(e: &bliss_xray::DownloadError) -> String {
+    use bliss_xray::DownloadError as E;
+    match e {
+        E::Http(e) if e.is_timeout() => "GitHub не отвечает — проверьте соединение".to_owned(),
+        E::Http(e) if e.status().is_some_and(|s| matches!(s.as_u16(), 403 | 429)) => {
+            "GitHub временно не даёт скачивать — попробуйте через час".to_owned()
+        }
+        E::Http(e) if e.is_connect() => {
+            "не удалось соединиться с GitHub — возможно, он недоступен в этой сети".to_owned()
+        }
+        E::Http(_) => "не удалось скачать с GitHub".to_owned(),
+        E::NoRelease | E::NoAsset { .. } | E::NoSuchVersion(..) | E::NoStable(_) => {
+            "на GitHub не нашлось сборки xray-core для этой системы".to_owned()
+        }
+        E::NoChecksum { .. } | E::Corrupt { .. } => {
+            "скачанный архив не сошёлся с контрольной суммой, и его не стали ставить".to_owned()
+        }
+        E::TooLarge { .. } => {
+            "архив оказался больше, чем бывают сборки xray-core, и его не стали качать".to_owned()
+        }
+        E::NoExecutable | E::Zip(_) => "в скачанном архиве нет движка".to_owned(),
+        // ERROR_SHARING_VIOLATION: a running engine cannot be replaced.
+        E::Write { source, .. } if source.raw_os_error() == Some(32) => {
+            "xray.exe занят: им пользуется работающий движок — возможно, другой копии bliss"
+                .to_owned()
+        }
+        E::Write { path, source } => format!("не удалось записать {}: {source}", path.display()),
+    }
+}
+
 fn refreshed_text(refreshed: &crate::profile_file::Refreshed) -> String {
     let mut text = format!(
         "«{}»: {}",
@@ -2505,7 +2708,18 @@ async fn start(setup: &Setup, selected: usize, wiring: Wiring<'_>) -> Option<Run
 
     let exe = match engine_path(setup) {
         Ok(exe) => exe,
-        Err(e) => return fail(frames, &e),
+        Err(e) => {
+            // bliss's own copy is one the window can fetch; a path the
+            // profile names is the profile's to fix.
+            if setup.profile.engine.xray.is_none() {
+                frames.send_modify(|f| {
+                    if !matches!(f.engine_setup, EngineSetup::Installing { .. }) {
+                        f.engine_setup = EngineSetup::Missing { problem: None };
+                    }
+                });
+            }
+            return fail(frames, &e);
+        }
     };
     let needs = bliss_xray::minimum_xray_version(server);
     let version = match bliss_xray::check_version(&exe, needs).await {
@@ -3172,6 +3386,47 @@ mod tests {
             frames.borrow().connections.is_empty(),
             "let go when the screen closes"
         );
+    }
+
+    /// A failed install is said in words a person can act on, and the one
+    /// they can fix themselves — a running engine holding the file — says so.
+    #[test]
+    fn a_failed_install_is_explained() {
+        use bliss_xray::DownloadError as E;
+        let busy = E::Write {
+            path: PathBuf::from(r"C:\x\xray.exe"),
+            source: std::io::Error::from_raw_os_error(32),
+        };
+        assert!(
+            install_problem(&busy).contains("занят"),
+            "{}",
+            install_problem(&busy)
+        );
+        let full = E::Write {
+            path: PathBuf::from(r"C:\x\xray.exe"),
+            source: std::io::Error::from_raw_os_error(112),
+        };
+        assert!(install_problem(&full).contains(r"C:\x\xray.exe"));
+        assert!(install_problem(&E::NoStable(30)).contains("не нашлось"));
+        let large = E::TooLarge {
+            what: "x".to_owned(),
+            limit: 1,
+        };
+        assert!(install_problem(&large).contains("больше"));
+        // The way out is named where the failure is shown.
+        let setup = Setup {
+            profile: Profile::default(),
+            servers: Vec::new(),
+            selected: 0,
+            work_dir: std::env::temp_dir().join("bliss-no-engine-here"),
+            profile_path: PathBuf::new(),
+            engine_log: bliss_xray::LogLevel::default(),
+            autostart: false,
+            tun: false,
+            problem: None,
+        };
+        let missing = engine_path(&setup).expect_err("no engine there");
+        assert!(missing.contains("Установить движок"), "{missing}");
     }
 
     /// A VPN is called by its file's name, without the folder or the extension.
