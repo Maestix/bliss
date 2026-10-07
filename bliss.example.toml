@@ -48,12 +48,15 @@ enabled = false
 
 # --- Маршрутизация ---------------------------------------------------------
 #
-# С каждым соединением можно сделать одно из трёх:
+# С каждым соединением можно сделать одно из трёх — или четырёх, если добавлен
+# рабочий VPN (раздел [vpn] в конце файла):
 #
 #   proxy    отправить через прокси
 #   direct   пустить напрямую, мимо туннеля — быстрее, и видно вашему
 #            провайдеру; то, что и нужно для сайтов, которые и так местные
 #   block    отказать: никуда не отправлять, программе сказать «нет»
+#   vpn      через рабочий VPN, и только пока он подключён: без него
+#            соединение не откроется, а не уйдёт куда-то ещё
 #
 # Правила читаются сверху вниз, срабатывает первое подошедшее. Одно правило
 # подходит, если совпало ЛЮБОЕ из его условий — иначе «вот эти двадцать
@@ -158,3 +161,21 @@ enabled = false
 #
 # [[server]]
 # link = "vless://…paste yours here…"
+
+# A work VPN beside the tunnel: the OpenVPN profile (.ovpn) a workplace hands
+# out, added in the window — Settings, "Рабочий VPN", or Ctrl+V with the file's
+# text copied. bliss drives the official OpenVPN through its interactive
+# service, so OpenVPN Community has to be installed, and keeps the server away
+# from the machine: its routes and DNS settings are dropped, and only what a
+# rule sends there (action = "vpn") goes through it, with its names asked of
+# the VPN's own DNS server. The profile holds a private key: keep this file
+# private.
+#
+# [vpn]
+# name = "work"
+# enabled = true
+# openvpn = """
+# client
+# remote vpn.example 1194
+# …
+# """

@@ -47,7 +47,7 @@ use dioxus::desktop::tao::window::{Icon, Window};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
-use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, State, bytes, rate};
+use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, Secret, State, bytes, rate};
 use crate::profile_file::Subject;
 use bliss_proto::{Action, ProxyMode};
 
@@ -126,6 +126,8 @@ const MUTED: &str = "#b5a9c4";
 const GOOD: &str = "#72cf9e";
 /// `--color-bad`: a failure, a server that did not answer, a blocking rule.
 const BAD: &str = "#e56b6f";
+/// `--color-vpn`: the work VPN, and a rule that sends traffic through it.
+const VPN_TONE: &str = "#7eb3ee";
 
 // Status is carried by colour rather than by a word, so these are the only
 // place the state is spelled out: border, outer glow, inner bloom. Connected is
@@ -1369,6 +1371,9 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                 if !frame.routing.presets.is_empty() {
                     PresetPills { view: frame.routing.clone() }
                 }
+                if frame.vpn.name.is_some() {
+                    VpnChip { vpn: frame.vpn.clone(), alone: frame.routing.presets.is_empty() }
+                }
             }
 
             // The reason a start failed. The engine has always carried it in the
@@ -1595,6 +1600,223 @@ fn TunSwitch(tun: crate::engine::TunView) -> Element {
             div { class: "tun-side",
                 crate::icons::Machine { size: 15, color: machine }
             }
+        }
+    }
+}
+
+/// Where the VPN's connection is, in a few words that start small: for the
+/// pointer over the main screen's chip and the line under the settings
+/// screen's switch.
+fn vpn_line(vpn: &crate::engine::VpnView) -> String {
+    use crate::engine::VpnState;
+    match &vpn.state {
+        VpnState::Off => "выключен".to_owned(),
+        VpnState::Connecting(step) => format!("подключаюсь — {step}…"),
+        VpnState::Up(address) => format!("подключён, адрес в рабочей сети {address}"),
+        VpnState::Failed(why) => format!("не подключился: {why}"),
+    }
+}
+
+/// The first letter as a capital, for a line that starts a sentence.
+fn capitalized(text: &str) -> String {
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => String::new(),
+    }
+}
+
+/// The VPN's switch on the main screen: a chip in the heading, beside the
+/// presets, whose dot says where the connection is. A click turns it on or
+/// off; the settings screen has the rest. How each state looks is
+/// `.vpn-chip` in app.css, by class (the note at the top of this file).
+#[component]
+fn VpnChip(vpn: crate::engine::VpnView, alone: bool) -> Element {
+    use crate::engine::VpnState;
+    let controller = use_context::<Controller>();
+    let state = match &vpn.state {
+        VpnState::Up(_) => "up",
+        VpnState::Connecting(_) => "busy",
+        VpnState::Failed(_) => "failed",
+        VpnState::Off => "off",
+    };
+    let class = if alone {
+        format!("vpn-chip {state} alone")
+    } else {
+        format!("vpn-chip {state}")
+    };
+    let name = vpn.name.clone().unwrap_or_default();
+    let on = vpn.on;
+    let title = format!(
+        "Рабочий VPN «{name}»: {}. Нажмите, чтобы {}",
+        vpn_line(&vpn),
+        if on {
+            "отключить"
+        } else {
+            "подключить"
+        }
+    );
+    rsx! {
+        span {
+            class: "{class}",
+            title: "{title}",
+            onclick: move |_| controller.send(Command::Vpn(!on)),
+            span { class: "vpn-dot" }
+            "VPN"
+        }
+    }
+}
+
+/// The settings screen's card for the VPN beside the tunnel: the profile the
+/// work network handed out, its switch, and what it is doing.
+#[component]
+fn VpnCard(vpn: crate::engine::VpnView) -> Element {
+    use bliss_openvpn::Availability;
+    let controller = use_context::<Controller>();
+    // Deleting takes the profile with it, and getting it back means finding
+    // the file again: a second click says yes.
+    let mut sure = use_signal(|| false);
+    let service = match vpn.service {
+        Availability::Ready => None,
+        Availability::Stopped => Some(
+            "Служба OpenVPN остановлена: запустите «OpenVPN Interactive Service» в службах \
+             Windows.",
+        ),
+        Availability::Missing => Some(
+            "Нужен OpenVPN: установите OpenVPN Community — openvpn.net, раздел Community \
+             Downloads. Его служба даёт bliss подключаться без прав администратора.",
+        ),
+    };
+    let failed = match &vpn.state {
+        crate::engine::VpnState::Failed(why) => Some(why.clone()),
+        _ => None,
+    };
+    let on = vpn.on;
+
+    rsx! {
+        div {
+            style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:15px;\
+                    background-color:var(--color-surface);border-radius:8px;\
+                    box-shadow:var(--shadow-sm)",
+            span { style: "font:700 16px/1 var(--font-heading);padding:0 0 8px", "Рабочий VPN" }
+            span {
+                style: "padding:0 10px 6px;font-size:13px;line-height:1.5;color:var(--color-neutral-500)",
+                "Для рабочих сайтов, по профилю OpenVPN (.ovpn), который выдали на работе. \
+                 Через VPN идёт только то, что правила отправляют «через VPN»: остальной \
+                 трафик и DNS остаются как были."
+            }
+            if let Some(note) = service {
+                span {
+                    style: "padding:2px 10px 6px;font-size:12.5px;line-height:1.45;color:#cbbaf4",
+                    "{note}"
+                }
+            }
+            if let Some(name) = vpn.name.clone() {
+                CheckRow {
+                    checked: on,
+                    enabled: true,
+                    title: format!("Подключать «{name}»"),
+                    hint: if failed.is_some() {
+                        "Не подключился.".to_owned()
+                    } else {
+                        format!("{}.", capitalized(&vpn_line(&vpn)))
+                    },
+                    onclick: {
+                        let controller = controller.clone();
+                        move |_| controller.send(Command::Vpn(!on))
+                    },
+                }
+                // Without the service every start fails the same way, and
+                // the note above says so already.
+                if let Some(why) = failed.filter(|_| vpn.service == Availability::Ready) {
+                    span {
+                        style: "padding:2px 10px 4px 39px;font-size:12.5px;line-height:1.45;\
+                                color:#f2a7ad;word-break:break-word",
+                        "{why}"
+                    }
+                }
+                div { style: "display:flex;flex-wrap:wrap;gap:8px;padding:6px 10px 2px",
+                    OvpnPicker { label: "Заменить файл" }
+                    Button {
+                        label: if sure() { "Точно удалить?" } else { "Удалить" },
+                        enabled: true,
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| {
+                                if sure() {
+                                    sure.set(false);
+                                    controller.send(Command::ForgetVpn);
+                                } else {
+                                    sure.set(true);
+                                }
+                            }
+                        },
+                        icon: rsx! { crate::icons::Trash { size: 15, color: if sure() { BAD } else { MUTED } } },
+                    }
+                }
+            } else {
+                div {
+                    style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:6px 10px 2px",
+                    OvpnPicker { label: "Выбрать файл .ovpn" }
+                    span { style: "font-size:12.5px;color:var(--color-neutral-600)",
+                        "или скопируйте текст файла и нажмите Ctrl+V"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A button that opens Windows' own file dialog for a profile and hands the
+/// file to the engine. Dioxus opens the dialog for the hidden input; the
+/// label around it is what a person clicks.
+#[component]
+fn OvpnPicker(label: String) -> Element {
+    let controller = use_context::<Controller>();
+    rsx! {
+        label {
+            class: "act",
+            style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:4px;\
+                    font-size:14px;white-space:nowrap;flex:none;color:var(--color-neutral-200);\
+                    box-shadow:inset 0 0 0 1px rgba(238,130,196,.35)",
+            input {
+                r#type: "file",
+                accept: ".ovpn,.conf",
+                style: "display:none",
+                onchange: move |e: FormEvent| {
+                    let controller = controller.clone();
+                    async move {
+                        let Some(file) = e.files().into_iter().next() else {
+                            return;
+                        };
+                        // Measured before it is read: a cap checked after the
+                        // allocation is not a cap.
+                        if file.size() > bliss_openvpn::MAX_PROFILE as u64 {
+                            controller.send(Command::Say {
+                                text: format!(
+                                    "«{}» не похож на профиль OpenVPN: он больше {} КБ",
+                                    file.name(),
+                                    bliss_openvpn::MAX_PROFILE / 1024
+                                ),
+                                bad: true,
+                            });
+                            return;
+                        }
+                        match file.read_string().await {
+                            Ok(text) => controller.send(Command::AddVpn {
+                                name: file.name(),
+                                profile: Secret(text),
+                            }),
+                            Err(e) => controller.send(Command::Say {
+                                text: format!("файл не прочитался: {e}"),
+                                bad: true,
+                            }),
+                        }
+                    }
+                },
+            }
+            crate::icons::Plus { size: 15, color: ACCENT }
+            "{label}"
         }
     }
 }
@@ -2464,7 +2686,7 @@ fn Connections(frame: Frame) -> Element {
             LogDock { revision: crate::logs::revision() }
         }
         if let Some(menu) = ROW_MENU() {
-            RowMenuView { menu, copied }
+            RowMenuView { menu, copied, vpn: frame.vpn.name.is_some() }
         }
     }
 }
@@ -2561,7 +2783,7 @@ fn Routing(frame: Frame) -> Element {
             }
 
             div { style: "flex:1;min-height:0;display:flex;gap:13px;align-items:stretch",
-                RuleList { view: view.clone() }
+                RuleList { view: view.clone(), vpn: frame.vpn.name.is_some() }
                 Checker {
                     query,
                     result: frame.check.clone(),
@@ -2574,7 +2796,7 @@ fn Routing(frame: Frame) -> Element {
             }
         }
         if let Some(draft) = DRAFT() {
-            RuleEditor { draft }
+            RuleEditor { draft, vpn: frame.vpn.name.is_some() }
         }
     }
 }
@@ -2851,7 +3073,7 @@ fn RuleSwitch(at: usize, on: bool) -> Element {
 }
 
 #[component]
-fn RuleList(view: crate::engine::RoutingView) -> Element {
+fn RuleList(view: crate::engine::RoutingView, vpn: bool) -> Element {
     let controller = use_context::<Controller>();
     // The rule whose delete was clicked once; the second click deletes it.
     let mut armed = use_signal(|| None::<usize>);
@@ -3012,7 +3234,7 @@ fn RuleList(view: crate::engine::RoutingView) -> Element {
                             color:var(--color-neutral-500)",
                     "Всё остальное"
                 }
-                for action in [Action::Proxy, Action::Direct, Action::Block] {
+                for action in actions(vpn, view.fallback) {
                     span {
                         key: "{action_key(action)}",
                         class: choice_class("pill-choice", action == view.fallback, action),
@@ -3133,6 +3355,7 @@ fn ActionPill(action: bliss_proto::Action) -> Element {
         bliss_proto::Action::Proxy => ("rgba(238,130,196,.14)", ACCENT),
         bliss_proto::Action::Direct => ("rgba(114,207,158,.14)", GOOD),
         bliss_proto::Action::Block => ("rgba(229,107,111,.14)", BAD),
+        bliss_proto::Action::Vpn => ("rgba(126,179,238,.14)", VPN_TONE),
     };
     rsx! {
         // One width for all three words: the pills stand in a column down the
@@ -3357,6 +3580,23 @@ mod tests {
         };
         assert!(at("animated(window, false)") < at("set_visible(false)"));
         assert!(at("set_outer_position") < at("animated(window, true)"));
+    }
+
+    /// The VPN's choice is offered once there is a VPN — and wherever it is
+    /// the choice already, so a rule that sends there says so after the VPN
+    /// has been removed.
+    #[test]
+    fn the_vpn_is_offered_when_there_is_one() {
+        assert!(!actions(false, Action::Proxy).contains(&Action::Vpn));
+        assert!(actions(true, Action::Proxy).contains(&Action::Vpn));
+        assert!(actions(false, Action::Vpn).contains(&Action::Vpn));
+        // The CSS has a colour for every choice there can be.
+        for action in actions(true, Action::Proxy) {
+            let key = action_key(action);
+            for class in [".menu-dot.", ".seg-choice.on.", ".pill-choice.on."] {
+                assert!(APP_CSS.contains(&format!("{class}{key}")), "{class}{key}");
+            }
+        }
     }
 
     /// The menu grows by its presets rather than taking their room from the
@@ -4393,11 +4633,23 @@ fn IconButton(
     }
 }
 
+/// The actions a choice offers. The fourth only once there is a VPN to send
+/// connections to — or when it is what is chosen already, so a rule that sends
+/// there after the VPN's profile was removed still says where it sends.
+fn actions(vpn: bool, chosen: Action) -> Vec<Action> {
+    let mut all = vec![Action::Proxy, Action::Direct, Action::Block];
+    if vpn || chosen == Action::Vpn {
+        all.push(Action::Vpn);
+    }
+    all
+}
+
 fn action_key(action: Action) -> &'static str {
     match action {
         Action::Proxy => "proxy",
         Action::Direct => "direct",
         Action::Block => "block",
+        Action::Vpn => "vpn",
     }
 }
 
@@ -4406,6 +4658,7 @@ fn action_phrase(action: Action) -> &'static str {
         Action::Proxy => "Через прокси",
         Action::Direct => "Напрямую",
         Action::Block => "Блокировать",
+        Action::Vpn => "Через VPN",
     }
 }
 
@@ -4488,6 +4741,7 @@ fn route_short(route: bliss_core::Route) -> &'static str {
         bliss_core::Route::Proxy => "прокси",
         bliss_core::Route::Direct => "напрямую",
         bliss_core::Route::Blocked => "блок",
+        bliss_core::Route::Vpn => "VPN",
     }
 }
 
@@ -4496,6 +4750,7 @@ fn route_word(route: bliss_core::Route) -> &'static str {
         bliss_core::Route::Proxy => "через прокси",
         bliss_core::Route::Direct => "напрямую",
         bliss_core::Route::Blocked => "заблокировано",
+        bliss_core::Route::Vpn => "через VPN",
     }
 }
 
@@ -4526,7 +4781,7 @@ fn subject_label(subject: &Subject) -> String {
 /// What a right-click on a connection offers: the three routes for its
 /// program, the three for its site, and a copy of the row.
 #[component]
-fn RowMenuView(menu: RowMenu, mut copied: Signal<String>) -> Element {
+fn RowMenuView(menu: RowMenu, mut copied: Signal<String>, vpn: bool) -> Element {
     let controller = use_context::<Controller>();
     // A connection that named an address has no site; the address stands in.
     let place = match crate::rule_text::site(&menu.host) {
@@ -4549,7 +4804,8 @@ fn RowMenuView(menu: RowMenu, mut copied: Signal<String>) -> Element {
     // Kept inside the window: opened upwards when it would run off the bottom.
     let (width, height) = viewport();
     let groups = subjects.len() as f64;
-    let tall = 12.0 + 27.0 + groups * (11.0 + 27.0 + 3.0 * 33.0) + 11.0 + 33.0;
+    let lines = actions(vpn, Action::Proxy).len() as f64;
+    let tall = 12.0 + 27.0 + groups * (11.0 + 27.0 + lines * 33.0) + 11.0 + 33.0;
     let left = menu.x.min(width - 256.0).max(4.0);
     let top = if menu.y + tall > height - 6.0 {
         (menu.y - tall).max(4.0)
@@ -4577,7 +4833,7 @@ fn RowMenuView(menu: RowMenu, mut copied: Signal<String>) -> Element {
                 div { key: "{subject.value()}",
                     div { class: "menu-sep" }
                     div { class: "menu-title", "{subject_label(&subject)}" }
-                    for action in [Action::Proxy, Action::Direct, Action::Block] {
+                    for action in actions(vpn, Action::Proxy) {
                         div {
                             key: "{action_key(action)}",
                             class: "menu-item",
@@ -4673,7 +4929,7 @@ fn LogDock(revision: u64) -> Element {
 fn suggested_action(fallback: Action) -> Action {
     match fallback {
         Action::Proxy => Action::Direct,
-        Action::Direct | Action::Block => Action::Proxy,
+        Action::Direct | Action::Block | Action::Vpn => Action::Proxy,
     }
 }
 
@@ -4721,7 +4977,7 @@ const LABEL: &str = "font-size:12px;letter-spacing:.08em;text-transform:uppercas
 /// out anyone might try. The screen before it offered an "add" that led
 /// nowhere a rule could be written, and no obvious way back.
 #[component]
-fn RuleEditor(draft: Draft) -> Element {
+fn RuleEditor(draft: Draft, vpn: bool) -> Element {
     let controller = use_context::<Controller>();
     let geoip = draft.conditions.to_ascii_lowercase().contains("geoip:");
     let heading = match draft.at {
@@ -4821,8 +5077,10 @@ fn RuleEditor(draft: Draft) -> Element {
 
                     div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
                         span { style: LABEL, "Что делать" }
-                        div { style: "display:flex;gap:8px",
-                            for action in [Action::Proxy, Action::Direct, Action::Block] {
+                        // Wraps: with the VPN's choice there are four, and the
+                        // dialog is narrower than four in the default window.
+                        div { style: "display:flex;flex-wrap:wrap;gap:8px",
+                            for action in actions(vpn, draft.action) {
                                 div {
                                     key: "{action_key(action)}",
                                     class: choice_class("seg-choice", action == draft.action, action),
@@ -5478,6 +5736,7 @@ fn Settings(frame: Frame) -> Element {
                         }
                     }
                 }
+                VpnCard { vpn: frame.vpn.clone() }
             }
         }
     }

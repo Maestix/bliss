@@ -744,6 +744,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "bliss-core",
+ "bliss-openvpn",
  "bliss-proto",
  "bliss-tun",
  "bliss-xray",
@@ -772,6 +773,17 @@ dependencies = [
  "async-trait",
  "bliss-proto",
  "jiff",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "bliss-openvpn"
+version = "0.1.0"
+dependencies = [
+ "bliss-core",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

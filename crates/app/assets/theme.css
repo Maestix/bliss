@@ -65,6 +65,9 @@
      that a connected pink and a proxied pink never have to share a word. */
   --color-good: #72cf9e;
   --color-bad: #e56b6f;
+  /* The work VPN beside the tunnel: the one hue left — pink is the proxy,
+     mint is direct, red is blocked, violet is on its way. */
+  --color-vpn: #7eb3ee;
 
   /* Thick and rounded, as asked: text at 600, headings at Comfortaa's top of
      700. Its Cyrillic uses Latin-like shapes (д like g, т like m); chosen

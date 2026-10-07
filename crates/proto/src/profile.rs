@@ -34,6 +34,39 @@ pub struct Profile {
     pub subscriptions: Vec<Subscription>,
     #[serde(default, rename = "server")]
     pub servers: Vec<ServerEntry>,
+    /// A VPN beside the tunnel, for the rules that send connections to it.
+    /// Last in the file: its profile is the longest thing in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vpn: Option<Vpn>,
+}
+
+/// A VPN beside the tunnel: a network reached through a program of its own —
+/// so far OpenVPN, with the profile the network's owners handed out, which is
+/// how a workplace gives access to its tools.
+///
+/// Only connections a rule sends there (`action = "vpn"`) go through it. Its
+/// profile holds a private key, so `Debug` says how long it is and nothing
+/// else.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vpn {
+    /// What the window calls it: the name of the file it came from.
+    pub name: String,
+    /// Whether bliss keeps it connected: the switch, remembered.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The OpenVPN profile, as the file had it.
+    pub openvpn: String,
+}
+
+impl std::fmt::Debug for Vpn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vpn")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("openvpn", &format_args!("{} bytes", self.openvpn.len()))
+            .finish()
+    }
 }
 
 /// A provider's server list, fetched from an address and kept up to date.
@@ -274,5 +307,40 @@ mod tests {
             ..Profile::default()
         };
         assert!(!format!("{profile:?}").contains("SECRET"));
+    }
+
+    /// An OpenVPN profile carries its private key inline, and `Profile` is
+    /// `Debug`: the log would be one `{:?}` away from it.
+    #[test]
+    fn debug_does_not_show_a_vpn_profile() {
+        let profile = Profile {
+            vpn: Some(Vpn {
+                name: "work".to_owned(),
+                enabled: true,
+                openvpn: "client\n<key>\nKKKKKKKKKKKKKKKK\n</key>\n".to_owned(),
+            }),
+            ..Profile::default()
+        };
+        let shown = format!("{profile:?}");
+        assert!(!shown.contains("KKKK"), "{shown}");
+        assert!(shown.contains("work"), "{shown}");
+    }
+
+    /// The section is written back as it was read, key and all, with the
+    /// profile's text intact across its lines.
+    #[test]
+    fn a_vpn_survives_the_round_trip() {
+        let vpn = Vpn {
+            name: "work".to_owned(),
+            enabled: true,
+            openvpn: "client\nremote vpn.example 1194\n<ca>\nAAAA\n</ca>\n".to_owned(),
+        };
+        let profile = Profile {
+            vpn: Some(vpn.clone()),
+            ..Profile::default()
+        };
+        let text = toml::to_string(&profile).expect("it serialises");
+        let back: Profile = toml::from_str(&text).expect("it parses back");
+        assert_eq!(back.vpn, Some(vpn));
     }
 }

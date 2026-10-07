@@ -32,6 +32,7 @@ impl From<Action> for Route {
             Action::Proxy => Route::Proxy,
             Action::Direct => Route::Direct,
             Action::Block => Route::Blocked,
+            Action::Vpn => Route::Vpn,
         }
     }
 }

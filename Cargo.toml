@@ -4,7 +4,7 @@ members = ["crates/*"]
 # The spike drags in WebView2 and, under its other feature, wgpu + Stylo. Keeping
 # it out of the default set means a bare `cargo build` or `cargo test` stays a few
 # seconds; build it deliberately with `-p bliss-spike`.
-default-members = ["crates/proto", "crates/core", "crates/xray", "crates/tun", "crates/app"]
+default-members = ["crates/proto", "crates/core", "crates/xray", "crates/tun", "crates/openvpn", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"

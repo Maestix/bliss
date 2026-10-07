@@ -511,6 +511,7 @@ fn explain_route(path: Option<PathBuf>, target: &str, process: Option<&str>) -> 
             bliss_core::Route::Proxy => "через прокси",
             bliss_core::Route::Direct => "напрямую, мимо туннеля",
             bliss_core::Route::Blocked => "заблокировано",
+            bliss_core::Route::Vpn => "через рабочий VPN, когда он подключён в окне",
         },
         decision.rule
     );
