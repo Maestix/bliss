@@ -20,3 +20,7 @@ windows = { workspace = true, features = [
     # Finding the service, and checking the pipe is its own.
     "Win32_System_Services",
 ] }
+
+[dev-dependencies]
+# The end-to-end test with the real OpenVPN prints bliss's own log lines.
+tracing-subscriber.workspace = true

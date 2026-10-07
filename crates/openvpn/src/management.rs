@@ -85,10 +85,15 @@ fn log(rest: &str) -> Option<Line> {
     })
 }
 
-/// Whether a log line's flags make it worth a line in bliss's own log:
-/// fatal, an error, or a warning.
-pub fn worth_saying(flags: &str) -> bool {
-    flags.contains(['F', 'N', 'W'])
+/// What OpenVPN warns about bliss's own way of talking to it, at every
+/// start, which the user can do nothing about: the port is on loopback, and
+/// the caller is known by its process rather than by a password.
+const ABOUT_BLISS: &[&str] = &["WARNING: Using --management on a TCP port WITHOUT passwords"];
+
+/// Whether a log line is worth a line in bliss's own log: fatal, an error,
+/// or a warning, unless it is about bliss itself.
+pub fn worth_saying(flags: &str, text: &str) -> bool {
+    flags.contains(['F', 'N', 'W']) && !ABOUT_BLISS.iter().any(|about| text.starts_with(about))
 }
 
 /// The DNS servers in the options a server pushed, if this log line is the
@@ -181,7 +186,12 @@ mod tests {
         );
         assert_eq!(parse("END"), Line::Other);
         assert_eq!(parse("SUCCESS: hold release succeeded"), Line::Other);
-        assert!(worth_saying("N") && worth_saying("FW") && !worth_saying("I"));
+        assert!(worth_saying("N", "x") && worth_saying("FW", "x") && !worth_saying("I", "x"));
+        assert!(!worth_saying(
+            "W",
+            "WARNING: Using --management on a TCP port WITHOUT passwords is STRONGLY discouraged \
+             and considered insecure"
+        ));
     }
 
     #[test]
