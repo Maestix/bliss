@@ -139,8 +139,9 @@ mod imp {
         SERVICE_STATUS_PROCESS,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-        QueryFullProcessImageNameW, TerminateProcess,
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+        TerminateProcess,
     };
     use windows::core::{HSTRING, PWSTR, w};
 
@@ -302,14 +303,16 @@ mod imp {
     /// End OpenVPN at once, for when asking did not: the service undoes its
     /// routes as soon as the process is gone. Only a process that is still
     /// `openvpn.exe` — the id may have been handed to another by then.
+    ///
+    /// The service's access list on the process gives the user TERMINATE and
+    /// QUERY_INFORMATION but not QUERY_LIMITED_INFORMATION, and a request is
+    /// refused whole if one bit is not granted: asked with LIMITED, as this
+    /// first was, the open failed and OpenVPN was never ended.
     pub fn terminate(pid: u32) {
-        let Ok(process) = (unsafe {
-            OpenProcess(
-                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
-                false,
-                pid,
-            )
-        }) else {
+        let Some(process) = [PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION]
+            .into_iter()
+            .find_map(|query| unsafe { OpenProcess(PROCESS_TERMINATE | query, false, pid) }.ok())
+        else {
             return;
         };
         let mut name = [0u16; 1024];

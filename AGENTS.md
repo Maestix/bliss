@@ -34,22 +34,28 @@ The long-form plan, in Russian, lives outside the repo at
   - any server link — `vless://`, `vmess://`, `trojan://`, `ss://`,
     `socks://`, `hysteria2://`, `wireguard://` — and a subscription's address;
   - an OpenVPN profile (`.ovpn`), which carries a private key and a
-    `tls-crypt` key inline: the user's work profile, the `[vpn]` section of
-    the real profile, and `%LOCALAPPDATA%\bliss\data\openvpn\profile.ovpn`,
-    which bliss writes while the VPN is up and deletes when it goes down.
+    `tls-crypt` key inline: the user's work profile, a friend's (one was
+    attached to a message on 4 October and so read whole — the user was told
+    to have it replaced), the `[vpn]` section of the real profile, and
+    `%LOCALAPPDATA%\bliss\data\openvpn\profile.ovpn`, which bliss writes as
+    the VPN starts and deletes once OpenVPN has read it.
 
   All but the first live outside the repository; never copy them in. The user
   once pasted the head of the work profile, with the `remote` line blanked and
   everything from the certificates on left out: that much is not secret, and
-  it is all a question about the profile needs. To learn the
+  it is all a question about the profile needs. OpenVPN's own log beside it,
+  `openvpn\openvpn.log`, holds no key but names the work server; quote the
+  line bliss quotes, not the file. To learn the
   xray config schema, read `config.rs`, not a generated file.
 - **Test data is fake by construction**: reserved names (`example.net`,
   `a.example`), TEST-NET-3 addresses (`203.0.113.0/24`), private ranges, literals
   such as `1.2.3.4`, the UUID `11111111-2222-…`, and repeated-letter keys and
   passwords (`AAAA…`, `PPPP…`). Keep new fixtures in that style so nobody has
-  to wonder whether a random-looking key is real. The one exception is
-  `crates/xray/tests/engine.rs`, which needs working key pairs and has xray
-  derive them, at run time, from fixed repeated-byte private keys.
+  to wonder whether a random-looking key is real. The two exceptions need
+  working keys and make them at run time: `crates/xray/tests/engine.rs` has
+  xray derive them from fixed repeated-byte private keys, and
+  `crates/openvpn/tests/service.rs` has OpenSSL make a CA and a certificate
+  for each side, and OpenVPN a `tls-crypt` key, in a folder deleted after.
 - **The user usually has another proxy running and may be working.** v2rayN's
   `xray` typically listens on 10808 and owns the Windows system proxy. Do not
   start the GUI or `bliss run` without a reason, never change the system proxy,
@@ -104,7 +110,8 @@ Runtime paths on Windows:
   without it
 - work dir: `%LOCALAPPDATA%\bliss\data` — `xray.exe`, `geoip.dat`,
   `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`, and
-  `openvpn\profile.ovpn` while the VPN is up
+  `openvpn\`: `profile.ovpn` while OpenVPN starts, and OpenVPN's own
+  `openvpn.log`, written over at every start
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
   (`crates/proto/src/profile.rs`)
 
@@ -113,7 +120,7 @@ Runtime paths on Windows:
 ```bash
 cargo fmt --all
 cargo clippy --all-targets   # no warnings (default members; --workspace adds the spike)
-cargo test                   # default members, ~210 tests
+cargo test                   # default members, ~225 tests
 cargo build -p bliss         # target/debug/bliss.exe
 ```
 
@@ -143,6 +150,32 @@ cargo build -p bliss         # target/debug/bliss.exe
   `link/`. Its first runs found a bug no unit test could — a port hop without
   an interval kills the whole engine — and two ways a hand-made server differs
   from a real one (§10).
+- **The work VPN is carried end to end by a real OpenVPN** in
+  `crates/openvpn/tests/service.rs`, ignored by default:
+
+  ```bash
+  cargo test -p bliss-openvpn --test service -- --ignored --nocapture
+  ```
+
+  It needs OpenVPN Community with its interactive service (installed here on
+  4 October, 2.7.7), an account in Administrators or "OpenVPN
+  Administrators", and OpenSSL — OpenVPN's own if installed with it, else
+  Git's, else the PATH; `BLISS_OPENVPN` and `BLISS_OPENSSL` name others, and
+  `BLISS_TEST_LOG=bliss_openvpn=trace` shows bliss's lines. A server on the
+  TAP adapter and a client on Data Channel Offload, both started through the
+  service, the client by `Session` from a profile shaped like the work one;
+  a TCP echo and a DNS server behind the server. It checks: a
+  profile OpenVPN refuses is said at once in OpenVPN's words; the VPN comes
+  up and its profile leaves the disk; nothing the server pushes
+  (`redirect-gateway`, a route, a DNS server) reaches the machine while
+  bliss's route does; a datagram, 256 KB of TCP and a name only the VPN's DNS
+  knows go through `Through` and back, by the client adapter's own byte
+  counts; `stop` takes the address and route away; and a session whose
+  runtime is shut down under it — bliss dying — takes OpenVPN with it. About
+  30 s. Its first run met the bug a friend's machine showed (§10a). It puts
+  windows on nobody's screen, but two OpenVPNs and their adapters on the
+  machine for that half minute; the routes it checks are all of metric 9999
+  or on the VPN's own network.
 - `crates/proto/tests/links.rs` snapshots the whole `Debug` output of a parsed
   `ServerConfig`. Changing its fields or the redacting `Debug` impls fails that
   test. `cargo-insta` is **not installed**: insta writes a `.snap.new` next to the
@@ -235,6 +268,32 @@ These cost the most time on this project. None of them announce themselves.
    a guard fail and moving the saved copy back, the test binary was still the
    broken build, and the guard went on failing against correct code. `touch`
    the restored file, or restore by writing it.
+9. **Everything an agent starts writes AppData into a store of its own.** The
+   Claude desktop app is an MSIX package (`Claude_pzs8sxrjxfjjc`), and every
+   process it starts — shells, cargo, Python, a probe bliss — inherits its
+   file system virtualization: a file or folder created under
+   `%LOCALAPPDATA%` or `%APPDATA%`, `Temp` excepted, lands in
+   `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\…` (or
+   `Roaming\…`), and reads see that copy over the real one. Nothing outside
+   the package sees it. Found on 4 October when OpenVPN's service, asked to
+   start OpenVPN in a probe's `%LOCALAPPDATA%\bliss\data\openvpn`, answered
+   `CreateProcessAsUser`: "the directory name is invalid" (267), while the
+   same request from the end-to-end test, in `Temp`, worked: every new folder
+   under AppData failed and every old one and every one in `Temp` or on the
+   Desktop worked. It also means an agent's `bliss.log` and `xray.json` are the
+   store's copies from its own earlier probes, not what the user's bliss
+   wrote. `Temp`, the Desktop and the repository are written through.
+   - What another process must see — OpenVPN's service, the user's bliss —
+     has to be written from outside the package, or into `Temp`.
+   - To run a program outside it, have WMI start it:
+     `Invoke-CimMethod -ClassName Win32_Process -MethodName Create` with a
+     `Win32_ProcessStartup` whose `ShowWindow` is 0, and a `cmd /c set …&&`
+     for environment variables. The window probe of the VPN started its
+     `bliss-probe.exe` so, and read the real `bliss.log` by having such a
+     `cmd` copy it into `Temp`.
+   - A sandbox switched off for one command (`dangerouslyDisableSandbox`) is
+     still inside the package: the first probe tried that and failed the
+     same way.
 
 ## 4. Commits
 
@@ -977,6 +1036,22 @@ More probes that worked:
   `GetDIBits`; compare the pixels with the frame of `assets/bliss.ico` at that
   size. A zero difference proves the resource is in use and the Dioxus logo is
   not.
+- **The work VPN in the window** needs the probe started outside Claude's
+  package (§3, trap 9), or OpenVPN's service cannot see the folder the probe
+  writes the profile to. The probe of 4 October: a test server and its keys
+  as in the end-to-end test, started through the service by a short
+  PowerShell over the pipe; an HTTP server and a DNS server bound to the
+  server's VPN address; a scratch profile whose `[vpn]` holds the client
+  profile as a TOML literal string (`'''`) with `enabled = true` and a rule
+  sending `intranet.example` and the VPN's network there; `bliss-probe.exe`
+  started by WMI. Then the chip's class (`busy`, `up`, `failed`), `curl`
+  through the probe's SOCKS and HTTP ports (`--noproxy ""`), the chip clicked
+  off and on, and the probe killed with the VPN up. Stop at the first
+  failure: a probe that waits out every timeout after the VPN failed only
+  wastes the user's half minute. What it writes outside lands in the real
+  work dir — `xray.json`, `bliss.log`, `openvpn\` — and the probe's WebView2
+  folder, `%LOCALAPPDATA%\bliss-probe`, which it removes after, as it does
+  the test log in `openvpn\`.
 - **Static replica for a design choice** (not a verification): the Browser pane
   may not paint while Claude's window is behind others. Headless Edge takes the
   picture without stealing focus:
@@ -1175,9 +1250,59 @@ connections a rule sends there (`action = "vpn"`). Everything below was read in
 OpenVPN's and OpenVPN GUI's source (`src/openvpnserv/interactive.c`,
 `validate.c`, `src/openvpn/options.c`, `route.c`, `push.c`, `manage.c`,
 `doc/management-notes.txt`; OpenVPN GUI's `openvpn.c`) on 30 September, at 2.8
-development, and none of it has yet met a real server: OpenVPN was not
-installed on the user's machine, and the first run against the work server is
-the user's to make.
+development. On 4 October OpenVPN Community 2.7.7 was installed here, and all
+of it has since met a real OpenVPN — a server of the test's own on this
+machine, through the real service, in the end-to-end test (§2) and in the
+probe window (§7) — but not the work server.
+
+The first real run was a friend's, and it failed as «OpenVPN не вышел на
+связь за 20 с»; the end-to-end test then failed the same way, and found
+why (the second point below). What the real runs taught:
+
+- **The service's access list on `openvpn.exe` grants the user
+  QUERY_INFORMATION but not QUERY_LIMITED_INFORMATION**, alongside
+  TERMINATE, SYNCHRONIZE, VM_READ and READ_CONTROL. Windows checks the very
+  bits asked for, so opening it with LIMITED — the right everyone asks for
+  first — is refused (5); even PowerShell's `Stop-Process` cannot end it.
+  `process::image_name` falls back to the wider right
+  (`a_process_with_its_own_access_list_is_named`), `service::terminate` asks
+  for TERMINATE with it, and OpenVPN's call is now known by its connection's
+  own row in the machine's table: the process the service started, by id
+  (`process_of`, `answer`).
+- **That refusal was the friend's failure.** OpenVPN called within 25ms,
+  bliss read no name for the caller and turned it away as a stranger, the
+  leash broke and OpenVPN left, and bliss waited out 20 seconds for a call
+  that could not come again. The `terminate` meant to end it failed the same
+  way, so the test's first server outlived the test.
+- **What OpenVPN says before it calls is said only in its own log.** bliss
+  passes `--log` before `--config`: OpenVPN writes there from the moment it
+  reads `--log`, and a line of the profile it refuses is refused while the
+  profile is read — with `--log` after it, that line went nowhere. On a
+  failure bliss reads the end of that log (64 KB at most) for the line that
+  says why — an options error, a failed call, the line before "Exiting due
+  to fatal error" — and names a line of the profile by its number in the
+  person's own file (`PREAMBLE`). The service's pipe is watched while bliss
+  waits for the call, so an OpenVPN that exits first is reported in
+  milliseconds, not after 20 seconds.
+- **The profile leaves the disk once OpenVPN has called**: it was read
+  whole by then, keys included, and a reconnect does not read it again (only
+  a SIGHUP would, and nothing sends one). It used to stay until the VPN went
+  down, or for good if bliss was killed.
+- **The address takes no socket for about a second after CONNECTED**: binding
+  to it is refused until Windows has made sure no one else has it. `Up` waits
+  for a socket to bind (5 s at most); a rule's connection in that second
+  used to fail.
+- **The hold OpenVPN starts in is released once.** It announces `>HOLD` as it
+  calls; answered with a second `hold release` while it was still printing
+  its history, OpenVPN 2.7 ran `log on all` again inside it, and every
+  warning reached bliss's log twice
+  (`the_hold_it_starts_in_is_released_once`).
+- **A TAP adapter keeps an address it was given by DHCP**, after the
+  OpenVPN that asked for it is gone; the test's server uses `ip-win32 netsh`,
+  which the service undoes. With a server killed earlier still holding the
+  first TAP adapter, the service made a second one, "OpenVPN TAP-Windows6
+  #2", which is still on the machine; removing it takes an elevated
+  `tapctl delete`.
 
 - **The interactive service starts it without rights.** `\\.\pipe\openvpn\service`
   takes one message — working directory, options, standard input, each ending
@@ -1196,10 +1321,14 @@ the user's to make.
 - **The leash is `--management-client`.** bliss listens on a loopback port and
   OpenVPN connects to it; when that connection closes OpenVPN throws itself
   SIGTERM (`management-exit`). So a bliss that dies takes its VPN with it
-  instead of leaving it up with nobody to switch it off. A caller that is not
-  `openvpn.exe` (by the port's owner) is turned away. `--management-hold` makes
-  it wait until bliss is listening, and `hold off` — the flag survives
-  restarts — keeps a reconnect from waiting for bliss again.
+  instead of leaving it up with nobody to switch it off — measured: a probe
+  window killed with the VPN up, and the VPN's address was gone 0.3 s later.
+  A caller that is not the process the service started is turned away.
+  `--management-hold` makes it wait until bliss is listening, and `hold off`
+  — the flag survives restarts — keeps a reconnect from waiting for bliss
+  again. OpenVPN warns at every start that a TCP management port has no
+  password; bliss leaves that line out of its log, since the port is on
+  loopback and the caller is checked by its process.
 - **The profile is rewritten, not trusted** (`profile.rs`). `pull-filter` is
   first-match-wins by prefix, so bliss's filters go first: the server's
   `redirect-gateway`, routes, `dhcp-option`, 2.6's `dns`, `block-outside-dns`
@@ -1230,7 +1359,12 @@ the user's to make.
   it (`after`): two at once would fight over the adapter.
 - **With TUN on, `openvpn.exe`'s own traffic goes around it** (`stack.rs`,
   `VPN_PROGRAMS`), or the VPN would reach the work network through the proxy
-  server; `the_vpns_own_connection_goes_around_the_tunnel`.
+  server; `the_vpns_own_connection_goes_around_the_tunnel`. Unmeasured, and
+  probably not the whole answer: with Data Channel Offload — which a UDP
+  profile gets on Windows 11, the client log says "ovpn-dco device opened" —
+  the connection to the server belongs to the driver, not to `openvpn.exe`,
+  so no table names that program for it. A route around the tunnel to the
+  server's address, as the engine's server gets, would not depend on that.
 - **Not yet:** a login, a one-time code or a key passphrase — such a profile is
   refused in words (`ProfileError`), and a prompt at run time ends the
   connection; IPv6 through the VPN; the VPN's switch in the tray's menu.
@@ -1268,13 +1402,19 @@ The tunnel already starts with the window (`Setup.autostart`). A window in
 the tray draws nothing and lets WebView2 give memory back, and the
 connections table is copied only for its screen (rule 26; not measured).
 
-**Written, never run against a server:** the work VPN (§10a) — a `.ovpn`
-added from the settings screen or with Ctrl+V, OpenVPN started through its
-service with the server kept off the machine, a fourth action «через VPN» in
-the rules, the connection menu and the editor, a chip in the main screen's
-heading that switches it, and its connections in the table as `VPN`. Its unit
-tests talk to a stand-in for OpenVPN over a real socket; the service, the
-adapter and the route have met nothing but the source they were written from.
+**Run against a real OpenVPN, not yet against the work server:** the work
+VPN (§10a) — a `.ovpn` added from the settings screen or with Ctrl+V, OpenVPN
+started through its service with the server kept off the machine, a fourth
+action «через VPN» in the rules, the connection menu and the editor, a chip
+in the main screen's heading that switches it, and its connections in the
+table as `VPN`. On 4 October, against OpenVPN 2.7.7 and a server of its own on
+this machine: the end-to-end test (§2), and a probe window started outside
+Claude's package (§3, trap 9) whose chip brought the VPN up in 2.8 s, whose
+SOCKS and HTTP ports carried a rule's connections by address and by a name
+only the VPN's DNS knew, which refused them with the VPN off (HTTP 502, SOCKS
+reply 3), and which took OpenVPN with it when killed. A friend's first run
+had failed on the access list (§10a); the build with the fix has not been
+back to them yet.
 
 **Started in stage 2:** the TUN adapter — wintun inside the binary, the
 adapter and its routes, TCP and UDP carried through the same rules and the

@@ -57,6 +57,23 @@ pull-filter ignore \"register-dns\"
 
 ";
 
+/// How many lines bliss writes before the profile's own, each of which it
+/// then carries one for one: line `n` of the profile is line `PREAMBLE + n`
+/// of what OpenVPN reads, and names it so in its errors.
+pub const PREAMBLE: usize = lines_in(FILTERS);
+
+const fn lines_in(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let (mut at, mut lines) = (0, 0);
+    while at < bytes.len() {
+        if bytes[at] == b'\n' {
+            lines += 1;
+        }
+        at += 1;
+    }
+    lines
+}
+
 /// What goes last: the one route bliss wants through the VPN.
 ///
 /// A default route, so a connection bound to the VPN's adapter can reach any
@@ -311,6 +328,24 @@ TTTTTTTTTTTTTTTT
         assert!(written.trim_end().ends_with(ROUTE));
         // route-method stays: the service's own channel overrides it.
         assert!(written.contains("\nroute-method exe\n"));
+    }
+
+    /// Line `n` of a profile is line `PREAMBLE + n` of what OpenVPN reads,
+    /// commented out or not, which is how a line named in its error is found
+    /// again in the person's own file.
+    #[test]
+    fn every_line_keeps_its_place_after_the_preamble() {
+        let profile = format!("{WORK}redirect-gateway def1\r\ncomp-lzo\n");
+        let written = rewrite(&profile).expect("a usable profile");
+        let written: Vec<&str> = written.lines().collect();
+        for (n, line) in profile.lines().enumerate() {
+            let theirs = written[PREAMBLE + n];
+            assert!(
+                theirs.ends_with(line),
+                "line {}: {theirs:?} for {line:?}",
+                n + 1
+            );
+        }
     }
 
     /// What would hand the machine to the server is commented out, however it
