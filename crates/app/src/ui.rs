@@ -169,6 +169,19 @@ static MENU_HELD: GlobalSignal<bool> = Signal::global(|| false);
 /// menu that took the first loss of it for an answer closed before it was seen.
 static MENU_OPENED: GlobalSignal<Option<std::time::Instant>> = Signal::global(|| None);
 static NORMAL_SHAPE: GlobalSignal<Option<(i32, i32, u32, u32)>> = Signal::global(|| None);
+
+/// Whether the page has let frames go by because nobody could see it, and so
+/// has to be brought up to date before anyone can (`catch_up`). Not a signal:
+/// nothing draws from it.
+static BEHIND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the connections screen is open. The table goes into the frame
+/// while it is and the page can be seen; in the tray it is let go as well,
+/// and asked for again on the way back (`catch_up`).
+static TABLE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The tray icon's tooltip. The icon is seen with the window in the tray,
+/// which is when the page gets no frames; this is the one thing that still
+/// follows them there, and a change of it re-runs `Tray` and nothing else.
+static TOOLTIP: GlobalSignal<String> = Signal::global(String::new);
 /// Whether the list of rules to narrow the table to is open.
 static RULE_MENU: GlobalSignal<bool> = Signal::global(|| false);
 /// Subscription groups in the server list someone opened or closed, by id.
@@ -372,15 +385,25 @@ fn app_icon(_side: Option<u32>) -> Option<Icon> {
 /// native menu to give it: Windows draws those in its own font and colours, and
 /// bliss's own menu is this window in a compact shape (`into_menu`).
 ///
-/// A prop rather than the frame, so this runs only when the words change, which
-/// is exactly when the shell has to be told (rule 17 of AGENTS.md §6).
+/// Its tooltip comes from `TOOLTIP`, not from the frame, so this runs only when
+/// the words change, which is exactly when the shell has to be told (rule 17
+/// of AGENTS.md §6) — and goes on running in the tray, where the page gets no
+/// frames. The frame's signal is here to be brought up to date before the
+/// window is shown (`catch_up`).
 #[component]
-fn Tray(tooltip: String, frame: Signal<Frame>) -> Element {
+fn Tray(frame: Signal<Frame>) -> Element {
     use dioxus::desktop::trayicon::{
         MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
     };
 
+    let controller = use_context::<Controller>();
     let window = dioxus::desktop::use_window();
+    // The engine's words, or, before its first frame, the ones in the frame
+    // the page started with.
+    let tooltip = match TOOLTIP() {
+        words if words.is_empty() => tray_tooltip(&frame.peek()),
+        words => words,
+    };
     let side = icon_side(16.0, window.scale_factor());
     let icon = use_hook(|| {
         // No menu of Windows' own, and not only because it cannot be styled:
@@ -414,6 +437,7 @@ fn Tray(tooltip: String, frame: Signal<Frame>) -> Element {
     });
 
     let clicked = window.clone();
+    let asking = controller.clone();
     dioxus::desktop::use_tray_icon_event_handler(move |event| {
         // On the release: a click is a press and a release, and both arrive.
         let TrayIconEvent::Click {
@@ -431,6 +455,7 @@ fn Tray(tooltip: String, frame: Signal<Frame>) -> Element {
                 if TRAY_MENU() {
                     out_of_menu(&clicked, true);
                 } else {
+                    catch_up(&clicked, frame, &asking);
                     out_of_the_tray(&clicked);
                 }
             }
@@ -441,8 +466,12 @@ fn Tray(tooltip: String, frame: Signal<Frame>) -> Element {
                 if TRAY_MENU() {
                     out_of_menu(&clicked, false);
                 } else if clicked.is_visible() {
+                    catch_up(&clicked, frame, &asking);
                     out_of_the_tray(&clicked);
                 } else {
+                    // Up to date before the menu is drawn from it, in the
+                    // same render that puts the menu on the page.
+                    catch_up(&clicked, frame, &asking);
                     // Read now, not captured: this handler is made once,
                     // and the presets change under it.
                     let presets = frame.peek().routing.presets.len();
@@ -450,6 +479,21 @@ fn Tray(tooltip: String, frame: Signal<Frame>) -> Element {
                 }
             }
             MouseButton::Middle => {}
+        }
+    });
+
+    // Back from the taskbar, or anywhere else bliss did not bring it back
+    // from itself: up to date at once rather than at the next frame.
+    let restored = window.clone();
+    dioxus::desktop::use_wry_event_handler(move |event, _| {
+        use dioxus::desktop::tao::event::{Event, WindowEvent};
+        if let Event::WindowEvent {
+            event: WindowEvent::Focused(true) | WindowEvent::Resized(_),
+            ..
+        } = event
+            && seen(&restored)
+        {
+            catch_up(&restored, frame, &controller);
         }
     });
 
@@ -669,6 +713,59 @@ fn tray_mark(side: u32) -> Option<dioxus::desktop::trayicon::Icon> {
 fn tray_mark(_side: u32) -> Option<dioxus::desktop::trayicon::Icon> {
     None
 }
+
+/// Whether anyone can see the page: the program's window on the screen, or
+/// the tray's menu. A window behind others still counts; there is no cheap
+/// way to know it is covered.
+fn seen(window: &dioxus::desktop::DesktopContext) -> bool {
+    *TRAY_MENU.peek() || (window.is_visible() && !window.is_minimized())
+}
+
+/// Bring a page that let frames go by up to date, before whatever is about to
+/// show it does, and let WebView2 have its memory back.
+fn catch_up(
+    window: &dioxus::desktop::DesktopContext,
+    mut frame: Signal<Frame>,
+    controller: &Controller,
+) {
+    if BEHIND.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        wake(window, controller);
+        frame.set(controller.frame());
+    }
+}
+
+/// Undo what going out of sight did: WebView2's memory, and the table if its
+/// screen is open. The table arrives a moment later, through the engine.
+fn wake(window: &dioxus::desktop::DesktopContext, controller: &Controller) {
+    rest(window, false);
+    if TABLE_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+        controller.send(Command::Table(true));
+    }
+}
+
+/// Let WebView2 give memory back while nobody can see the page, and ask for
+/// it again when somebody can.
+///
+/// Microsoft's switch for an app that has gone inactive: its scripts go on
+/// running — the tray's menu and the keys need them — and the browser
+/// processes trim what they hold. Only a hint, and it lasts until it is
+/// changed back, which `catch_up` and the frame loop do. It needs WebView2
+/// 114 or later; an older one ignores it.
+#[cfg(windows)]
+fn rest(window: &dioxus::desktop::DesktopContext, idle: bool) {
+    use dioxus::desktop::wry::{MemoryUsageLevel, WebViewExtWindows};
+    let level = if idle {
+        MemoryUsageLevel::Low
+    } else {
+        MemoryUsageLevel::Normal
+    };
+    if let Err(e) = window.webview.set_memory_usage_level(level) {
+        tracing::debug!("webview memory level not changed: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn rest(_window: &dioxus::desktop::DesktopContext, _idle: bool) {}
 
 /// Bring the window back out of the tray.
 fn out_of_the_tray(window: &dioxus::desktop::DesktopContext) {
@@ -954,6 +1051,7 @@ fn App() -> Element {
     let mut frame = use_signal(|| controller.frame());
     let screen = use_signal(|| Screen::Connection);
     let tab = use_signal(|| Tab::Traffic);
+    let window = dioxus::desktop::use_window();
 
     // The engine pushes; we never poll. A watch notification needs no timer, so
     // this works regardless of which executor is under the renderer.
@@ -961,13 +1059,37 @@ fn App() -> Element {
     // The controller is captured from the render scope rather than fetched
     // inside the closure: use_context is a hook, and hooks may only be called
     // while rendering.
+    //
+    // A frame nobody can see is not drawn. The window spends most of its life
+    // in the tray, and drawing there cost as much as anything bliss did: every
+    // frame rebuilt the page, and WebView2 laid it out and painted it into a
+    // window that was not on the screen. The tray icon's tooltip still follows
+    // (`TOOLTIP`), and whatever brings the window back draws the latest frame
+    // first (`catch_up`); gone out of sight, WebView2 is told it may give
+    // memory back (`rest`).
     let watcher = controller.clone();
+    let watching = window.clone();
     use_future(move || {
         let mut controller = watcher.clone();
+        let window = watching.clone();
         async move {
             loop {
                 controller.changed().await;
-                frame.set(controller.frame());
+                let words = controller.read(tray_tooltip);
+                if *TOOLTIP.peek() != words {
+                    *TOOLTIP.write() = words;
+                }
+                if seen(&window) {
+                    if BEHIND.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        wake(&window, &controller);
+                    }
+                    frame.set(controller.frame());
+                } else if !BEHIND.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    rest(&window, true);
+                    if TABLE_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+                        controller.send(Command::Table(false));
+                    }
+                }
             }
         }
     });
@@ -1013,7 +1135,7 @@ fn App() -> Element {
         Styles {}
         WindowIcons {}
         WindowZoom {}
-        Tray { tooltip: tray_tooltip(&frame), frame: live }
+        Tray { frame: live }
         ToastLine { toast: frame.toast.clone() }
         if TRAY_MENU() {
             TrayMenu { frame: frame.clone() }
@@ -2514,8 +2636,21 @@ fn Connections(frame: Frame) -> Element {
         }
         _ => format!("Ничего не нашлось по «{}».", elide(&query, 32)),
     };
+    // The table is copied into the frame only while this screen is open to
+    // show it (`Command::Table`), so it is asked for on the way in and let go
+    // on the way out.
+    let controller = use_context::<Controller>();
+    use_hook({
+        let controller = controller.clone();
+        move || {
+            TABLE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+            controller.send(Command::Table(true));
+        }
+    });
     // The menus belong to this screen; leaving the screen closes them.
-    use_drop(|| {
+    use_drop(move || {
+        TABLE_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
+        controller.send(Command::Table(false));
         *ROW_MENU.write() = None;
         *RULE_MENU.write() = false;
     });
@@ -2612,7 +2747,10 @@ fn Connections(frame: Frame) -> Element {
             }
 
             div { style: "flex:1;min-height:90px;overflow-y:scroll;overflow-x:hidden",
-                if frame.connections.is_empty() {
+                // The first frame after the screen opens may still be one
+                // without the table: nothing yet, rather than "empty".
+                if !frame.table {
+                } else if frame.connections.is_empty() {
                     div {
                         style: "padding:28px 8px;font-size:14.5px;color:var(--color-neutral-600)",
                         "Пока пусто. Направьте что-нибудь в socks5://127.0.0.1:{frame.listen.split(' ').nth(1).unwrap_or_default()}"
@@ -3580,6 +3718,47 @@ mod tests {
         };
         assert!(at("animated(window, false)") < at("set_visible(false)"));
         assert!(at("set_outer_position") < at("animated(window, true)"));
+    }
+
+    /// A frame nobody can see is not drawn, and whatever shows the window
+    /// again from the tray brings the page up to date first — shown before
+    /// that, it would stand there with the numbers of whenever it was hidden.
+    #[test]
+    fn frames_are_drawn_only_where_they_are_seen() {
+        let source = include_str!("ui.rs");
+        let body = |start: &str| {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("{start} in ui.rs"));
+            let rest = &source[from..];
+            &rest[..rest.find("\n}\n").expect("it ends")]
+        };
+        let app = body("fn App() -> Element {");
+        let asks = app
+            .find("if seen(&window)")
+            .expect("the loop asks who can see");
+        let draws = app
+            .find("frame.set(controller.frame())")
+            .expect("the loop draws");
+        assert!(
+            asks < draws,
+            "drawn before asking whether anyone can see it"
+        );
+
+        let tray = body("fn Tray(frame");
+        for show in ["out_of_the_tray(&clicked)", "into_menu(&clicked"] {
+            for (at, _) in tray.match_indices(show) {
+                let before = &tray[..at];
+                let caught = before
+                    .rfind("catch_up(")
+                    .unwrap_or_else(|| panic!("{show} with nothing caught up"));
+                let between = &before[caught..];
+                assert!(
+                    !between.contains("} else") && !between.contains("=>"),
+                    "{show} in a branch that did not catch up"
+                );
+            }
+        }
     }
 
     /// The VPN's choice is offered once there is a VPN — and wherever it is
