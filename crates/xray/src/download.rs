@@ -46,6 +46,20 @@ const ASSET: &str = "Xray-linux-arm64-v8a.zip";
 /// download later.
 const WANTED: &[&str] = &["xray.exe", "xray", "geoip.dat", "geosite.dat"];
 
+/// The most an archive may weigh. Xray-windows-64.zip is about 15 MB; the
+/// length the server announces is checked before anything is read or
+/// allocated for it, and the bytes as they arrive, for a server that
+/// announces none.
+const MAX_ARCHIVE: u64 = 128 * 1024 * 1024;
+
+/// The most one file inside it may unpack to: xray.exe is about 35 MB and
+/// geoip.dat 20. A size in a zip header is the archive's word, not a fact,
+/// so the read stops here whatever the header says.
+const MAX_ENTRY: u64 = 256 * 1024 * 1024;
+
+/// The most a checksum file may be: one line, really.
+const MAX_CHECKSUM: u64 = 64 * 1024;
+
 #[derive(Debug, Error)]
 pub enum DownloadError {
     #[error("could not reach GitHub")]
@@ -53,6 +67,14 @@ pub enum DownloadError {
 
     #[error("no release found with an asset named {ASSET}")]
     NoRelease,
+
+    /// Every release looked at is a prerelease. Not the same as there being
+    /// no build: xray-core flags nearly all of its releases so.
+    #[error("none of the last {0} releases is stable; --newest takes a prerelease")]
+    NoStable(usize),
+
+    #[error("{what} is larger than {limit} bytes, which no xray-core release is")]
+    TooLarge { what: String, limit: u64 },
 
     #[error("release {tag} has no {ASSET}")]
     NoAsset { tag: String },
@@ -137,10 +159,16 @@ struct ApiAsset {
 ///
 /// `via` is a SOCKS5 address — in practice the bridge of an engine that is
 /// already running, which is how a user behind a block updates at all.
+///
+/// Timed by silence, not by length: a request with nothing arriving for a
+/// minute is given up, one that is slow but moving is not. A limit on the
+/// whole request, 300 s, cut off a 15 MB archive on any link slower than
+/// 50 KB/s — the very links that make people want a tunnel.
 pub fn client(via: Option<std::net::SocketAddr>) -> Result<reqwest::Client, DownloadError> {
     let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(300));
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60));
     if let Some(addr) = via {
         builder = builder.proxy(reqwest::Proxy::all(format!("socks5h://{addr}"))?);
     }
@@ -195,6 +223,9 @@ pub async fn select(
             .ok_or_else(|| DownloadError::NoSuchVersion(want.to_owned(), LOOKBACK));
     }
 
+    if releases.is_empty() {
+        return Err(DownloadError::NoRelease);
+    }
     // The API returns newest first, so the first match on the channel wins.
     releases
         .into_iter()
@@ -202,7 +233,7 @@ pub async fn select(
             Channel::Newest => true,
             Channel::Stable => !r.prerelease,
         })
-        .ok_or(DownloadError::NoRelease)
+        .ok_or(DownloadError::NoStable(LOOKBACK))
 }
 
 /// Download, verify, unpack. Returns the path of the installed executable.
@@ -219,27 +250,8 @@ where
     F: FnMut(u64, u64),
 {
     let expected = fetch_checksum(client, release).await?;
-
-    let response = client
-        .get(&release.zip_url)
-        .send()
-        .await?
-        .error_for_status()?;
-    let total = response.content_length().unwrap_or(0);
-
-    // Hash while downloading rather than re-reading afterwards: the archive is
-    // ~20 MB and this keeps it to one pass.
-    let mut hasher = Sha256::new();
-    let mut bytes = Vec::with_capacity(total as usize);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        bytes.extend_from_slice(&chunk);
-        progress(bytes.len() as u64, total);
-    }
-
-    let actual = hex(&hasher.finalize());
+    let (bytes, actual) =
+        download(client, &release.zip_url, ASSET, MAX_ARCHIVE, &mut progress).await?;
     if actual != expected {
         return Err(DownloadError::Corrupt {
             tag: release.tag.clone(),
@@ -247,21 +259,60 @@ where
             actual,
         });
     }
+    unpack(&bytes, dest_dir, MAX_ENTRY)
+}
 
-    unpack(&bytes, dest_dir)
+/// The body at `url` and its SHA-256, reading no more than `limit` bytes:
+/// not allocating more on the server's word, and not reading on past it.
+///
+/// Hashed while it arrives rather than re-read after: one pass.
+async fn download<F>(
+    client: &reqwest::Client,
+    url: &str,
+    what: &str,
+    limit: u64,
+    progress: &mut F,
+) -> Result<(Vec<u8>, String), DownloadError>
+where
+    F: FnMut(u64, u64),
+{
+    let response = client.get(url).send().await?.error_for_status()?;
+    let total = response.content_length().unwrap_or(0);
+    let too_large = || DownloadError::TooLarge {
+        what: what.to_owned(),
+        limit,
+    };
+    if total > limit {
+        return Err(too_large());
+    }
+    let mut hasher = Sha256::new();
+    let mut bytes = Vec::with_capacity(total as usize);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len() as u64 + chunk.len() as u64 > limit {
+            return Err(too_large());
+        }
+        hasher.update(&chunk);
+        bytes.extend_from_slice(&chunk);
+        progress(bytes.len() as u64, total);
+    }
+    Ok((bytes, hex(&hasher.finalize())))
 }
 
 async fn fetch_checksum(
     client: &reqwest::Client,
     release: &Release,
 ) -> Result<String, DownloadError> {
-    let text = client
-        .get(&release.dgst_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let (bytes, _) = download(
+        client,
+        &release.dgst_url,
+        "the checksum file",
+        MAX_CHECKSUM,
+        &mut |_, _| {},
+    )
+    .await?;
+    let text = String::from_utf8_lossy(&bytes);
 
     // "SHA2-256= d004c392…" — note the spelling; SHA256= finds nothing.
     text.lines()
@@ -272,7 +323,7 @@ async fn fetch_checksum(
         })
 }
 
-fn unpack(archive: &[u8], dest_dir: &Path) -> Result<PathBuf, DownloadError> {
+fn unpack(archive: &[u8], dest_dir: &Path, limit: u64) -> Result<PathBuf, DownloadError> {
     std::fs::create_dir_all(dest_dir).map_err(|source| DownloadError::Write {
         path: dest_dir.to_path_buf(),
         source,
@@ -295,13 +346,24 @@ fn unpack(archive: &[u8], dest_dir: &Path) -> Result<PathBuf, DownloadError> {
             continue;
         }
 
+        let too_large = || DownloadError::TooLarge {
+            what: file_name.to_owned(),
+            limit,
+        };
+        if entry.size() > limit {
+            return Err(too_large());
+        }
         let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry
+        (&mut entry)
+            .take(limit + 1)
             .read_to_end(&mut buf)
             .map_err(|source| DownloadError::Write {
                 path: dest_dir.join(file_name),
                 source,
             })?;
+        if buf.len() as u64 > limit {
+            return Err(too_large());
+        }
 
         let path = dest_dir.join(file_name);
         write_replacing(&path, &buf)?;
@@ -346,4 +408,109 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> Result<(), DownloadError> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::net::Ipv4Addr;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// A server on loopback that answers one request with `head`, then `body`.
+    async fn serve_once(head: String, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a port");
+        let at = listener.local_addr().expect("its address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("a request");
+            let mut request = vec![0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+        });
+        format!("http://{at}/asset.zip")
+    }
+
+    fn loopback_client() -> reqwest::Client {
+        // Past HTTP_PROXY, which on the machine this was written on points at
+        // a proxy that is not this test's.
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a client")
+    }
+
+    /// An archive no bigger than the limit arrives whole; one the server says
+    /// is bigger is refused before a byte is read, and one that only turns
+    /// out bigger as it arrives is refused at the limit.
+    #[tokio::test]
+    async fn an_archive_larger_than_the_limit_is_refused() {
+        let client = loopback_client();
+        let body = vec![7u8; 1000];
+
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n".to_owned(),
+            body.clone(),
+        )
+        .await;
+        let (bytes, sha) = download(&client, &url, "test", 1000, &mut |_, _| {})
+            .await
+            .expect("within the limit");
+        assert_eq!(bytes, body);
+        assert_eq!(sha, hex(&Sha256::digest(&body)));
+
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n".to_owned(),
+            body.clone(),
+        )
+        .await;
+        let said = download(&client, &url, "test", 100, &mut |_, _| {}).await;
+        assert!(
+            matches!(said, Err(DownloadError::TooLarge { .. })),
+            "{said:?}"
+        );
+
+        // No length announced: the bytes themselves are counted.
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(),
+            body,
+        )
+        .await;
+        let mut seen = 0;
+        let arrived = download(&client, &url, "test", 100, &mut |done, _| seen = done).await;
+        assert!(
+            matches!(arrived, Err(DownloadError::TooLarge { .. })),
+            "{arrived:?}"
+        );
+        assert!(seen <= 100, "read past the limit: {seen}");
+    }
+
+    /// A file in the archive that unpacks to more than the limit is refused,
+    /// whatever size the archive gives for it.
+    #[test]
+    fn a_file_in_the_archive_larger_than_the_limit_is_refused() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file("xray.exe", zip::write::SimpleFileOptions::default())
+            .expect("an entry");
+        archive.write_all(&[0u8; 1000]).expect("its bytes");
+        let archive = archive.finish().expect("an archive").into_inner();
+
+        let dir = std::env::temp_dir().join(format!("bliss-unpack-{}", std::process::id()));
+        let refused = unpack(&archive, &dir, 100);
+        assert!(
+            matches!(refused, Err(DownloadError::TooLarge { .. })),
+            "{refused:?}"
+        );
+        assert!(!dir.join("xray.exe").exists(), "nothing written for it");
+
+        let unpacked = unpack(&archive, &dir, 1000).expect("within the limit");
+        assert_eq!(std::fs::read(&unpacked).expect("written").len(), 1000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
