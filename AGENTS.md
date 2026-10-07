@@ -806,6 +806,38 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       through `Start-Process -Verb RunAs` (which does not carry the caller's
       environment across). Why was never established.
 
+26. **A page nobody can see is not drawn.** The window spends most of its
+    life in the tray, and a sample of the user's bliss there, a day into a
+    run, spent 2.2% of a core, half of it in WebView2 — every frame rebuilt
+    the page, and WebView2 laid out and painted a window that was not on the
+    screen. Now:
+    - `App`'s frame loop draws a frame only while `seen` — the program on the
+      screen and not minimized, or the tray's menu — and otherwise marks the
+      page `BEHIND`. The tray icon's tooltip still follows, through
+      `TOOLTIP`, which re-runs `Tray` alone.
+    - Whatever shows the window from the tray calls `catch_up` first: the
+      latest frame, in the same handler, so the menu is drawn from it in the
+      render that puts it on the page. The program's window is shown at once
+      and redrawn a moment later; a restore from the taskbar catches up on
+      its `Focused` or `Resized` event, and the loop itself on the next frame.
+      `frames_are_drawn_only_where_they_are_seen` holds both, and failed
+      with one `catch_up` taken out.
+    - Out of sight, WebView2 is told it may give memory back
+      (`MemoryUsageLevel::Low`, `rest`), and told otherwise on the way back:
+      Microsoft's switch for an inactive app, which keeps its scripts
+      running — the menu and the keys need them.
+    - The connections table goes into the frame only while its screen is
+      open and the page can be seen (`Command::Table`, `TABLE_OPEN`,
+      `Frame.table`): up to 512 closed connections and every live one were
+      copied twice a second into the frame, and again into every component
+      it is handed to, on every screen and in the tray. The count of live
+      ones then comes from the tracker
+      (`the_table_is_copied_only_when_asked_for`).
+
+    None of this was measured: the user asked for it without. If the tray's
+    menu ever shows the program in its shape again (rule 23), the memory
+    level is the first suspect — its pages come back as the menu is drawn.
+
 ## 7. Verifying a UI change: look at the real window
 
 A replica page proves a mechanism, not that the code changed. For any UI bug,
@@ -1202,7 +1234,9 @@ v2ray-plugin as xray transports), SOCKS, Hysteria 2 and WireGuard — over RAW
 (with its HTTP disguise), WebSocket, HTTPUpgrade, XHTTP, gRPC and mKCP, under
 TLS (pinned, checked by name, ECH) or REALITY (with ML-DSA verification),
 each carried end to end through a real xray 26.3.27 in the engine test (§2).
-The tunnel already starts with the window (`Setup.autostart`).
+The tunnel already starts with the window (`Setup.autostart`). A window in
+the tray draws nothing and lets WebView2 give memory back, and the
+connections table is copied only for its screen (rule 26; not measured).
 
 **Written, never run against a server:** the work VPN (§10a) — a `.ovpn`
 added from the settings screen or with Ctrl+V, OpenVPN started through its

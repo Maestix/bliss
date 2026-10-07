@@ -170,8 +170,14 @@ pub struct Frame {
     /// Bytes per second over the last tick.
     pub up_rate: u64,
     pub down_rate: u64,
-    /// Newest first, live connections before closed ones.
+    /// Newest first, live connections before closed ones — while the
+    /// connections screen is open, and empty otherwise (`table`).
     pub connections: Vec<bliss_core::Snapshot>,
+    /// Whether `connections` holds the table. Up to 512 closed connections
+    /// and every live one, copied twice a second into the frame and again
+    /// into every component the frame is handed to, were paid for on every
+    /// screen and in the tray, for the one screen that shows them.
+    pub table: bool,
     /// Recent download rates, oldest first, for the chart: `CHART_SAMPLES` of
     /// them, the first and the last outside it for most of a tick.
     pub history: Vec<u64>,
@@ -426,6 +432,9 @@ pub enum Command {
         text: String,
         bad: bool,
     },
+    /// The connections screen opened, or closed: put the table in the frame,
+    /// or stop copying it there.
+    Table(bool),
     /// Something happened to the VPN's connection. Only the engine sends this,
     /// to itself; `session` tells the events of a connection being replaced
     /// from those of the one replacing it.
@@ -482,6 +491,11 @@ pub struct Controller {
 impl Controller {
     pub fn frame(&self) -> Frame {
         self.frames.borrow().clone()
+    }
+
+    /// Look at the latest frame without copying it.
+    pub fn read<T>(&self, look: impl FnOnce(&Frame) -> T) -> T {
+        look(&self.frames.borrow())
     }
 
     /// Resolves when the engine publishes a new frame.
@@ -803,6 +817,10 @@ async fn drive(
     // someone is most likely to be editing rules.
     let mut rules = Rules::from_setup(&setup);
     publish_routing(&frames, &rules, setup.tun);
+
+    // Whether the connections screen is open, and so whether the frame
+    // carries the table (`Command::Table`).
+    let mut table = false;
 
     // The VPN beside the tunnel lives here too, and for the same reason: it is
     // up or down on its own switch, whatever the tunnel does.
@@ -1478,6 +1496,12 @@ async fn drive(
                         }
                     }
                     Command::Say { text, bad } => toaster.show(&frames, text, bad),
+                    Command::Table(on) => {
+                        table = on;
+                        // At once rather than at the next tick: the screen that
+                        // asked is on its way in.
+                        publish_table(&frames, &tracker, table);
+                    }
                     Command::VpnEvent { session, event } => {
                         // One being replaced still reports as it goes; only
                         // the current one speaks for the VPN.
@@ -1505,7 +1529,7 @@ async fn drive(
                     // just stopped listening.
                     apply_proxy(proxy, &setup, false, &frames);
                 }
-                publish(&frames, &tracker, &mut last, running.as_ref());
+                publish(&frames, &tracker, &mut last, running.as_ref(), table);
                 toaster.expire(&frames);
             }
             _ = refresher.tick() => {
@@ -2857,6 +2881,7 @@ fn publish(
     tracker: &Tracker,
     last: &mut Meter,
     running: Option<&Running>,
+    table: bool,
 ) {
     let (up, down, opened) = tracker.totals();
     let now = Instant::now();
@@ -2865,10 +2890,14 @@ fn publish(
     let span_ms = now.duration_since(last.at).as_millis() as u64;
     let up_rate = per_second(up, last.up, span_ms);
     let down_rate = per_second(down, last.down, span_ms);
-    let connections = tracker.table();
-    // Counted from the rows themselves rather than asked for separately, so the
-    // number in the metrics card cannot disagree with the list beside it.
-    let active = connections.iter().filter(|c| c.closed_at.is_none()).count() as u64;
+    let connections = table.then(|| tracker.table());
+    // Counted from the rows themselves when there are rows, so the number in
+    // the metrics card cannot disagree with the list beside it; asked for
+    // separately when the list is not being copied at all.
+    let active = match &connections {
+        Some(rows) => rows.iter().filter(|c| c.closed_at.is_none()).count() as u64,
+        None => tracker.active_count() as u64,
+    };
     let mut scale = last.scale.max(SCALE_FLOOR);
 
     frames.send_modify(|f| {
@@ -2878,7 +2907,12 @@ fn publish(
         f.active = active;
         f.up_rate = up_rate;
         f.down_rate = down_rate;
-        f.connections = connections;
+        f.table = table;
+        match connections {
+            Some(rows) => f.connections = rows,
+            None if !f.connections.is_empty() => f.connections = Vec::new(),
+            None => {}
+        }
         f.uptime = running.map(|r| hms(r.since.elapsed())).unwrap_or_default();
         // The adapter goes down with the tunnel, and the tunnel goes down from
         // half a dozen places — a failed engine among them, which is nobody's
@@ -2905,6 +2939,15 @@ fn publish(
         scale,
         at: now,
     };
+}
+
+/// The table into the frame, or out of it, between ticks.
+fn publish_table(frames: &watch::Sender<Frame>, tracker: &Tracker, table: bool) {
+    let rows = if table { tracker.table() } else { Vec::new() };
+    frames.send_modify(|f| {
+        f.table = table;
+        f.connections = rows;
+    });
 }
 
 fn hms(elapsed: Duration) -> String {
@@ -2995,6 +3038,39 @@ async fn measure_latency(outbound: &dyn bliss_core::Outbound) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table nobody is looking at is not copied into the frame, and the
+    /// count of live connections does not need it.
+    #[test]
+    fn the_table_is_copied_only_when_asked_for() {
+        let tracker = Tracker::new();
+        let _live = tracker.open(
+            bliss_core::Target::domain("a.example", 443),
+            bliss_core::Route::Proxy,
+            "r",
+            None,
+        );
+        let (frames, _watch) = watch::channel(Frame {
+            history: vec![0; CHART_SAMPLES],
+            ..Frame::default()
+        });
+        let mut last = Meter::new();
+
+        publish(&frames, &tracker, &mut last, None, false);
+        assert!(!frames.borrow().table);
+        assert!(frames.borrow().connections.is_empty());
+        assert_eq!(frames.borrow().active, 1, "counted without the table");
+
+        publish(&frames, &tracker, &mut last, None, true);
+        assert!(frames.borrow().table);
+        assert_eq!(frames.borrow().connections.len(), 1);
+
+        publish(&frames, &tracker, &mut last, None, false);
+        assert!(
+            frames.borrow().connections.is_empty(),
+            "let go when the screen closes"
+        );
+    }
 
     /// A VPN is called by its file's name, without the folder or the extension.
     #[test]
