@@ -729,6 +729,20 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       300px; reshaped while still visible on the way back, it flashed the
       program at the centre of the screen, which is what the user saw both when
       the menu closed and when bliss quit.
+    - **And seen only once it is painted.** The render is Dioxus's and the
+      paint WebView2's, later, and a hidden window's paints are not presented:
+      shown straight from that effect, the menu stood for its first 10 to 70ms
+      as the program cut to its shape, in every one of ten openings, in this
+      build and the one before (screen grabs under the window, §7). Waiting
+      two animation frames fixed later openings but not the first after the
+      program had been on screen. Now the window is shown cloaked
+      (`DWMWA_CLOAK`: up, painted into, left out of the picture by DWM) and
+      uncloaked when `PAINTED` answers — four animation frames, 200ms at most
+      — and the program comes back out of the tray the same way
+      (`BRING_BACK`). Measured after: no foreign frame in three first
+      openings, five more and five returns of the program; the menu now
+      appears about 100–150ms after the click
+      (`a_window_is_seen_only_once_it_is_painted`).
     - **Hide it at once, never faded.** tao keeps a caption style under the
       frame bliss draws (for the shadow and snapping), so Windows fades the
       window out when it is hidden — and the fade follows the window. Hidden
@@ -834,9 +848,14 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       ones then comes from the tracker
       (`the_table_is_copied_only_when_asked_for`).
 
-    None of this was measured: the user asked for it without. If the tray's
-    menu ever shows the program in its shape again (rule 23), the memory
-    level is the first suspect — its pages come back as the menu is drawn.
+    It was built without measuring, as the user asked, and checked on
+    1 October in a probe window: no change to the page in 4s in the tray or
+    3s minimized, against changes every frame on screen; the latest numbers
+    within 0.35s of a click on the icon and 0.3s of a restore from the
+    taskbar; WebView2's private memory 104 MB on screen, 76 MB after 10s in
+    the tray. The flash of the program in the menu's first frames, suspected
+    of coming from the memory level, was in the build before it too, and is
+    rule 23's to answer.
 
 ## 7. Verifying a UI change: look at the real window
 
@@ -926,8 +945,9 @@ run. A readout's position is checked against the SVG path's own geometry
 arithmetic, which would only agree with itself.
 
 **The tray is driven by the message the shell sends.** The icon's window is
-`tray_icon_app` in bliss's own process — `EnumWindows` misses it, being
-message-only, so walk `FindWindowExW(HWND_MESSAGE, …)` as well — and
+`tray_icon_app` in bliss's own process — a top-level window of that class in
+the tray-icon bliss builds with now, which `EnumWindows` finds; an earlier one
+made it message-only, so walk `FindWindowExW(HWND_MESSAGE, …)` as well — and
 `PostMessage(tray, 6002, 0, WM_LBUTTONUP)`, or `WM_RBUTTONUP`, is exactly what
 Windows posts on a click, so the handler runs as it would for a person. Two
 things about the menu: it closes when the window loses focus, and a window a
@@ -941,8 +961,18 @@ menu pops up wherever the pointer is. Ask before a run when they are at the
 machine, and take them at their word when they say not to: work from the code
 and the tests instead, and say plainly which claims are then untested.
 
-Two more probes that worked:
+More probes that worked:
 
+- **A flash of the wrong content** is caught by grabbing the screen under the
+  window from the moment `IsWindowVisible` says it is up, as fast as
+  `PIL.ImageGrab` goes (every 40–50ms), and comparing each grab with one taken
+  once it has settled and with the screen grabbed under it before the click:
+  a cloaked window shows what is behind it, which is not a flash. The
+  rectangle includes the invisible borders, so the user's own screen around
+  the window moves the numbers; with a game running behind, look at the odd
+  frames before believing them. Each run has to start from the state it is
+  about: the menu's first opening after the program was on screen differs
+  from every opening after it.
 - **Window icons:** `WM_GETICON` on the `bliss` window, then `GetIconInfo` and
   `GetDIBits`; compare the pixels with the frame of `assets/bliss.ico` at that
   size. A zero difference proves the resource is in use and the Dioxus logo is

@@ -174,6 +174,9 @@ static NORMAL_SHAPE: GlobalSignal<Option<(i32, i32, u32, u32)>> = Signal::global
 /// has to be brought up to date before anyone can (`catch_up`). Not a signal:
 /// nothing draws from it.
 static BEHIND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Asks for the program's window to come back out of the tray, counting up
+/// per ask; `Tray` shows it once the page has painted the program.
+static BRING_BACK: GlobalSignal<u64> = Signal::global(|| 0);
 /// Whether the connections screen is open. The table goes into the frame
 /// while it is and the page can be seen; in the tray it is let go as well,
 /// and asked for again on the way back (`catch_up`).
@@ -425,15 +428,49 @@ fn Tray(frame: Signal<Frame>) -> Element {
         let _ = icon.set_tooltip(Some(&tooltip));
     }
 
-    // The menu is shown only once the page holds it; see `into_menu`.
+    // The menu is shown only once the page has painted it: shown cloaked, so
+    // WebView2 paints into a window that is up, and uncloaked after the paint
+    // (`cloaked`, `when_painted`; see `into_menu`).
     let showing = window.clone();
     use_effect(move || {
         use dioxus::desktop::tao::platform::windows::WindowExtWindows;
         if TRAY_MENU() {
+            cloaked(&showing, true);
             showing.set_visible(true);
             let _ = showing.set_skip_taskbar(true);
-            showing.set_focus();
+            let showing = showing.clone();
+            when_painted(move || {
+                cloaked(&showing, false);
+                // Esc, or another click, may have put it away meanwhile.
+                if *TRAY_MENU.peek() {
+                    showing.set_focus();
+                }
+            });
         }
+    });
+
+    // And the program, the same way, when it comes back out of the tray
+    // (`out_of_the_tray`). The count says a new ask has come.
+    let bringing = window.clone();
+    let answered = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u64)));
+    use_effect(move || {
+        let asked = BRING_BACK();
+        if asked == answered.get() {
+            return;
+        }
+        answered.set(asked);
+        // Gone into the menu meanwhile: the menu shows itself.
+        if *TRAY_MENU.peek() {
+            return;
+        }
+        cloaked(&bringing, true);
+        bringing.set_visible(true);
+        bringing.set_minimized(false);
+        let window = bringing.clone();
+        when_painted(move || {
+            cloaked(&window, false);
+            window.set_focus();
+        });
     });
 
     let clicked = window.clone();
@@ -646,6 +683,38 @@ fn animated(window: &dioxus::desktop::DesktopContext, on: bool) {
 #[cfg(not(windows))]
 fn animated(_window: &dioxus::desktop::DesktopContext, _on: bool) {}
 
+/// Keep a shown window off the screen, or let the screen show it.
+///
+/// A cloaked window is up — shown, sized, given its paints — and DWM simply
+/// leaves it out of the picture. What the screen shows when the cloak comes
+/// off is then the page as WebView2 painted it while cloaked, never what it
+/// presented before it was hidden (`when_painted`).
+#[cfg(windows)]
+fn cloaked(window: &dioxus::desktop::DesktopContext, on: bool) {
+    use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+
+    // A Win32 BOOL, four bytes.
+    let cloak = i32::from(on);
+    // SAFETY: the handle is this window's own and lives as long as its
+    // context; the value is the four bytes the attribute is documented to take.
+    let set = unsafe {
+        DwmSetWindowAttribute(
+            HWND(window.hwnd() as *mut core::ffi::c_void),
+            DWMWA_CLOAK,
+            (&raw const cloak).cast(),
+            size_of::<i32>() as u32,
+        )
+    };
+    if let Err(e) = set {
+        tracing::debug!("window not {}cloaked: {e}", if on { "" } else { "un" });
+    }
+}
+
+#[cfg(not(windows))]
+fn cloaked(_window: &dioxus::desktop::DesktopContext, _on: bool) {}
+
 /// Put the menu by the icon and keep it on the screen the pointer is on: a
 /// menu half off the edge is worse than one a little away from the click.
 fn menu_corner(
@@ -768,10 +837,62 @@ fn rest(window: &dioxus::desktop::DesktopContext, idle: bool) {
 fn rest(_window: &dioxus::desktop::DesktopContext, _idle: bool) {}
 
 /// Bring the window back out of the tray.
+///
+/// From hidden, it is shown once the page has painted the program, by the
+/// effect in `Tray` (`BRING_BACK`): shown at once, it stood for a frame with
+/// whatever was painted last — the tray's menu, or the program in the menu's
+/// shape. Already on the screen, or minimized, it shows the program as it is,
+/// and is raised at once.
 fn out_of_the_tray(window: &dioxus::desktop::DesktopContext) {
-    window.set_visible(true);
-    window.set_minimized(false);
-    window.set_focus();
+    if window.is_visible() {
+        window.set_minimized(false);
+        window.set_focus();
+    } else {
+        *BRING_BACK.write() += 1;
+    }
+}
+
+/// Answers once the page has painted what the last render put on it: the
+/// first animation frame after a render comes before the paint that shows
+/// it, the second after. Within 150ms whatever happens, so a page that is not
+/// painting cannot keep the window away.
+const PAINTED: &str = r#"
+let answered = false;
+const answer = () => {
+    if (!answered) {
+        answered = true;
+        dioxus.send(true);
+    }
+};
+let frames = 0;
+const tick = () => {
+    frames += 1;
+    if (frames >= 4) {
+        answer();
+    } else {
+        requestAnimationFrame(tick);
+    }
+};
+requestAnimationFrame(tick);
+setTimeout(answer, 200);
+"#;
+
+/// Do `then` once the page has painted (`PAINTED`).
+///
+/// Measured on 1 October by grabbing the screen under the tray's menu as it
+/// appeared: for its first 10 to 70ms it was the program, cut to the menu's
+/// shape, in every one of ten openings, in this build and in the one before
+/// it. The render is Dioxus's, the paint is WebView2's and comes later, and
+/// a window shown in between shows whatever was presented last. Waiting for
+/// the paint alone was not enough: a hidden window's paints are not
+/// presented, so the menu's first opening still showed the program. The
+/// window is shown cloaked, painted into, and uncloaked here.
+fn when_painted(then: impl FnOnce() + 'static) {
+    let mut painted = document::eval(PAINTED);
+    spawn(async move {
+        let _ = painted.recv::<bool>().await;
+        then();
+    });
 }
 
 /// The tray's menu: the window itself, small, beside the icon.
@@ -3759,6 +3880,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A window brought out of the tray is shown cloaked and uncloaked once
+    /// the page has painted: shown at once, the tray's menu stood for its
+    /// first 10 to 70ms as the program cut to its shape.
+    #[test]
+    fn a_window_is_seen_only_once_it_is_painted() {
+        let source = include_str!("ui.rs");
+        let body = |start: &str| {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("{start} in ui.rs"));
+            let rest = &source[from..];
+            &rest[..rest.find("\n}\n").expect("it ends")]
+        };
+        let tray = body("fn Tray(frame");
+        for who in ["showing", "bringing"] {
+            let cloak = tray
+                .find(&format!("cloaked(&{who}, true)"))
+                .unwrap_or_else(|| panic!("{who} is cloaked"));
+            let show = tray
+                .find(&format!("{who}.set_visible(true)"))
+                .unwrap_or_else(|| panic!("{who} is shown"));
+            let painted = tray[show..]
+                .find("when_painted(")
+                .unwrap_or_else(|| panic!("{who} waits for the paint"));
+            let uncloak = tray[show + painted..]
+                .find("cloaked(&")
+                .unwrap_or_else(|| panic!("{who} is uncloaked"));
+            assert!(cloak < show, "{who} shown before it is cloaked");
+            assert!(
+                tray[show + painted + uncloak..].starts_with("cloaked(&window, false)")
+                    || tray[show + painted + uncloak..].starts_with("cloaked(&showing, false)"),
+                "{who} uncloaked by something else"
+            );
+        }
+        // And nothing else shows a hidden window straight away.
+        let out = body("fn out_of_the_tray(");
+        assert!(
+            !out.contains("set_visible(true)"),
+            "out_of_the_tray shows it at once"
+        );
+        assert!(
+            PAINTED.contains("setTimeout"),
+            "a page that does not paint must not keep it away"
+        );
     }
 
     /// The VPN's choice is offered once there is a VPN — and wherever it is
