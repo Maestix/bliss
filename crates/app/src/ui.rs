@@ -154,6 +154,8 @@ static TABLE_SORT: GlobalSignal<Sort> = Signal::global(|| Sort::Newest);
 static ROW_MENU: GlobalSignal<Option<RowMenu>> = Signal::global(|| None);
 /// The rule editor, while it is open. Global for the same reason.
 static DRAFT: GlobalSignal<Option<Draft>> = Signal::global(|| None);
+/// The subscription editor, while it is open. Global for the same reason.
+static SUB_DRAFT: GlobalSignal<Option<SubDraft>> = Signal::global(|| None);
 /// The rule the connections table is narrowed to; `None` for every rule.
 static TABLE_RULE: GlobalSignal<Option<String>> = Signal::global(|| None);
 
@@ -230,6 +232,22 @@ struct Draft {
     problem: Option<String>,
     /// "Удалить" has been clicked once; the second click deletes.
     deleting: bool,
+}
+
+/// A subscription in the editor, before it is saved.
+///
+/// No `Debug`: `url` is an address being typed, with its token in it.
+#[derive(Clone, PartialEq)]
+struct SubDraft {
+    id: String,
+    name: String,
+    /// A new address; left empty, the old one stays. The old one is never put
+    /// here, or anywhere in the window: only its host is shown.
+    url: String,
+    /// The old one as the card shows it, for the box's placeholder.
+    shown_url: String,
+    /// Why the last attempt to save was refused.
+    problem: Option<String>,
 }
 
 /// Keys that mean something anywhere in the window: Ctrl+V or Shift+Insert
@@ -1237,6 +1255,7 @@ fn App() -> Element {
                         *ROW_MENU.write() = None;
                         *RULE_MENU.write() = false;
                         *DRAFT.write() = None;
+                        *SUB_DRAFT.write() = None;
                     }
                     _ => {}
                 }
@@ -5795,6 +5814,8 @@ fn Subscriptions(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
     let servers: usize = frame.subscriptions.iter().map(|s| s.servers).sum();
     let all_busy = frame.subscriptions.iter().all(|s| s.fetching);
+    // Left open, the editor would be waiting on the next visit.
+    use_drop(|| *SUB_DRAFT.write() = None);
 
     rsx! {
         div {
@@ -5852,6 +5873,9 @@ fn Subscriptions(frame: Frame) -> Element {
                 }
             }
         }
+        if let Some(draft) = SUB_DRAFT() {
+            SubscriptionEditor { draft }
+        }
     }
 }
 
@@ -5897,6 +5921,21 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
         let controller = controller.clone();
         let id = row.id.clone();
         move |_| controller.send(Command::Refresh(Some(id.clone())))
+    };
+    let edit = {
+        let draft = SubDraft {
+            id: row.id.clone(),
+            name: row.name.clone(),
+            url: String::new(),
+            shown_url: row.shown_url.clone(),
+            problem: None,
+        };
+        move |_| *SUB_DRAFT.write() = Some(draft.clone())
+    };
+    let copy = {
+        let controller = controller.clone();
+        let id = row.id.clone();
+        move |_| controller.send(Command::CopySubscription(id.clone()))
     };
     let id = row.id.clone();
 
@@ -5945,7 +5984,19 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                     }
                 }
             }
-            div { style: "flex:none;display:flex;gap:6px",
+            div { style: "flex:none;display:flex;align-items:center;gap:6px",
+                IconButton {
+                    title: "Изменить название или адрес",
+                    enabled: true,
+                    onclick: edit,
+                    icon: rsx! { crate::icons::Pencil { size: 15, color: MUTED } },
+                }
+                IconButton {
+                    title: "Скопировать адрес подписки",
+                    enabled: true,
+                    onclick: copy,
+                    icon: rsx! { crate::icons::Copy { size: 15, color: MUTED } },
+                }
                 Button {
                     label: if row.fetching { "Загружаю…" } else { "Обновить" },
                     enabled: !row.fetching,
@@ -5964,6 +6015,180 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                         }
                     },
                     icon: rsx! { crate::icons::Trash { size: 15, color: BAD } },
+                }
+            }
+        }
+    }
+}
+
+/// Changing a subscription's name or its address, over the subscriptions
+/// screen. It closes the ways the rule editor does: Save, Cancel, the cross,
+/// Esc or a click beside it.
+///
+/// The address box starts empty. The window shows a subscription's host and
+/// nothing after it, where its token is; a new address replaces the old, and
+/// the old one can be had whole from «Скопировать адрес».
+#[component]
+fn SubscriptionEditor(draft: SubDraft) -> Element {
+    let controller = use_context::<Controller>();
+    let save = {
+        let controller = controller.clone();
+        move || {
+            let Some(current) = SUB_DRAFT() else { return };
+            let url = current.url.trim().to_owned();
+            if !url.is_empty() && crate::profile_file::subscription_address(&url).is_none() {
+                if let Some(open) = SUB_DRAFT.write().as_mut() {
+                    open.problem = Some(
+                        "это не адрес подписки: нужен один адрес, начинающийся с http:// \
+                         или https://"
+                            .to_owned(),
+                    );
+                }
+                return;
+            }
+            controller.send(Command::EditSubscription {
+                id: current.id,
+                name: current.name,
+                url: (!url.is_empty()).then_some(Link(url)),
+            });
+            *SUB_DRAFT.write() = None;
+        }
+    };
+    // Cloned here rather than inside rsx, for the reason RuleEditor gives.
+    let save_on_name = save.clone();
+    let save_on_url = save.clone();
+    let copy = {
+        let id = draft.id.clone();
+        move |_| controller.send(Command::CopySubscription(id.clone()))
+    };
+    let address_hint = format!("{} — вставьте новый, чтобы заменить", draft.shown_url);
+
+    rsx! {
+        div {
+            class: "veil",
+            // Ctrl+V leaves the window alone while this is open: see KEY_LISTENER.
+            "data-modal": "true",
+            onclick: move |_| *SUB_DRAFT.write() = None,
+            div {
+                class: "dialog-card",
+                onclick: move |e: MouseEvent| e.stop_propagation(),
+                div { style: "flex:none;display:flex;align-items:center;gap:10px",
+                    span {
+                        style: "font-weight:700;font-size:20px;line-height:1.2;\
+                                font-family:var(--font-heading)",
+                        "Подписка"
+                    }
+                    div { style: "margin-left:auto",
+                        IconButton {
+                            title: "Закрыть — Esc",
+                            enabled: true,
+                            onclick: move |_| *SUB_DRAFT.write() = None,
+                            icon: rsx! { crate::icons::Close { size: 16, color: MUTED } },
+                        }
+                    }
+                }
+
+                div { class: "dialog-body",
+                    if let Some(problem) = &draft.problem {
+                        span {
+                            style: "flex:none;font-size:13px;line-height:1.45;color:#f2a7ad;\
+                                    word-break:break-word",
+                            "{problem}"
+                        }
+                    }
+
+                    div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+                        span { style: LABEL, "Название" }
+                        input {
+                            class: "field",
+                            r#type: "text",
+                            value: "{draft.name}",
+                            placeholder: "пусто — как назовёт провайдер",
+                            autocomplete: "off",
+                            spellcheck: "false",
+                            style: "padding:8px 10px;border-radius:4px;border:none;\
+                                    color:var(--color-text);font-size:14px",
+                            onmounted: move |e: MountedEvent| async move {
+                                let _ = e.data().set_focus(true).await;
+                            },
+                            oninput: move |e| {
+                                if let Some(open) = SUB_DRAFT.write().as_mut() {
+                                    open.name = e.value();
+                                }
+                            },
+                            onkeydown: move |e: KeyboardEvent| {
+                                if e.key() == Key::Enter {
+                                    e.prevent_default();
+                                    save_on_name();
+                                }
+                            },
+                        }
+                        span {
+                            style: "font-size:12.5px;line-height:1.5;color:var(--color-neutral-600)",
+                            "Своё название остаётся и после обновлений. Без него подписку называет \
+                             провайдер, а пока он не назвал — адрес."
+                        }
+                    }
+
+                    div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+                        span { style: LABEL, "Адрес" }
+                        input {
+                            class: "field",
+                            r#type: "text",
+                            value: "{draft.url}",
+                            placeholder: "{address_hint}",
+                            autocomplete: "off",
+                            spellcheck: "false",
+                            style: "padding:8px 10px;border-radius:4px;border:none;\
+                                    color:var(--color-text);font-size:14px;\
+                                    font-family:ui-monospace,Consolas,monospace",
+                            oninput: move |e| {
+                                if let Some(open) = SUB_DRAFT.write().as_mut() {
+                                    open.url = e.value();
+                                    open.problem = None;
+                                }
+                            },
+                            onkeydown: move |e: KeyboardEvent| {
+                                if e.key() == Key::Enter {
+                                    e.prevent_default();
+                                    save_on_url();
+                                }
+                            },
+                        }
+                        span {
+                            style: "font-size:12.5px;line-height:1.5;color:var(--color-neutral-600)",
+                            "Целиком адрес не показывается: в нём ваш личный токен. Пустое поле \
+                             оставляет прежний, а с новым список загрузится сразу."
+                        }
+                        div { style: "display:flex;padding-top:2px",
+                            Button {
+                                label: "Скопировать адрес",
+                                enabled: true,
+                                onclick: copy,
+                                icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
+                            }
+                        }
+                    }
+                }
+
+                div { style: "flex:none;display:flex;align-items:center;gap:8px;padding-top:2px",
+                    span {
+                        style: "margin-left:auto;font-size:12px;color:var(--color-neutral-700);\
+                                white-space:nowrap",
+                        "Enter — сохранить"
+                    }
+                    Button {
+                        label: "Отмена",
+                        enabled: true,
+                        onclick: move |_| *SUB_DRAFT.write() = None,
+                        icon: rsx! { crate::icons::Close { size: 15, color: MUTED } },
+                    }
+                    Button {
+                        label: "Сохранить",
+                        enabled: true,
+                        onclick: move |_| save(),
+                        icon: rsx! { crate::icons::Check { size: 15, color: ACCENT } },
+                    }
                 }
             }
         }

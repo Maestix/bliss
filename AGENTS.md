@@ -433,6 +433,24 @@ These cost the most time on this project. None of them announce themselves.
   messages, so a failed fetch is described by kind after `without_url` and never
   shown as reqwest wrote it (`subscription::describe`). A finished fetch goes
   back to the engine loop as `FetchDone`, whose `Debug` shows the id alone.
+  - **A subscription can be renamed, given a new address, and copied** — the
+    user found it could only be refreshed or deleted. The editor
+    (`SubscriptionEditor`) starts with the address box empty and the host as
+    its placeholder: the window still never shows the token, a new address
+    replaces the old (`Command::EditSubscription`, the address in a `Link`),
+    and the old one is had whole only from «Скопировать адрес», which puts it
+    on the clipboard from the engine (`CopySubscription`), since the frame
+    never holds it.
+  - **A name given in the window stays.** The provider's `profile-title`
+    replaced the name at every update, so a rename would have lasted twelve
+    hours; `renamed = true`, written only when it is, keeps it, and an empty
+    name hands the naming back (`edit_subscription`,
+    `a_subscription_is_renamed_and_moved_in_place`, seen failing without the
+    flag).
+  - **A list from an old address is dropped.** `FetchDone` carries the address
+    it fetched; one that lands after an edit moved the subscription is not
+    applied to it, and the fetch from the new address keeps the card's
+    "loading".
 - **Assume another bliss shares the work dir** — a test run, a stray copy, the
   user's own instance. `bliss.log` is appended, and trimmed only if an open with
   `share_mode(0)` succeeds, because Rust opens files with `FILE_SHARE_DELETE` and
@@ -1388,7 +1406,8 @@ and `profile-title`, a refresh every 12 hours, through the tunnel when it is
 up); zoom with the window size; no console window; deleting servers, a
 subscription's servers grouped under its name, a rule filter for the
 connections table, and log levels in colour; a settings screen, which so far
-starts bliss with Windows, minimized or not; scrollbars that draw only a thumb;
+starts bliss with Windows, minimized or not; subscriptions renamed, given a
+new address and copied; scrollbars that draw only a thumb;
 the traffic chart as a gliding curve with the rate under the pointer; the tray,
 which the window hides into and whose menu bliss draws itself; one window at a
 time, a second copy leaving at once (rule 24); links for every kind of

@@ -143,7 +143,8 @@ enabled = false
 # the window (the Subscriptions screen, or Ctrl+V anywhere) and fetched again
 # every 12 hours. Their servers are ordinary [[server]] entries whose `group` is
 # the subscription's `id`. The address carries a personal token: it is as secret
-# as a link.
+# as a link. The name is the provider's title, renewed with every update, until
+# it is changed in the window, which writes `renamed = true` beside it.
 #
 # [[subscription]]
 # id = "18f3a2b4c5d"

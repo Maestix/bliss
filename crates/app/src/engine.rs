@@ -274,6 +274,9 @@ pub struct Toast {
 /// Its links are credentials, and `Command` is `Debug`: this shows the id alone.
 pub struct FetchDone {
     id: String,
+    /// The address it was fetched from. An edit can give the subscription
+    /// another while this one is on its way, and then this list is not its.
+    url: String,
     result: Result<crate::subscription::Fetched, String>,
     /// Asked for in the window, rather than a background refresh: only then is
     /// the outcome worth interrupting anyone with.
@@ -388,6 +391,16 @@ pub enum Command {
     /// Fetch one subscription again, or every one.
     Refresh(Option<String>),
     DeleteSubscription(String),
+    /// Give a subscription a name of its own (an empty one hands the naming
+    /// back to its provider), and a new address if `url` holds one.
+    EditSubscription {
+        id: String,
+        name: String,
+        url: Option<Link>,
+    },
+    /// Put a subscription's whole address on the clipboard: the window never
+    /// has it, since only its host is shown.
+    CopySubscription(String),
     /// Remove the server at this place in the list. Its tag travels with the
     /// index, so a list that changed in the meantime is noticed rather than
     /// the server that moved into that place deleted.
@@ -1205,6 +1218,79 @@ async fn drive(
                             Err(e) => toaster.show(&frames, e, true),
                         }
                     }
+                    Command::EditSubscription { id, name, url } => {
+                        let mut next = setup.profile.clone();
+                        let edited = crate::profile_file::edit_subscription(
+                            &mut next,
+                            &id,
+                            &name,
+                            url.as_ref().map(|url| url.0.as_str()),
+                        )
+                        .and_then(|edited| save_profile(&mut store, &next).map(|()| edited));
+                        match edited {
+                            Ok(edited) => {
+                                if let Some(before) = &edited.renamed_from {
+                                    tracing::info!("subscription renamed: {before} -> {}", edited.name);
+                                }
+                                if edited.moved {
+                                    tracing::info!("subscription {}: a new address", edited.name);
+                                }
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                // Its servers' rows carry its name; their
+                                // pings stay where they are.
+                                frames.send_modify(|f| {
+                                    for row in &mut f.servers {
+                                        if row.group_id.as_deref() == Some(id.as_str()) {
+                                            row.group = Some(edited.name.clone());
+                                        }
+                                    }
+                                });
+                                // A new address has its own list, and a name
+                                // handed back comes with the provider's.
+                                if edited.moved || edited.unnamed {
+                                    if edited.moved {
+                                        problems.remove(&id);
+                                        // One on its way from the old address is
+                                        // dropped when it lands (`Fetched`).
+                                        fetching.remove(&id);
+                                    }
+                                    refresh(
+                                        &setup.profile,
+                                        Some(&id),
+                                        false,
+                                        true,
+                                        &mut fetching,
+                                        via(running.as_ref()),
+                                        &own,
+                                    );
+                                }
+                                publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                                let text = if edited.moved {
+                                    format!("Подписка «{}»: новый адрес, загружаю список", edited.name)
+                                } else {
+                                    format!("Подписка «{}» сохранена", edited.name)
+                                };
+                                toaster.show(&frames, text, false);
+                            }
+                            Err(e) => toaster.show(&frames, e, true),
+                        }
+                    }
+                    Command::CopySubscription(id) => {
+                        match setup.profile.subscriptions.iter().find(|s| s.id == id) {
+                            Some(subscription) if crate::clipboard::copy(&subscription.url) => toaster.show(
+                                &frames,
+                                format!("Адрес подписки «{}» скопирован", subscription.name),
+                                false,
+                            ),
+                            Some(_) => toaster.show(
+                                &frames,
+                                "Не удалось скопировать: буфер обмена занят другой программой",
+                                true,
+                            ),
+                            None => toaster.show(&frames, "этой подписки уже нет", true),
+                        }
+                    }
                     Command::DeleteServer { index, tag } => {
                         let links = links_of(&setup.profile);
                         let was = links.get(selected).cloned();
@@ -1253,17 +1339,28 @@ async fn drive(
                         }
                     }
                     Command::Fetched(done) => {
-                        fetching.remove(&done.id);
-                        let Some(name) = setup
+                        let Some(subscription) = setup
                             .profile
                             .subscriptions
                             .iter()
                             .find(|subscription| subscription.id == done.id)
-                            .map(|subscription| subscription.name.clone())
                         else {
                             // Deleted while the fetch was on its way.
+                            fetching.remove(&done.id);
                             continue;
                         };
+                        if subscription.url != done.url {
+                            // From the address it had before an edit; the
+                            // fetch from the new one is on its way, and still
+                            // fetching.
+                            tracing::info!(
+                                "subscription {}: a list from its old address was dropped",
+                                subscription.name
+                            );
+                            continue;
+                        }
+                        let name = subscription.name.clone();
+                        fetching.remove(&done.id);
                         let outcome = done.result.and_then(|fetched| {
                             let mut next = setup.profile.clone();
                             let now = jiff::Timestamp::now().as_second();
@@ -2186,7 +2283,12 @@ fn fetch_subscription(
             result = crate::subscription::fetch(&url, None).await;
         }
         if let Some(own) = own.upgrade() {
-            let _ = own.send(Command::Fetched(FetchDone { id, result, asked }));
+            let _ = own.send(Command::Fetched(FetchDone {
+                id,
+                url,
+                result,
+                asked,
+            }));
         }
     });
 }

@@ -91,6 +91,14 @@ pub struct Subscription {
     /// Traffic used and the expiry date, as the provider last reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// The name was given in the window, so a provider's title no longer
+    /// replaces it at every update. Written only when it was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub renamed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Subscription {
@@ -116,6 +124,7 @@ impl std::fmt::Debug for Subscription {
             .field("url", &self.shown_url())
             .field("updated", &self.updated)
             .field("usage", &self.usage)
+            .field("renamed", &self.renamed)
             .finish()
     }
 }
@@ -297,6 +306,7 @@ mod tests {
             url: "https://sub.example:2096/api/sub/SECRETTOKEN?x=SECRETQUERY".to_owned(),
             updated: None,
             usage: None,
+            renamed: false,
         };
         let shown = format!("{subscription:?}");
         assert!(!shown.contains("SECRET"), "{shown}");

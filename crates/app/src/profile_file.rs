@@ -593,19 +593,101 @@ pub fn add_subscription(
         .map(|n| format!("{n:x}"))
         .find(|id| !profile.subscriptions.iter().any(|s| &s.id == id))
         .expect("some id is free");
-    let name = reqwest::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "подписка".to_owned());
     let subscription = Subscription {
         id,
-        name,
+        name: host_name(url),
         url: url.to_owned(),
         updated: None,
         usage: None,
+        renamed: false,
     };
     profile.subscriptions.push(subscription.clone());
     Ok(subscription)
+}
+
+/// What a subscription is called before its provider says: the address's
+/// host, which is the part of it that is not secret.
+fn host_name(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "подписка".to_owned())
+}
+
+/// What an edit changed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Edited {
+    /// What it is called now.
+    pub name: String,
+    /// What it was called, when that changed.
+    pub renamed_from: Option<String>,
+    /// The address changed: until a list from the new one arrives, its
+    /// servers are the old one's.
+    pub moved: bool,
+    /// The name was handed back to the provider, whose title comes with the
+    /// next list.
+    pub unnamed: bool,
+}
+
+/// Change a subscription's name, its address, or both.
+///
+/// A name given here is kept: the provider's title, which replaced the name
+/// at every update, no longer does. An empty one hands the naming back — the
+/// address's host until the provider's title arrives. A new address keeps
+/// the servers until a list from it replaces them, and drops what the old
+/// one said about traffic and dates; `None`, or the same address, leaves it.
+pub fn edit_subscription(
+    profile: &mut Profile,
+    id: &str,
+    name: &str,
+    url: Option<&str>,
+) -> Result<Edited, String> {
+    let at = profile
+        .subscriptions
+        .iter()
+        .position(|s| s.id == id)
+        .ok_or_else(|| "этой подписки уже нет".to_owned())?;
+    let url = match url.map(str::trim).filter(|url| !url.is_empty()) {
+        None => None,
+        Some(text) => {
+            let url = subscription_address(text).ok_or_else(|| {
+                "это не адрес подписки: нужен один адрес, начинающийся с http:// или https://"
+                    .to_owned()
+            })?;
+            if let Some(other) = profile
+                .subscriptions
+                .iter()
+                .find(|s| s.url == url && s.id != id)
+            {
+                return Err(format!("этот адрес уже у подписки «{}»", other.name));
+            }
+            (url != profile.subscriptions[at].url).then_some(url)
+        }
+    };
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let subscription = &mut profile.subscriptions[at];
+    let before = subscription.name.clone();
+    let moved = url.is_some();
+    if let Some(url) = url {
+        subscription.url = url;
+        subscription.updated = None;
+        subscription.usage = None;
+    }
+    let unnamed = name.is_empty();
+    if unnamed {
+        subscription.renamed = false;
+        subscription.name = host_name(&subscription.url);
+    } else if name != subscription.name {
+        subscription.renamed = true;
+        subscription.name = name;
+    }
+    Ok(Edited {
+        name: subscription.name.clone(),
+        renamed_from: (subscription.name != before).then_some(before),
+        moved,
+        unnamed,
+    })
 }
 
 /// What an update did.
@@ -674,7 +756,8 @@ pub fn apply_subscription(
     };
 
     let subscription = &mut profile.subscriptions[at];
-    if let Some(title) = &fetched.title {
+    // The provider's title, unless the window gave it a name of its own.
+    if let Some(title) = fetched.title.as_ref().filter(|_| !subscription.renamed) {
         subscription.name = title.clone();
     }
     if fetched.usage.is_some() {
@@ -1228,6 +1311,94 @@ mod tests {
         assert!(apply_subscription(&mut profile, "abc", &fetched(&second, None), 300).is_err());
     }
 
+    /// A name given in the window outlives the provider's title, and an empty
+    /// one hands the naming back. A new address keeps the servers until its
+    /// list comes; one another subscription has, or that is no address at
+    /// all, is refused with nothing changed.
+    #[test]
+    fn a_subscription_is_renamed_and_moved_in_place() {
+        let mut profile = Profile::default();
+        let first = add_subscription(&mut profile, "https://sub.example/api/sub/TOKEN", 0xa)
+            .expect("added");
+        add_subscription(&mut profile, "https://other.example/x", 0xb).expect("added");
+        let list = [server_link("s1.example")];
+        apply_subscription(
+            &mut profile,
+            &first.id,
+            &fetched(&list, Some("Провайдер")),
+            100,
+        )
+        .expect("applied");
+
+        let edited =
+            edit_subscription(&mut profile, "a", "  Мой   провайдер ", None).expect("renamed");
+        assert_eq!(
+            edited,
+            Edited {
+                name: "Мой провайдер".to_owned(),
+                renamed_from: Some("Провайдер".to_owned()),
+                moved: false,
+                unnamed: false,
+            }
+        );
+        let refreshed =
+            apply_subscription(&mut profile, "a", &fetched(&list, Some("Провайдер")), 200)
+                .expect("applied");
+        assert_eq!(
+            refreshed.name, "Мой провайдер",
+            "the provider's title no longer replaces it"
+        );
+        let same = edit_subscription(&mut profile, "a", "Мой провайдер", None).expect("kept");
+        assert_eq!(same.renamed_from, None, "the same name is no rename");
+
+        let moved = edit_subscription(
+            &mut profile,
+            "a",
+            "Мой провайдер",
+            Some(" https://new.example/sub/NEWTOKEN "),
+        )
+        .expect("moved");
+        assert!(moved.moved);
+        let subscription = &profile.subscriptions[0];
+        assert_eq!(subscription.url, "https://new.example/sub/NEWTOKEN");
+        assert_eq!((subscription.updated, subscription.usage), (None, None));
+        assert_eq!(
+            profile
+                .servers
+                .iter()
+                .filter(|s| s.group.as_deref() == Some("a"))
+                .count(),
+            1,
+            "its servers wait for the new address's list"
+        );
+        let again = edit_subscription(
+            &mut profile,
+            "a",
+            "Мой провайдер",
+            Some("https://new.example/sub/NEWTOKEN"),
+        )
+        .expect("the same address");
+        assert!(!again.moved);
+
+        let taken = edit_subscription(&mut profile, "a", "x", Some("https://other.example/x"))
+            .expect_err("another subscription's");
+        assert!(taken.contains("other.example"), "{taken}");
+        assert!(edit_subscription(&mut profile, "a", "x", Some(FIRST)).is_err());
+        assert!(edit_subscription(&mut profile, "zz", "x", None).is_err());
+        assert_eq!(profile.subscriptions[0].name, "Мой провайдер");
+
+        let unnamed = edit_subscription(&mut profile, "a", "  ", None).expect("unnamed");
+        assert!(unnamed.unnamed);
+        assert_eq!(
+            unnamed.name, "new.example",
+            "the host, until the title comes"
+        );
+        let refreshed =
+            apply_subscription(&mut profile, "a", &fetched(&list, Some("Провайдер")), 300)
+                .expect("applied");
+        assert_eq!(refreshed.name, "Провайдер");
+    }
+
     /// Subscriptions, usage and groups have to survive the whole-file rewrite.
     #[test]
     fn a_profile_with_a_subscription_reads_back() {
@@ -1235,6 +1406,7 @@ mod tests {
         let mut profile = Profile::default();
         let subscription =
             add_subscription(&mut profile, "https://sub.example/api/TOKEN", 7).expect("added");
+        add_subscription(&mut profile, "https://other.example/api/TOKEN", 8).expect("added");
         apply_subscription(
             &mut profile,
             &subscription.id,
@@ -1242,8 +1414,15 @@ mod tests {
             1_700_000_000,
         )
         .expect("applied");
+        edit_subscription(&mut profile, &subscription.id, "Свой", None).expect("renamed");
         Store::new(path.clone()).save(&profile).expect("saved");
 
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert_eq!(
+            text.matches("renamed = true").count(),
+            1,
+            "written for the one renamed, and only for it"
+        );
         let back = read(&path).expect("parses").expect("exists");
         assert_eq!(back.subscriptions, profile.subscriptions);
         assert_eq!(
