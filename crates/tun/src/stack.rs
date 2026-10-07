@@ -12,7 +12,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bliss_core::{Route, Serving, Target, relay};
+use bliss_core::{Decision, Route, Serving, Target, relay};
 use ipstack::{
     IpStack, IpStackConfig, IpStackStream, IpStackTcpStream, IpStackUdpStream, TcpConfig,
 };
@@ -102,7 +102,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     let target = Target::Socket(client.peer_addr());
     let process = bliss_core::name_for_port(client.local_addr().port());
     // One table decides this connection, whatever changes while it is open.
-    let decision = serving.router().decide(&target, process.as_deref());
+    let decision = decide(serving, &target, process.as_deref());
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: {target} blocked by {}", decision.rule);
@@ -119,7 +119,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
 
     let upstream = match decision.route {
         Route::Direct => dial_direct(client.peer_addr(), *gateway).await,
-        _ => serving.outbound.connect_tcp(&target).await,
+        route => serving.dial_tunnelled(route, &target).await,
     };
     let upstream = match upstream {
         Ok(upstream) => upstream,
@@ -158,7 +158,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let Carrying { serving, gateway } = &*carrying;
     let target = Target::Socket(client.peer_addr());
     let process = bliss_core::name_for_datagram_port(client.local_addr().port());
-    let decision = serving.router().decide(&target, process.as_deref());
+    let decision = decide(serving, &target, process.as_deref());
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: udp {target} blocked by {}", decision.rule);
@@ -174,7 +174,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
 
     let upstream = match decision.route {
         Route::Direct => bind_direct(client.peer_addr(), *gateway).await,
-        _ => serving.outbound.bind_udp(&target).await,
+        route => serving.bind_tunnelled(route, &target).await,
     };
     let upstream = match upstream {
         Ok(upstream) => upstream,
@@ -199,6 +199,26 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let result = bliss_core::relay_datagrams(client, upstream, Arc::clone(&conn)).await;
     serving.tracker.close(id);
     result
+}
+
+/// Programs whose own connections carry a VPN beside the tunnel.
+///
+/// OpenVPN's connection to its server is another program's socket, so the
+/// adapter catches it like any other. Decided by the rules, it would usually
+/// go through the proxy server — a work network reached by way of a server
+/// abroad, if the work server takes connections from there at all.
+const VPN_PROGRAMS: [&str; 1] = ["openvpn.exe"];
+
+/// The rules' answer, except for the VPN's own connections, which leave the
+/// ordinary way whatever the rules say.
+fn decide(serving: &Serving, target: &Target, process: Option<&str>) -> Decision {
+    if process.is_some_and(|p| VPN_PROGRAMS.iter().any(|v| p.eq_ignore_ascii_case(v))) {
+        return Decision {
+            route: Route::Direct,
+            rule: "OpenVPN, мимо туннеля".to_owned(),
+        };
+    }
+    serving.router().decide(target, process)
 }
 
 /// A flow that goes out the ordinary way, past the tunnel.
@@ -263,5 +283,41 @@ async fn dial_direct(
                 bliss_core::DIAL_TIMEOUT
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bliss_core::{EngineInfo, Router, SocksOutbound, Tracker};
+
+    use super::*;
+
+    /// OpenVPN's own connection to its server leaves the ordinary way, whatever
+    /// the rules say: through the tunnel it would reach the work network by way
+    /// of the proxy server, if at all.
+    #[test]
+    fn the_vpns_own_connection_goes_around_the_tunnel() {
+        let serving = Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().expect("an address"),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::proxy_everything()),
+        );
+        let target = Target::Socket("203.0.113.9:1194".parse().expect("an address"));
+        assert_eq!(
+            decide(&serving, &target, Some("OpenVPN.exe")).route,
+            Route::Direct
+        );
+        assert_eq!(
+            decide(&serving, &target, Some("chrome.exe")).route,
+            Route::Proxy
+        );
+        assert_eq!(decide(&serving, &target, None).route, Route::Proxy);
     }
 }

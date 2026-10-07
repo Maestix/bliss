@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bliss_core::{EngineInfo, Inbound, Router, Serving, SocksOutbound, Tracker};
+use bliss_core::{EngineInfo, Inbound, Outbound, Router, Serving, SocksOutbound, Through, Tracker};
 use bliss_proto::{
     Action, Flow, Profile, Protocol, ProxyMode, Rule, Security, ServerConfig, TcpHeader, Transport,
     Usage,
@@ -191,6 +191,33 @@ pub struct Frame {
     pub startup: crate::startup::Startup,
     /// The TUN adapter: asked for, allowed, and whether it is carrying.
     pub tun: TunView,
+    /// The VPN beside the tunnel.
+    pub vpn: VpnView,
+}
+
+/// The VPN beside the tunnel, as the window shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VpnView {
+    /// The profile's name, once one has been added.
+    pub name: Option<String>,
+    /// What the profile asks for: the switch.
+    pub on: bool,
+    pub state: VpnState,
+    /// Whether OpenVPN's service is there to start it.
+    pub service: bliss_openvpn::Availability,
+}
+
+/// Where the VPN's connection is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum VpnState {
+    #[default]
+    Off,
+    /// On its way up, and the step it is on, in words.
+    Connecting(String),
+    /// Up, with its address on the work network.
+    Up(String),
+    /// It could not come up, or went down, and why.
+    Failed(String),
 }
 
 /// What the settings screen says about carrying the machine's traffic.
@@ -383,6 +410,39 @@ pub enum Command {
     Tun(bool),
     /// An adapter finished coming up. Only the engine sends this, to itself.
     TunUp(Box<TunRaised>),
+    /// Keep the VPN beside the tunnel connected, or not: its switch.
+    Vpn(bool),
+    /// A profile for the VPN — a file chosen in the window, or text pasted —
+    /// in place of any before it, and switched on.
+    AddVpn {
+        name: String,
+        profile: Secret,
+    },
+    /// Take the VPN away, profile and all.
+    ForgetVpn,
+    /// A line from the window itself, for the bottom of the window: a file
+    /// that could not be read is the window's to explain.
+    Say {
+        text: String,
+        bad: bool,
+    },
+    /// Something happened to the VPN's connection. Only the engine sends this,
+    /// to itself; `session` tells the events of a connection being replaced
+    /// from those of the one replacing it.
+    VpnEvent {
+        session: u64,
+        event: bliss_openvpn::Event,
+    },
+}
+
+/// Text with a key in it: an OpenVPN profile on its way into the profile.
+/// Like a `Link`, its `Debug` says nothing of it.
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
 }
 
 /// An adapter on its way back into the loop, and the tunnel it was built for.
@@ -539,6 +599,7 @@ fn initial_frame(setup: &Setup) -> Frame {
             carrying: false,
             problem: None,
         },
+        vpn: vpn_view(&setup.profile, VpnState::Off),
         ..Frame::default()
     };
     if let Some(server) = setup.server(setup.selected) {
@@ -743,6 +804,13 @@ async fn drive(
     let mut rules = Rules::from_setup(&setup);
     publish_routing(&frames, &rules, setup.tun);
 
+    // The VPN beside the tunnel lives here too, and for the same reason: it is
+    // up or down on its own switch, whatever the tunnel does.
+    let mut vpn = VpnLink::default();
+    if setup.profile.vpn.as_ref().is_some_and(|v| v.enabled) {
+        vpn.connect(&setup, &own, &frames);
+    }
+
     // One sweep at the start, so the list arrives with numbers in it rather
     // than with a column of dashes waiting for someone to discover the button.
     ping_all(&setup.servers, &frames, &probes);
@@ -751,7 +819,7 @@ async fn drive(
         running = start(
             &setup,
             selected,
-            wiring(&tracker, &rules.router, &frames, &own),
+            wiring(&tracker, &rules.router, &vpn.way, &frames, &own),
         )
         .await;
     }
@@ -764,7 +832,7 @@ async fn drive(
                 match command {
                     Command::Start => {
                         if running.is_none() {
-                            running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
+                            running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
@@ -781,7 +849,7 @@ async fn drive(
                             stop_now(&mut running, &frames).await;
                             apply_proxy(proxy, &setup, false, &frames);
                         } else if running.is_none() {
-                            running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
+                            running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
                     }
@@ -789,7 +857,7 @@ async fn drive(
                         if let Some(parts) = running.take() {
                             parts.stop().await;
                         }
-                        running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
+                        running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                         apply_proxy(proxy, &setup, running.is_some(), &frames);
                     }
                     // Switching server means rebuilding the engine: its config
@@ -826,7 +894,7 @@ async fn drive(
                                 }
                             });
                             if resume {
-                                running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
+                                running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                             }
                             apply_proxy(proxy, &setup, running.is_some(), &frames);
                         }
@@ -978,6 +1046,25 @@ async fn drive(
                             Err(e) => toaster.show(&frames, format!("правило не сохранилось: {e}"), true),
                         }
                     }
+                    // An OpenVPN profile pasted, or put in the add-server
+                    // form: the VPN's, not a list of servers.
+                    Command::Import { text, from_form } if bliss_openvpn::looks_like(&text.0) => {
+                        attempts += 1;
+                        let attempt = attempts;
+                        let outcome = add_vpn(&mut setup, &mut store, &frames, "OpenVPN", text.0).map(|name| {
+                            vpn.disconnect(running.as_ref());
+                            vpn.connect(&setup, &own, &frames);
+                            format!("Профиль «{name}» добавлен, подключаюсь…")
+                        });
+                        if from_form {
+                            frames.send_modify(|f| f.added = Some(Added { attempt, outcome }));
+                        } else {
+                            match outcome {
+                                Ok(text) => toaster.show(&frames, text, false),
+                                Err(why) => toaster.show(&frames, why, true),
+                            }
+                        }
+                    }
                     Command::Import { text, from_form } => {
                         attempts += 1;
                         let attempt = attempts;
@@ -1044,7 +1131,7 @@ async fn drive(
                             // The first server is what the window was waiting
                             // for. Connect, as opening it with one already would.
                             if first && setup.autostart && running.is_none() {
-                                running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
+                                running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                                 apply_proxy(proxy, &setup, running.is_some(), &frames);
                             }
                         }
@@ -1093,7 +1180,7 @@ async fn drive(
                                     false,
                                 );
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &frames, &own), proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy)
                                         .await;
                                 }
                             }
@@ -1140,7 +1227,7 @@ async fn drive(
                                 // The rows came back without their numbers.
                                 ping_all(&setup.servers, &frames, &probes);
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &frames, &own), proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy)
                                         .await;
                                 }
                             }
@@ -1183,10 +1270,10 @@ async fn drive(
                                 // The rows came back without their numbers.
                                 ping_all(&setup.servers, &frames, &probes);
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &frames, &own), proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy)
                                         .await;
                                 } else if first && setup.autostart && running.is_none() && !setup.servers.is_empty() {
-                                    running = start(&setup, selected, wiring(&tracker, &rules.router, &frames, &own)).await;
+                                    running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                                     apply_proxy(proxy, &setup, running.is_some(), &frames);
                                 }
                             }
@@ -1271,7 +1358,13 @@ async fn drive(
                             }
                         }
                     }
-                    Command::ReadStartup => publish_startup(&frames, &startup_keys, exe.as_deref().ok()),
+                    Command::ReadStartup => {
+                        publish_startup(&frames, &startup_keys, exe.as_deref().ok());
+                        // The settings screen asks when it opens, and OpenVPN
+                        // may have been installed since bliss started.
+                        let state = frames.borrow().vpn.state.clone();
+                        publish_vpn(&frames, &setup.profile, state);
+                    }
                     Command::Tun(on) => {
                         if setup.profile.tun.enabled != on {
                             let mut next = setup.profile.clone();
@@ -1327,6 +1420,72 @@ async fn drive(
                             toaster.show(&frames, note.to_owned(), true);
                         }
                     }
+                    Command::Vpn(on) => {
+                        let Some(asked) = setup.profile.vpn.as_ref().map(|v| v.enabled) else {
+                            continue;
+                        };
+                        if asked != on {
+                            let mut next = setup.profile.clone();
+                            if let Some(profile) = next.vpn.as_mut() {
+                                profile.enabled = on;
+                            }
+                            match save_profile(&mut store, &next) {
+                                Ok(()) => {
+                                    setup.profile = next;
+                                    forget_problem(&mut setup, &frames);
+                                }
+                                Err(e) => {
+                                    toaster.show(&frames, format!("выбор не сохранился: {e}"), true);
+                                    continue;
+                                }
+                            }
+                        }
+                        if on {
+                            if vpn.session.is_none() {
+                                vpn.connect(&setup, &own, &frames);
+                            }
+                        } else {
+                            vpn.disconnect(running.as_ref());
+                            publish_vpn(&frames, &setup.profile, VpnState::Off);
+                        }
+                    }
+                    Command::AddVpn { name, profile } => {
+                        match add_vpn(&mut setup, &mut store, &frames, &name, profile.0) {
+                            Ok(name) => {
+                                vpn.disconnect(running.as_ref());
+                                vpn.connect(&setup, &own, &frames);
+                                toaster.show(&frames, format!("Профиль «{name}» добавлен, подключаюсь…"), false);
+                            }
+                            Err(why) => toaster.show(&frames, why, true),
+                        }
+                    }
+                    Command::ForgetVpn => {
+                        if setup.profile.vpn.is_none() {
+                            continue;
+                        }
+                        let mut next = setup.profile.clone();
+                        next.vpn = None;
+                        match save_profile(&mut store, &next) {
+                            Ok(()) => {
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                vpn.disconnect(running.as_ref());
+                                publish_vpn(&frames, &setup.profile, VpnState::Off);
+                                tracing::info!("vpn: the profile is gone");
+                                toaster.show(&frames, "Рабочий VPN удалён", false);
+                            }
+                            Err(e) => toaster.show(&frames, format!("VPN не удалился: {e}"), true),
+                        }
+                    }
+                    Command::Say { text, bad } => toaster.show(&frames, text, bad),
+                    Command::VpnEvent { session, event } => {
+                        // One being replaced still reports as it goes; only
+                        // the current one speaks for the VPN.
+                        if session != vpn.number {
+                            continue;
+                        }
+                        vpn.hear(event, &setup, running.as_ref(), &frames, &mut toaster);
+                    }
                 }
             }
             _ = ticker.tick() => {
@@ -1371,6 +1530,9 @@ async fn drive(
     if let Some(parts) = running.take() {
         parts.stop().await;
     }
+    // Asked to go, so its routes go with it. Had bliss simply died, OpenVPN
+    // would have left anyway, on the management connection closing.
+    vpn.shut().await;
     // Belt: the window also restores on its way out, and the startup check is
     // the braces. This covers the ordinary case of the channel closing.
     let _ = bliss_core::sysproxy::restore(&setup.work_dir);
@@ -1445,6 +1607,250 @@ impl Running {
             let _ = tokio::task::spawn_blocking(move || drop(tun)).await;
         }
         let _ = self.xray.shutdown().await;
+    }
+}
+
+// --- the VPN beside the tunnel ------------------------------------------------
+
+/// The VPN beside the tunnel, as the engine loop holds it.
+///
+/// It is not part of `Running`: it has a switch of its own, and a tunnel
+/// stopped or restarted for a server leaves it where it is. What the two
+/// share is `Serving`, which is handed the way through the VPN when it comes
+/// up — or at the start, through `Wiring`, when the VPN was up first.
+#[derive(Default)]
+struct VpnLink {
+    /// Its connection, while there is one.
+    session: Option<bliss_openvpn::Session>,
+    /// Which connection that is. Counts up with every start, so the events
+    /// of one being replaced are told from its successor's.
+    number: u64,
+    /// The way through it, while it is up.
+    way: Option<Arc<dyn Outbound>>,
+    /// One on its way out, which the next waits for.
+    leaving: Option<bliss_openvpn::Leaving>,
+}
+
+impl VpnLink {
+    /// Start a connection from the profile's `[vpn]`, once any before it has
+    /// gone. The loop does not wait: what happens comes back as `VpnEvent`.
+    fn connect(
+        &mut self,
+        setup: &Setup,
+        own: &mpsc::WeakUnboundedSender<Command>,
+        frames: &watch::Sender<Frame>,
+    ) {
+        let Some(profile) = setup.profile.vpn.as_ref() else {
+            return;
+        };
+        if let Some(old) = self.session.take() {
+            self.leaving = Some(old.leave());
+        }
+        self.number += 1;
+        let number = self.number;
+        let own = own.clone();
+        self.session = Some(bliss_openvpn::Session::start(
+            profile.openvpn.clone(),
+            setup.work_dir.join("openvpn"),
+            self.leaving.take(),
+            move |event| {
+                if let Some(own) = own.upgrade() {
+                    let _ = own.send(Command::VpnEvent {
+                        session: number,
+                        event,
+                    });
+                }
+            },
+        ));
+        tracing::info!("vpn: connecting «{}»", profile.name);
+        publish_vpn(
+            frames,
+            &setup.profile,
+            VpnState::Connecting("запускаю OpenVPN".to_owned()),
+        );
+    }
+
+    /// Let it go: a rule's connections have no way there from now on, and
+    /// OpenVPN is asked to leave without the loop waiting for it.
+    fn disconnect(&mut self, running: Option<&Running>) {
+        self.lose_way(running);
+        if let Some(old) = self.session.take() {
+            self.leaving = Some(old.leave());
+        }
+    }
+
+    /// No way through: a connection a rule sends there is refused, not sent
+    /// some other way.
+    fn lose_way(&mut self, running: Option<&Running>) {
+        self.way = None;
+        if let Some(parts) = running {
+            parts.serving.set_vpn(None);
+        }
+    }
+
+    /// Act on what the current connection reports.
+    fn hear(
+        &mut self,
+        event: bliss_openvpn::Event,
+        setup: &Setup,
+        running: Option<&Running>,
+        frames: &watch::Sender<Frame>,
+        toaster: &mut Toaster,
+    ) {
+        use bliss_openvpn::Event;
+        match event {
+            Event::Step(step) => publish_vpn(
+                frames,
+                &setup.profile,
+                VpnState::Connecting(step_words(&step).to_owned()),
+            ),
+            Event::Up { local, dns } => match bliss_core::interface::index_of(local) {
+                Ok(Some(index)) => {
+                    let way: Arc<dyn Outbound> = Arc::new(Through::new(
+                        index,
+                        local,
+                        dns.clone(),
+                        EngineInfo {
+                            kind: "OpenVPN",
+                            version: String::new(),
+                            external: true,
+                        },
+                    ));
+                    if let Some(parts) = running {
+                        parts.serving.set_vpn(Some(Arc::clone(&way)));
+                    }
+                    self.way = Some(way);
+                    tracing::info!(
+                        "vpn: up as {local} on interface {index}, with {} DNS server(s)",
+                        dns.len()
+                    );
+                    if dns.is_empty() {
+                        tracing::warn!(
+                            "vpn: the server offered no DNS server, so names are looked up by \
+                             the machine's own, which knows no names inside the work network"
+                        );
+                    }
+                    let was_up = matches!(frames.borrow().vpn.state, VpnState::Up(_));
+                    publish_vpn(frames, &setup.profile, VpnState::Up(local.to_string()));
+                    if !was_up {
+                        toaster.show(frames, "Рабочий VPN подключён", false);
+                    }
+                }
+                found => {
+                    let why = match found {
+                        Err(e) => format!("не удалось найти адаптер VPN: {e}"),
+                        _ => format!("адаптер с адресом {local} не найден"),
+                    };
+                    tracing::error!("vpn: {why}");
+                    self.lose_way(running);
+                    publish_vpn(frames, &setup.profile, VpnState::Failed(why));
+                }
+            },
+            Event::Lost(why) => {
+                self.lose_way(running);
+                tracing::warn!("vpn: lost ({why}); OpenVPN is reconnecting");
+                publish_vpn(
+                    frames,
+                    &setup.profile,
+                    VpnState::Connecting("переподключаюсь".to_owned()),
+                );
+            }
+            Event::Said(text) => tracing::warn!("openvpn: {text}"),
+            Event::Ended(why) => {
+                self.session = None;
+                self.lose_way(running);
+                match why {
+                    None => {
+                        tracing::info!("vpn: disconnected");
+                        publish_vpn(frames, &setup.profile, VpnState::Off);
+                    }
+                    Some(why) => {
+                        tracing::error!("vpn: {why}");
+                        toaster.show(frames, format!("Рабочий VPN: {why}"), true);
+                        publish_vpn(frames, &setup.profile, VpnState::Failed(why));
+                    }
+                }
+            }
+        }
+    }
+
+    /// On the way out of bliss: OpenVPN is asked to leave, and waited for.
+    async fn shut(self) {
+        if let Some(session) = self.session {
+            session.stop().await;
+        }
+        if let Some(leaving) = self.leaving {
+            leaving.wait().await;
+        }
+    }
+}
+
+/// OpenVPN's names for the steps on the way up, as the window says them.
+fn step_words(step: &str) -> &'static str {
+    match step {
+        "RESOLVE" => "ищу сервер",
+        "TCP_CONNECT" | "CONNECTING" | "WAIT" => "жду ответа сервера",
+        "AUTH" => "проверяю ключи",
+        "AUTH_PENDING" => "жду подтверждения входа",
+        "GET_CONFIG" => "получаю настройки",
+        "ASSIGN_IP" => "получаю адрес",
+        "ADD_ROUTES" => "прокладываю маршрут",
+        _ => "подключаюсь",
+    }
+}
+
+fn vpn_view(profile: &Profile, state: VpnState) -> VpnView {
+    VpnView {
+        name: profile.vpn.as_ref().map(|vpn| vpn.name.clone()),
+        on: profile.vpn.as_ref().is_some_and(|vpn| vpn.enabled),
+        state,
+        service: bliss_openvpn::availability(),
+    }
+}
+
+fn publish_vpn(frames: &watch::Sender<Frame>, profile: &Profile, state: VpnState) {
+    let view = vpn_view(profile, state);
+    frames.send_modify(|f| f.vpn = view);
+}
+
+/// Put an OpenVPN profile in `[vpn]`, switched on, in place of any before it;
+/// refused in words when OpenVPN could not use it. Answers with its name.
+fn add_vpn(
+    setup: &mut Setup,
+    store: &mut Store,
+    frames: &watch::Sender<Frame>,
+    file: &str,
+    text: String,
+) -> Result<String, String> {
+    bliss_openvpn::rewrite(&text).map_err(|e| e.to_string())?;
+    let name = vpn_name(file);
+    let mut next = setup.profile.clone();
+    next.vpn = Some(bliss_proto::Vpn {
+        name: name.clone(),
+        enabled: true,
+        openvpn: text,
+    });
+    save_profile(store, &next)?;
+    setup.profile = next;
+    forget_problem(setup, frames);
+    tracing::info!("vpn: profile «{name}» added");
+    Ok(name)
+}
+
+/// What the window calls a profile: its file's name, without the folder or
+/// `.ovpn`, and not so long that it pushes the switch off its line.
+fn vpn_name(file: &str) -> String {
+    let file = file.trim();
+    let file = file.rsplit(['\\', '/']).next().unwrap_or(file);
+    let lower = file.to_ascii_lowercase();
+    let stem = if lower.ends_with(".ovpn") || lower.ends_with(".conf") {
+        &file[..file.len() - 5]
+    } else {
+        file
+    };
+    match stem.trim() {
+        "" => "OpenVPN".to_owned(),
+        stem => stem.chars().take(40).collect(),
     }
 }
 
@@ -1872,6 +2278,7 @@ fn check_target(router: &Router, text: &str) -> Option<CheckResult> {
             bliss_core::Route::Proxy => Action::Proxy,
             bliss_core::Route::Direct => Action::Direct,
             bliss_core::Route::Blocked => Action::Block,
+            bliss_core::Route::Vpn => Action::Vpn,
         },
         rule: decision.rule,
         note,
@@ -1922,6 +2329,9 @@ struct Wiring<'a> {
     tracker: &'a Arc<Tracker>,
     /// Which rules decide them, as compiled right now.
     router: &'a Arc<Router>,
+    /// The way through the VPN, while it is up: a tunnel started while it is
+    /// sends a rule's connections there from its first one.
+    vpn: &'a Option<Arc<dyn Outbound>>,
     /// What the window reads.
     frames: &'a watch::Sender<Frame>,
     /// The loop's own address, for work that finishes elsewhere — a
@@ -1932,12 +2342,14 @@ struct Wiring<'a> {
 fn wiring<'a>(
     tracker: &'a Arc<Tracker>,
     router: &'a Arc<Router>,
+    vpn: &'a Option<Arc<dyn Outbound>>,
     frames: &'a watch::Sender<Frame>,
     own: &'a mpsc::WeakUnboundedSender<Command>,
 ) -> Wiring<'a> {
     Wiring {
         tracker,
         router,
+        vpn,
         frames,
         own,
     }
@@ -1947,6 +2359,7 @@ async fn start(setup: &Setup, selected: usize, wiring: Wiring<'_>) -> Option<Run
     let Wiring {
         tracker,
         router,
+        vpn,
         frames,
         own,
     } = wiring;
@@ -2046,6 +2459,7 @@ async fn start(setup: &Setup, selected: usize, wiring: Wiring<'_>) -> Option<Run
         Arc::clone(tracker),
         Arc::clone(router),
     ));
+    serving.set_vpn(vpn.clone());
 
     let mut inbounds = Vec::new();
     for listener in bound {
@@ -2581,6 +2995,31 @@ async fn measure_latency(outbound: &dyn bliss_core::Outbound) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A VPN is called by its file's name, without the folder or the extension.
+    #[test]
+    fn a_vpn_is_named_after_its_file() {
+        assert_eq!(vpn_name("work.ovpn"), "work");
+        assert_eq!(
+            vpn_name(r"C:\Users\A\Downloads\Company VPN.OVPN"),
+            "Company VPN"
+        );
+        assert_eq!(vpn_name("office.conf"), "office");
+        assert_eq!(vpn_name("  "), "OpenVPN");
+        assert_eq!(vpn_name(".ovpn"), "OpenVPN");
+        assert_eq!(vpn_name(&"a".repeat(80)).chars().count(), 40);
+    }
+
+    /// An OpenVPN profile holds a private key, and `Command` is `Debug`.
+    #[test]
+    fn a_vpn_profile_on_its_way_is_not_printed() {
+        let command = Command::AddVpn {
+            name: "work.ovpn".to_owned(),
+            profile: Secret("client\n<key>\nKKKKKKKKKKKKKKKK\n</key>\n".to_owned()),
+        };
+        let shown = format!("{command:?}");
+        assert!(!shown.contains("KKKK"), "{shown}");
+    }
 
     /// The list's column is 136px: the short form has to fit it, and the full
     /// one, under the pointer and on the status card, says the rest.

@@ -247,7 +247,8 @@ pub fn reply_code_for(err: &std::io::Error) -> u8 {
     match err.kind() {
         ConnectionRefused => 5,
         HostUnreachable => 4,
-        NetworkUnreachable => 3,
+        // A rule's VPN that is not connected: the network is not there.
+        NetworkUnreachable | NotConnected => 3,
         TimedOut => 6,
         _ => 1,
     }

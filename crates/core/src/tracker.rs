@@ -30,6 +30,8 @@ pub enum Route {
     Proxy,
     Direct,
     Blocked,
+    /// Through the VPN beside the tunnel; see `Serving::set_vpn`.
+    Vpn,
 }
 
 impl std::fmt::Display for Route {
@@ -38,6 +40,7 @@ impl std::fmt::Display for Route {
             Self::Proxy => "proxy",
             Self::Direct => "direct",
             Self::Blocked => "blocked",
+            Self::Vpn => "vpn",
         })
     }
 }

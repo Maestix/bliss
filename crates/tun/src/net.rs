@@ -20,9 +20,8 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
-    AF_INET, IN_ADDR, IN_ADDR_0, IP_UNICAST_IF, IPPROTO_IP, IpDadStatePreferred,
-    IpPrefixOriginManual, IpSuffixOriginManual, SOCKADDR_IN, SOCKADDR_INET, SOCKET, SOCKET_ERROR,
-    WSAGetLastError, setsockopt,
+    AF_INET, IN_ADDR, IN_ADDR_0, IpDadStatePreferred, IpPrefixOriginManual, IpSuffixOriginManual,
+    SOCKADDR_IN, SOCKADDR_INET,
 };
 
 /// Which interface, in the one form both libraries agree on.
@@ -219,36 +218,13 @@ impl Drop for Routes {
 ///
 /// The engine's own connection to the server is kept out by a route instead
 /// (`around_tunnel`), because the engine is another process and this is a
-/// setting on a socket.
+/// setting on a socket. The setting itself, and its byte order, is in
+/// `bliss_core::interface`, which the VPN's connections use too.
 pub fn outside(
     socket: &impl std::os::windows::io::AsRawSocket,
     gateway: Gateway,
 ) -> io::Result<()> {
-    let index = interface_option(gateway.index);
-    let handle = SOCKET(socket.as_raw_socket() as usize);
-    if unsafe { setsockopt(handle, IPPROTO_IP.0, IP_UNICAST_IF, Some(&index)) } == SOCKET_ERROR {
-        let code = unsafe { WSAGetLastError() }.0;
-        return Err(io::Error::new(
-            io::Error::from_raw_os_error(code).kind(),
-            format!(
-                "could not send the connection out by interface {}: {}",
-                gateway.index,
-                io::Error::from_raw_os_error(code)
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// The interface index as `IP_UNICAST_IF` wants it.
-///
-/// In network byte order, which is true of this option and of almost nothing
-/// else on a socket; the IPv6 spelling of the same option takes the index the
-/// usual way round. Swapped, it names an interface that does not exist, and
-/// the call fails with "the requested address is not valid in its context" —
-/// an error that says nothing about byte order.
-fn interface_option(index: u32) -> [u8; 4] {
-    index.to_be_bytes()
+    bliss_core::interface::leave_by(socket, gateway.index)
 }
 
 /// An address in the shape the IP Helper rows want.
@@ -302,15 +278,6 @@ mod tests {
             unsafe { socket.Ipv4.sin_addr.S_un.S_addr }.to_ne_bytes(),
             [203, 0, 113, 7]
         );
-    }
-
-    /// The index goes out in network byte order. Written the usual way round
-    /// it names another interface entirely, and the connection either leaves
-    /// by the wrong one or fails for a reason that mentions addresses.
-    #[test]
-    fn the_interface_index_travels_backwards() {
-        assert_eq!(interface_option(7), [0, 0, 0, 7]);
-        assert_eq!(interface_option(0x0102_0304), [1, 2, 3, 4]);
     }
 
     /// An address of another family is not read as an IPv4 one: the routing

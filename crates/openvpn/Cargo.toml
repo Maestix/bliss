@@ -1,0 +1,22 @@
+[package]
+name = "bliss-openvpn"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "A work VPN beside the tunnel: OpenVPN, started through its own service and kept to bliss's rules"
+
+[dependencies]
+bliss-core = { path = "../core" }
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows = { workspace = true, features = [
+    # The service's pipe: opened, read and written as a file.
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    # Finding the service, and checking the pipe is its own.
+    "Win32_System_Services",
+] }

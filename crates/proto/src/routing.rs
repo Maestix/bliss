@@ -2,7 +2,8 @@
 //!
 //! Three things can happen to a connection, and the whole feature is those
 //! three words: send it through the proxy, let it go straight out, or refuse
-//! it. Everything else here is about deciding which.
+//! it. A fourth exists once there is a VPN beside the tunnel: send it there.
+//! Everything else here is about deciding which.
 //!
 //! Rules are read top to bottom and the first match wins. That is the one
 //! ordering rule worth having, because it is the only one a person can hold in
@@ -24,6 +25,10 @@ pub enum Action {
     Direct,
     /// Refused. Nothing is sent anywhere; the program asking is told no.
     Block,
+    /// Through the VPN in `[vpn]` — a work network, reached beside the tunnel
+    /// rather than through it. Refused while that VPN is not connected, so a
+    /// connection meant for it never goes out some other way.
+    Vpn,
 }
 
 impl Action {
@@ -33,6 +38,7 @@ impl Action {
             Self::Proxy => "через прокси",
             Self::Direct => "напрямую",
             Self::Block => "блокировать",
+            Self::Vpn => "через VPN",
         }
     }
 }

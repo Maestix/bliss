@@ -12,7 +12,9 @@ reach: VLESS, VMess, Trojan, Shadowsocks, SOCKS, Hysteria 2 and WireGuard, over
 every transport xray still has. Stage 1
 (current) drives an external `xray-core` process and owns everything around it:
 its own SOCKS5/HTTP inbound, a relay with per-connection accounting, routing,
-the machine's proxy settings, and a Dioxus desktop window. Stage 3 replaces xray
+the machine's proxy settings, and a Dioxus desktop window. Beside the tunnel it
+can hold a work VPN — the official OpenVPN, started through OpenVPN's own
+service and kept to bliss's rules (§10a). Stage 3 replaces xray
 with a native TLS 1.3 + REALITY + VLESS stack behind the same `Outbound` trait.
 The long-form plan, in Russian, lives outside the repo at
 `%USERPROFILE%\.claude\plans\cryptic-conjuring-stroustrup.md`.
@@ -30,9 +32,16 @@ The long-form plan, in Russian, lives outside the repo at
     (written from `crates/xray/src/config.rs`);
   - v2rayN's generated `binConfigs/config.json`;
   - any server link — `vless://`, `vmess://`, `trojan://`, `ss://`,
-    `socks://`, `hysteria2://`, `wireguard://` — and a subscription's address.
+    `socks://`, `hysteria2://`, `wireguard://` — and a subscription's address;
+  - an OpenVPN profile (`.ovpn`), which carries a private key and a
+    `tls-crypt` key inline: the user's work profile, the `[vpn]` section of
+    the real profile, and `%LOCALAPPDATA%\bliss\data\openvpn\profile.ovpn`,
+    which bliss writes while the VPN is up and deletes when it goes down.
 
-  The last four live outside the repository; never copy them in. To learn the
+  All but the first live outside the repository; never copy them in. The user
+  once pasted the head of the work profile, with the `remote` line blanked and
+  everything from the certificates on left out: that much is not secret, and
+  it is all a question about the profile needs. To learn the
   xray config schema, read `config.rs`, not a generated file.
 - **Test data is fake by construction**: reserved names (`example.net`,
   `a.example`), TEST-NET-3 addresses (`203.0.113.0/24`), private ranges, literals
@@ -65,7 +74,8 @@ The long-form plan, in Russian, lives outside the repo at
 | crate | package | what lives there |
 |---|---|---|
 | `crates/proto` | `bliss-proto` | pure data: the parsed server — protocol, security, transport — and its redacting types (`server.rs`); share links, one parser per scheme in `link/` (`vless.rs`, `vmess.rs`, `trojan.rs`, `shadowsocks.rs`, `socks.rs`, `hysteria2.rs`, `wireguard.rs`) and the transport and TLS parameters they share (`link/stream.rs`); TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
-| `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`) |
+| `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`); leaving by one interface (`interface.rs`), dialling through one — the VPN's — with its own DNS servers (`through.rs`, `dns.rs`) |
+| `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision in a Job Object, GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
 | `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`), the machine's addresses and routes (`net.rs`), and packets turned into connections and flows (`stack.rs`) |
 | `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with Windows (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
@@ -74,7 +84,10 @@ The long-form plan, in Russian, lives outside the repo at
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
 the `bliss` binary (`main.rs`, `engine.rs`) calls into it. Existing xray
 knowledge outside `bliss-xray`, not to be extended: the `[engine] xray` path in
-`profile.rs`, and the decoder for Xray's `.dat` files in `geo.rs`. One kind is
+`profile.rs`, and the decoder for Xray's `.dat` files in `geo.rs`. OpenVPN has
+the same seam: only the binary calls `bliss-openvpn`, and what reaches the core
+is an address and DNS servers, dialled through by `Through`, which knows
+nothing of OpenVPN. One kind is
 there on purpose: **`link/` knows what xray can carry.** Share links are the
 Xray ecosystem's own format, and bliss carries only what its engine does, so a
 link xray cannot serve — a transport it removed (`h2`, `quic`), REALITY over
@@ -90,7 +103,8 @@ Runtime paths on Windows:
   after every change made in the window, and never on launch; bliss runs
   without it
 - work dir: `%LOCALAPPDATA%\bliss\data` — `xray.exe`, `geoip.dat`,
-  `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`
+  `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`, and
+  `openvpn\profile.ovpn` while the VPN is up
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
   (`crates/proto/src/profile.rs`)
 
@@ -99,7 +113,7 @@ Runtime paths on Windows:
 ```bash
 cargo fmt --all
 cargo clippy --all-targets   # no warnings (default members; --workspace adds the spike)
-cargo test                   # default members, ~70 tests
+cargo test                   # default members, ~210 tests
 cargo build -p bliss         # target/debug/bliss.exe
 ```
 
@@ -186,7 +200,10 @@ These cost the most time on this project. None of them announce themselves.
    for every intended change.
 3. **Line endings.** `.gitattributes` has `* text=auto eol=lf`, so commits are LF
    whatever the working tree holds. The risk is exact-match edits: some tools
-   write CRLF, and an edit that matched before stops matching after. To normalise
+   write CRLF, and an edit that matched before stops matching after. Python's
+   `Path.write_text` is one of them on Windows — text mode turns every `\n` into
+   `\r\n` — so a replacement script should write bytes, or be followed by the
+   script below. To normalise
    the working tree, write this with the Write tool and run it — it reads each
    file **before** opening it for writing (opening with `'wb'` truncates first):
 
@@ -228,6 +245,12 @@ These cost the most time on this project. None of them announce themselves.
   Git Bash also ships `/usr/bin/gpg-agent`, with a different home directory and
   socket — make sure you are not debugging that one. Confirm with
   `git log --format='%h %G? %s' -1`: it must show `G`.
+  GnuPG 2.4 keeps the keys in a daemon of its own: on 30 September signing
+  failed with "can't connect to the keyboxd", `gpg-connect-agent //bye` waited
+  eight seconds for an agent that never came, and a `git commit` then hung on
+  gpg. The next commit signed after three steps — `gpgconf.exe --launch
+  keyboxd`, killing the stuck `gpg.exe`, `gpg-agent.exe --daemon` — and which of
+  them mattered was not established.
 - One topic per commit. When several topics are interleaved in the same files,
   snapshot the final tree, rebuild each intermediate state, build and test every
   one, and prove the last commit byte-identical to the snapshot.
@@ -246,8 +269,10 @@ These cost the most time on this project. None of them announce themselves.
   connections (512, `tracker.rs`), HTTP request heads (16 KB, `http.rs`), a
   subscription's body (4 MB, read up to it and no further) and the servers one
   list brings (2 000, `subscription.rs`), servers in a profile however they
-  arrive (5 000, `MAX_PROFILE_SERVERS`). The project exists because another
-  client's GUI reached 7.8 GB this way.
+  arrive (5 000, `MAX_PROFILE_SERVERS`), names the VPN's DNS answered (256,
+  `dns.rs`), an OpenVPN profile (256 KB, `MAX_PROFILE`, measured before the
+  file is read). The project exists because another client's GUI reached
+  7.8 GB this way.
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
@@ -286,7 +311,16 @@ These cost the most time on this project. None of them announce themselves.
   `parsed_reality_link_matches_snapshot` snapshot. A refusal never quotes what
   it refuses when that can be secret: a VMess blob that is not JSON is
   "something else", and a Shadowsocks cipher xray dropped is named without the
-  password written beside it.
+  password written beside it. An OpenVPN profile travels as `Secret` in
+  `Command::AddVpn` and sits in `bliss_proto::Vpn`, whose `Debug` gives its
+  length alone (`debug_does_not_show_a_vpn_profile`,
+  `a_vpn_profile_on_its_way_is_not_printed`).
+- **A connection a rule sends to the VPN goes there or nowhere.** With no VPN
+  up, `Serving::dial_tunnelled` refuses it (`NotConnected`, SOCKS reply 3,
+  HTTP 502 saying the VPN is not connected) rather than letting it fall
+  through to the tunnel or out directly; a work site reached some other way
+  is exactly what the user did not ask for
+  (`a_vpn_route_goes_to_the_vpn_or_nowhere`, seen failing against a fall-through).
 - **Names are never resolved locally for proxied traffic** — `Target` keeps
   domains as names so DNS does not leak. Direct routes resolve locally, on
   purpose. Consequence: `geoip` rules only match connections that name an
@@ -518,7 +552,10 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     literals in `ui.rs` (`ACCENT`, `MUTED`, `GOOD`, `BAD`, `ON`, `BUSY`, `IDLE`,
     `FAILED`, and tints of the accent `rgba(238,130,196,…)`) and `app.css`;
     they mirror the tokens, so change both together. Connected and "through the
-    proxy" are both pink, which is why "direct" must never borrow `ON`.
+    proxy" are both pink, which is why "direct" must never borrow `ON`. The
+    work VPN is the one hue that was left, a calm sky blue (`--color-vpn`,
+    `VPN_TONE`, `#7eb3ee`); `the_vpn_is_offered_when_there_is_one` checks
+    app.css has every action's colour for the dot, the segment and the pill.
 
     **A mark repeated down a list stays quiet.** The rule switch's first knob
     was solid pink with a glow; nearly every rule is on, so the list grew a
@@ -1065,6 +1102,77 @@ table.
   health checks on either assumption. Latency is two `HEAD` requests on one
   kept-alive connection, timing the second; the first pays for the handshakes.
 
+## 10a. The work VPN (OpenVPN)
+
+The user was given a `.ovpn` by their workplace, for its tools in the browser,
+and asked for it in bliss. xray has no OpenVPN, and OpenVPN is a different kind
+of thing — it carries packets, and by default takes the whole machine — so it
+is driven, not spoken: the official client, started through its own service,
+told what it may not do, and dialled through by `bliss_core::Through` for the
+connections a rule sends there (`action = "vpn"`). Everything below was read in
+OpenVPN's and OpenVPN GUI's source (`src/openvpnserv/interactive.c`,
+`validate.c`, `src/openvpn/options.c`, `route.c`, `push.c`, `manage.c`,
+`doc/management-notes.txt`; OpenVPN GUI's `openvpn.c`) on 30 September, at 2.8
+development, and none of it has yet met a real server: OpenVPN was not
+installed on the user's machine, and the first run against the work server is
+the user's to make.
+
+- **The interactive service starts it without rights.** `\\.\pipe\openvpn\service`
+  takes one message — working directory, options, standard input, each ending
+  in a NUL, UTF-16, at most 4096 units — and answers `0x00000000`, the process
+  id in hex and `Process ID`, or an error code and two lines of why. It
+  appends `--msg-channel`, through which OpenVPN asks it for the adapter,
+  addresses and routes, and it undoes all of that when OpenVPN exits. bliss
+  checks the pipe's server is the service's own process before writing, as
+  OpenVPN GUI does (`GetNamedPipeServerProcessId`).
+- **Any options and any profile location only for an authorized account**: a
+  member of Administrators or "OpenVPN Administrators" — and a UAC-filtered
+  admin token counts, since the group SIDs are compared without looking at
+  the deny-only flag, with the local group's members as a fallback. Anyone
+  else gets a short list of options and profiles in OpenVPN's own folder
+  only, which bliss cannot write; its refusal is shown saying which group.
+- **The leash is `--management-client`.** bliss listens on a loopback port and
+  OpenVPN connects to it; when that connection closes OpenVPN throws itself
+  SIGTERM (`management-exit`). So a bliss that dies takes its VPN with it
+  instead of leaving it up with nobody to switch it off. A caller that is not
+  `openvpn.exe` (by the port's owner) is turned away. `--management-hold` makes
+  it wait until bliss is listening, and `hold off` — the flag survives
+  restarts — keeps a reconnect from waiting for bliss again.
+- **The profile is rewritten, not trusted** (`profile.rs`). `pull-filter` is
+  first-match-wins by prefix, so bliss's filters go first: the server's
+  `redirect-gateway`, routes, `dhcp-option`, 2.6's `dns`, `block-outside-dns`
+  and `register-dns` are dropped, and `route-method`, as OpenVPN GUI does, since
+  a pushed one would take routes away from the service. The same directives
+  written in the profile are commented out, with script hooks and anything
+  that fights bliss for control (`management*`, `log`, `service`). Everything
+  else — ciphers, keys, keepalives — is left as written.
+- **One route of bliss's own**: `route 0.0.0.0 0.0.0.0 vpn_gateway 9999`.
+  `IP_UNICAST_IF` makes Windows look for a route among those through the bound
+  interface only, so a socket bound to the VPN's adapter needs one covering
+  the destination; this one's metric is far above any ordinary default
+  route's, and TUN adapters' halves of the address space win on prefix before
+  metrics are compared, so nothing else picks it. OpenVPN accepts any metric
+  of at least 0.
+- **`route-method exe` is harmless under the service**: `--msg-channel` comes
+  after the profile on the command line and sets the service method; the
+  user's profile has that line and keeps it.
+- **DNS comes from the log.** The server's DNS servers are filtered off the
+  machine, but OpenVPN logs the whole `PUSH_REPLY` at verb 3 (`D_PUSH`) before
+  filtering, and bliss reads them there: `dhcp-option DNS` or 2.6's
+  `dns server N address`. Names for the VPN's connections are asked of those
+  servers through the VPN (`dns.rs`); without any, the machine's own resolver.
+  The CONNECTED state gives the adapter's address, and the adapter is found by
+  it (`interface::index_of`).
+- **One OpenVPN at a time.** A connection replaced or switched off leaves
+  without the engine loop waiting (`Session::leave`), and the next waits for
+  it (`after`): two at once would fight over the adapter.
+- **With TUN on, `openvpn.exe`'s own traffic goes around it** (`stack.rs`,
+  `VPN_PROGRAMS`), or the VPN would reach the work network through the proxy
+  server; `the_vpns_own_connection_goes_around_the_tunnel`.
+- **Not yet:** a login, a one-time code or a key passphrase — such a profile is
+  refused in words (`ProfileError`), and a prompt at run time ends the
+  connection; IPv6 through the VPN; the VPN's switch in the tray's menu.
+
 ## 11. Where things stand
 
 **Done in stage 1:** renderer spike; profile and link parsing; xray management
@@ -1095,6 +1203,14 @@ v2ray-plugin as xray transports), SOCKS, Hysteria 2 and WireGuard — over RAW
 TLS (pinned, checked by name, ECH) or REALITY (with ML-DSA verification),
 each carried end to end through a real xray 26.3.27 in the engine test (§2).
 The tunnel already starts with the window (`Setup.autostart`).
+
+**Written, never run against a server:** the work VPN (§10a) — a `.ovpn`
+added from the settings screen or with Ctrl+V, OpenVPN started through its
+service with the server kept off the machine, a fourth action «через VPN» in
+the rules, the connection menu and the editor, a chip in the main screen's
+heading that switches it, and its connections in the table as `VPN`. Its unit
+tests talk to a stand-in for OpenVPN over a real socket; the service, the
+adapter and the route have met nothing but the source they were written from.
 
 **Started in stage 2:** the TUN adapter — wintun inside the binary, the
 adapter and its routes, TCP and UDP carried through the same rules and the

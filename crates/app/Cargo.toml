@@ -17,6 +17,7 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 bliss-core = { path = "../core" }
+bliss-openvpn = { path = "../openvpn" }
 bliss-proto = { path = "../proto" }
 bliss-tun = { path = "../tun" }
 bliss-xray = { path = "../xray" }

@@ -16,6 +16,9 @@ tracing.workspace = true
 [target."cfg(windows)".dependencies]
 windows = { workspace = true, features = [
     "Win32_NetworkManagement_IpHelper",
+    # An address row names its interface by LUID, which is declared here:
+    # without it the address table is not generated at all.
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     # The machine's proxy settings live in HKCU, and WinINet has to be told
     # they changed or everything carries on using the cached old ones.
