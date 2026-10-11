@@ -85,6 +85,10 @@ mimalloc = "0.1"
 # is Blitz on WGPU. Same RSX, same CSS — which is what makes 1.0 a measurement
 # rather than an argument.
 dioxus = "0.7"
+# Linux only, and the same GTK as tao's — a second version would be a second
+# set of types for one window: the window's own handle (present, its startup
+# token), the clipboard, and the session bus asked whether a tray host is up.
+gtk = "0.18"
 # Build time only. Explorer shows an executable's icon only from its own
 # resources, and shortcuts use that icon by default, so bliss.rc has to be
 # compiled into the binary; this finds rc.exe in the Windows SDK that the MSVC
@@ -104,6 +108,9 @@ windows = { version = "0.62", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+# Linux's half of the same: prctl for the engine's leash, sockets bound to one
+# interface, the TUN device. Already in the tree through tokio.
+libc = "0.2"
 camino = "1"                                           # Utf8Path: Windows paths that print sanely
 directories = "6"                                      # %APPDATA% by the book, not by hand
 jiff = "0.2"                                           # timestamps; correct where chrono is merely popular

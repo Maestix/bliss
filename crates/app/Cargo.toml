@@ -3,7 +3,7 @@ name = "bliss"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "VLESS + REALITY client for Windows"
+description = "VLESS + REALITY client for Windows and Linux"
 
 [[bin]]
 name = "bliss"
@@ -56,6 +56,12 @@ windows = { workspace = true, features = [
     # The tray's menu leaves at once rather than fading: see `animated` in ui.rs.
     "Win32_Graphics_Dwm",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk.workspace = true
+# The single-window claim and the log's lock (flock), and asking whether the
+# tray's library is there before tray-icon panics without it (dlopen).
+libc.workspace = true
 
 [build-dependencies]
 # bliss.rc -> the icon inside bliss.exe; see build.rs.

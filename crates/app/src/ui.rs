@@ -51,6 +51,40 @@ use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, Secret, Stat
 use crate::profile_file::Subject;
 use bliss_proto::{Action, ProxyMode};
 
+#[cfg(target_os = "linux")]
+#[path = "tray_linux.rs"]
+mod tray_linux;
+#[cfg(target_os = "linux")]
+use tray_linux::Tray;
+
+/// The mark alone, 96 px: the window's icon and the tray's off Windows, where
+/// there are no resources to take it from (on Windows it is `bliss.ico`'s
+/// frame of the same size).
+#[cfg(not(windows))]
+pub(crate) const MARK: &[u8] = include_bytes!("../assets/bliss-mark.png");
+
+/// A second copy's asks to show the window (`instance.rs`), for `Tray` to take.
+#[cfg(target_os = "linux")]
+static RAISES: std::sync::Mutex<Option<Raises>> = std::sync::Mutex::new(None);
+
+/// Whether something on this desktop draws tray icons, decided once at launch
+/// (`tray_linux::host`). Without one a window hidden in the tray could not be
+/// brought back by anything but starting bliss again, so it closes instead.
+#[cfg(target_os = "linux")]
+static TRAY_HOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The window, built hidden on Linux as dioxus-desktop builds it on Windows,
+/// is to be shown once its page exists (`App`): every start but one in the
+/// tray.
+#[cfg(target_os = "linux")]
+static SHOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A start in the tray on a desktop with no tray: the window opens minimized
+/// instead, once its page exists (`App`), never before — rule 20 holds for
+/// every webview here, whatever WebKitGTK would put up with.
+#[cfg(target_os = "linux")]
+static ICONIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The window's palette, type and radii — a calm neon; see theme.css.
 const THEME: &str = include_str!("../assets/theme.css");
 const APP_CSS: &str = include_str!("../assets/app.css");
@@ -346,41 +380,126 @@ if (!window.blissChartHover) {
 }
 "#;
 
-/// Open the window, or leave it in the tray: `--minimized` is what Windows
+/// A second copy's asks to show the window: the activation token each came
+/// with, if any.
+pub type Raises = tokio::sync::mpsc::UnboundedReceiver<Option<String>>;
+
+/// Open the window, or leave it in the tray: `--minimized` is what the session
 /// passes when it starts bliss at sign-in and the settings ask for that.
-pub fn launch(controller: Controller, minimized: bool) {
-    dioxus::LaunchBuilder::desktop()
-        .with_cfg(
-            Config::new()
-                .with_window(
-                    WindowBuilder::new()
-                        .with_title("bliss")
-                        // The design draws its own chrome, so Windows must not draw
-                        // any. Everything the frame used to do — drag, minimise,
-                        // maximise, close — is re-implemented in TitleBar below.
-                        .with_decorations(false)
-                        .with_inner_size(LogicalSize::new(1040.0, 660.0))
-                        .with_min_inner_size(LogicalSize::new(880.0, 560.0))
-                        // Started in the tray, the window is simply never
-                        // shown. dioxus-desktop builds every window hidden and
-                        // shows it after the first render, so the webview is
-                        // created in the window Windows is happy with either
-                        // way; minimized instead, WebView2 refuses to be
-                        // created at all (rule 20 of AGENTS.md §6).
-                        .with_visible(!minimized)
-                        // Dioxus puts its own logo on any window built without one.
-                        .with_window_icon(app_icon(None)),
-                )
-                // The window is the program's, not a document's: its close
-                // button and Alt+F4 put it in the tray, where bliss goes on
-                // serving. Leaving is a deliberate act, from the tray (`Tray`).
-                .with_close_behaviour(dioxus::desktop::WindowCloseBehaviour::WindowHides)
-                // The clicks on the icon are answered here, not by Dioxus.
-                .with_tray_icon_show_window_on_click(false)
-                .with_on_window(|window, _| set_icons(&window, window.scale_factor())),
+///
+/// Never returns: the event loop ends the process itself, after `LoopDestroyed`
+/// — which is where the system proxy is put back on the way out. Code after
+/// this call, which is where it used to be, never ran: «Выход» left the machine
+/// pointed at a port nobody listened on until bliss next started.
+pub fn launch(
+    controller: Controller,
+    minimized: bool,
+    work_dir: std::path::PathBuf,
+    raises: Option<Raises>,
+) {
+    #[cfg(target_os = "linux")]
+    let tray = {
+        if let Ok(mut held) = RAISES.lock() {
+            *held = raises;
+        }
+        // A start in the tray is the one at sign-in, which can come before
+        // the desktop's tray does: that one waits for it a while.
+        let host = tray_linux::host(minimized);
+        SHOW.store(!minimized || !host, std::sync::atomic::Ordering::Relaxed);
+        ICONIFY.store(minimized && !host, std::sync::atomic::Ordering::Relaxed);
+        if !host {
+            tracing::info!(
+                "no tray on this desktop: closing the window leaves bliss, and a start \
+                 in the tray opens minimized instead"
+            );
+        }
+        TRAY_HOST.store(host, std::sync::atomic::Ordering::Relaxed);
+        host
+    };
+    #[cfg(not(target_os = "linux"))]
+    let tray = {
+        let _ = raises;
+        true
+    };
+
+    let config = Config::new()
+        .with_window(
+            WindowBuilder::new()
+                .with_title("bliss")
+                // The design draws its own chrome, so Windows must not draw
+                // any. Everything the frame used to do — drag, minimise,
+                // maximise, close — is re-implemented in TitleBar below.
+                .with_decorations(false)
+                .with_inner_size(LogicalSize::new(1040.0, 660.0))
+                .with_min_inner_size(LogicalSize::new(880.0, 560.0))
+                // Started in the tray, the window is simply never
+                // shown. dioxus-desktop builds every window hidden and
+                // shows it after the first render, so the webview is
+                // created in the window Windows is happy with either
+                // way; minimized instead, WebView2 refuses to be
+                // created at all (rule 20 of AGENTS.md §6).
+                //
+                // On Linux dioxus builds it as asked, and bliss always asks
+                // for hidden and shows it itself (`SHOW`): a page in a window
+                // built visible applies each change on an animation frame,
+                // which a hidden window never gets, and the whole program
+                // stood still once it went into the tray (rule 27).
+                .with_visible(!minimized && cfg!(not(target_os = "linux")))
+                // Dioxus puts its own logo on any window built without one.
+                .with_window_icon(app_icon(None)),
         )
+        // The window is the program's, not a document's: its close
+        // button and Alt+F4 put it in the tray, where bliss goes on
+        // serving. Leaving is a deliberate act, from the tray (`Tray`).
+        // A desktop with no tray has nowhere to put it, and there
+        // closing the window is leaving.
+        .with_close_behaviour(if tray {
+            dioxus::desktop::WindowCloseBehaviour::WindowHides
+        } else {
+            dioxus::desktop::WindowCloseBehaviour::WindowCloses
+        })
+        // The clicks on the icon are answered here, not by Dioxus.
+        .with_tray_icon_show_window_on_click(false)
+        .with_on_window(|window, _| set_icons(&window, window.scale_factor()))
+        // The last thing the event loop does before it ends the process.
+        .with_custom_event_handler(move |event, _| {
+            if let dioxus::desktop::tao::event::Event::LoopDestroyed = event
+                && let Err(e) = bliss_core::sysproxy::leave(&work_dir)
+            {
+                tracing::error!("could not restore the system proxy on the way out: {e}");
+            }
+        });
+    #[cfg(target_os = "linux")]
+    let config = linux_config(config);
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(config)
         .with_context(controller)
         .launch(App);
+}
+
+/// What Linux's webview needs said that Windows' does not.
+///
+/// - Dioxus's switch for WebKitGTK's GPU path changes the environment after
+///   threads exist and sends every child to X11; `main` has made the same
+///   choice already, first thing (`webkit_environment`).
+/// - Without a folder of its own, WebKit keeps its data in
+///   `~/.local/share/<program>` — which for bliss is the work dir. It goes
+///   under the cache instead, named after the executable as WebView2's is.
+/// - The window is shown before the page has loaded, unlike on Windows, so
+///   its ground is the page's colour rather than a white flash.
+#[cfg(target_os = "linux")]
+fn linux_config(config: Config) -> Config {
+    let stem = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "bliss".to_owned());
+    let mut config = config
+        .with_disable_dma_buf_on_wayland(false)
+        .with_background_color((0x14, 0x0f, 0x1d, 0xff));
+    if let Some(base) = directories::BaseDirs::new() {
+        config = config.with_data_directory(base.cache_dir().join(stem).join("webview"));
+    }
+    config
 }
 
 /// The icon build.rs compiles into bliss.exe (resource 1 in bliss.rc), with a
@@ -395,9 +514,14 @@ fn app_icon(side: Option<u32>) -> Option<Icon> {
         .ok()
 }
 
+/// The mark from the PNG built into the binary, whatever side is asked: X11
+/// scales it, and a Wayland desktop takes the icon from the program's
+/// `.desktop` entry rather than from the window.
 #[cfg(not(windows))]
 fn app_icon(_side: Option<u32>) -> Option<Icon> {
-    None
+    dioxus::desktop::icon_from_memory(MARK)
+        .inspect_err(|e| tracing::warn!("could not load the application icon: {e}"))
+        .ok()
 }
 
 /// bliss's icon beside the clock, and what clicking it does.
@@ -411,6 +535,7 @@ fn app_icon(_side: Option<u32>) -> Option<Icon> {
 /// of AGENTS.md §6) — and goes on running in the tray, where the page gets no
 /// frames. The frame's signal is here to be brought up to date before the
 /// window is shown (`catch_up`).
+#[cfg(windows)]
 #[component]
 fn Tray(frame: Signal<Frame>) -> Element {
     use dioxus::desktop::trayicon::{
@@ -578,10 +703,19 @@ fn Tray(frame: Signal<Frame>) -> Element {
     rsx! {}
 }
 
+/// Neither Windows nor Linux: no tray.
+#[cfg(not(any(windows, target_os = "linux")))]
+#[component]
+fn Tray(frame: Signal<Frame>) -> Element {
+    let _ = frame;
+    rsx! {}
+}
+
 /// How tall the menu is with this many presets: its own shape, and a heading
 /// and a line for each preset, four at most — more scroll (`.tray-presets`).
 /// Grown rather than taken from the server list, which is what the menu was
 /// made taller for.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn menu_height(presets: usize) -> f64 {
     match presets {
         0 => MENU_SIZE.1,
@@ -591,7 +725,9 @@ fn menu_height(presets: usize) -> f64 {
 
 /// A preset's line in the menu, gap included, and how many show before the
 /// list scrolls; `.tray-presets` in app.css is that tall, less the last gap.
+#[cfg_attr(not(windows), allow(dead_code))]
 const PRESET_LINE: f64 = 28.0;
+#[cfg_attr(not(windows), allow(dead_code))]
 const PRESET_LINES: usize = 4;
 
 /// How big the tray's menu is, in logical pixels, and the smallest the program
@@ -601,11 +737,13 @@ const PRESET_LINES: usize = 4;
 /// 1.115em); the rest is the list's, up to `.tray-list`'s `max-height` in
 /// app.css. At 372px that was three servers and a half, and the user asked for
 /// more: 460px holds six and the edge of a seventh, which says it scrolls.
+#[cfg_attr(not(windows), allow(dead_code))]
 const MENU_SIZE: (f64, f64) = (300.0, 460.0);
 const MIN_SIZE: (f64, f64) = (880.0, 560.0);
 
 /// Lend the window to the tray's menu: small, above everything, out of the
 /// taskbar, beside the icon, with the program's screen folded away under it.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64), presets: usize) {
     use dioxus::desktop::tao::dpi::LogicalSize;
 
@@ -638,7 +776,6 @@ fn into_menu(window: &dioxus::desktop::DesktopContext, near: (f64, f64), presets
 /// Give the window back: the program's shape, and shown or away.
 fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
     use dioxus::desktop::tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-    use dioxus::desktop::tao::platform::windows::WindowExtWindows;
 
     *TRAY_MENU.write() = false;
     *MENU_HELD.write() = false;
@@ -651,7 +788,11 @@ fn out_of_menu(window: &dioxus::desktop::DesktopContext, show: bool) {
     animated(window, false);
     window.set_visible(false);
     window.set_always_on_top(false);
-    let _ = window.set_skip_taskbar(false);
+    #[cfg(windows)]
+    {
+        use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+        let _ = window.set_skip_taskbar(false);
+    }
     window.set_resizable(true);
     window.set_maximizable(true);
     window.set_min_inner_size(Some(LogicalSize::new(MIN_SIZE.0, MIN_SIZE.1)));
@@ -731,10 +872,12 @@ fn cloaked(window: &dioxus::desktop::DesktopContext, on: bool) {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn cloaked(_window: &dioxus::desktop::DesktopContext, _on: bool) {}
 
 /// Put the menu by the icon and keep it on the screen the pointer is on: a
 /// menu half off the edge is worse than one a little away from the click.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn menu_corner(
     window: &dioxus::desktop::DesktopContext,
     near: (f64, f64),
@@ -788,17 +931,31 @@ fn quit(window: &dioxus::desktop::DesktopContext) {
     window.close();
 }
 
+/// Leave as «Выход» does when asked to by a signal: SIGTERM, which ends
+/// every program of a session as it closes, SIGHUP, and SIGINT from a
+/// terminal. Unheard, a signal ended the process where it stood, nothing put
+/// the proxy back, and the next session started on bliss's dead port. glib
+/// hears them on this thread, between two events, and the window closes as
+/// the last one does: `LoopDestroyed` puts the settings back.
+#[cfg(target_os = "linux")]
+fn leave_on_signals(window: &dioxus::desktop::DesktopContext) {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        let window = window.clone();
+        gtk::glib::unix_signal_add_local(signal, move || {
+            tracing::info!("signal {signal}: leaving");
+            window.set_close_behavior(dioxus::desktop::WindowCloseBehaviour::WindowCloses);
+            window.close();
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+}
+
 /// The mark out of bliss.exe's own resources, at the size the tray draws.
 #[cfg(windows)]
 fn tray_mark(side: u32) -> Option<dioxus::desktop::trayicon::Icon> {
     dioxus::desktop::trayicon::Icon::from_resource(1, Some((side, side)))
         .inspect_err(|e| tracing::warn!("could not load the tray icon: {e}"))
         .ok()
-}
-
-#[cfg(not(windows))]
-fn tray_mark(_side: u32) -> Option<dioxus::desktop::trayicon::Icon> {
-    None
 }
 
 /// Whether anyone can see the page: the program's window on the screen, or
@@ -862,6 +1019,14 @@ fn rest(_window: &dioxus::desktop::DesktopContext, _idle: bool) {}
 /// shape. Already on the screen, or minimized, it shows the program as it is,
 /// and is raised at once.
 fn out_of_the_tray(window: &dioxus::desktop::DesktopContext) {
+    // Linux shows and raises in one call, and has no cloak to paint under
+    // (`tray_linux::present`).
+    #[cfg(target_os = "linux")]
+    {
+        tray_linux::present(window, None);
+        return;
+    }
+    #[allow(unreachable_code)]
     if window.is_visible() {
         window.set_minimized(false);
         window.set_focus();
@@ -874,6 +1039,7 @@ fn out_of_the_tray(window: &dioxus::desktop::DesktopContext) {
 /// first animation frame after a render comes before the paint that shows
 /// it, the second after. Within 150ms whatever happens, so a page that is not
 /// painting cannot keep the window away.
+#[cfg_attr(not(windows), allow(dead_code))]
 const PAINTED: &str = r#"
 let answered = false;
 const answer = () => {
@@ -905,6 +1071,7 @@ setTimeout(answer, 200);
 /// the paint alone was not enough: a hidden window's paints are not
 /// presented, so the menu's first opening still showed the program. The
 /// window is shown cloaked, painted into, and uncloaked here.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn when_painted(then: impl FnOnce() + 'static) {
     let mut painted = document::eval(PAINTED);
     spawn(async move {
@@ -1218,6 +1385,15 @@ fn App() -> Element {
                 if *TOOLTIP.peek() != words {
                     *TOOLTIP.write() = words;
                 }
+                // The tray's own menu on Linux, which is wanted most while
+                // the page gets no frames.
+                #[cfg(target_os = "linux")]
+                {
+                    let model = controller.read(tray_linux::model);
+                    if *tray_linux::MODEL.peek() != model {
+                        *tray_linux::MODEL.write() = model;
+                    }
+                }
                 if seen(&window) {
                     if BEHIND.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         wake(&window, &controller);
@@ -1244,7 +1420,7 @@ fn App() -> Element {
                     // Whatever is there goes to the engine, which says what it
                     // made of it; an empty clipboard is an answer too.
                     "paste" => controller.send(Command::Import {
-                        text: Link(crate::clipboard::paste().unwrap_or_default()),
+                        text: Link(crate::clipboard::paste().await.unwrap_or_default()),
                         from_form: false,
                     }),
                     "escape" => {
@@ -1267,6 +1443,25 @@ fn App() -> Element {
     use_hook(|| {
         let _ = document::eval(CHART_HOVER);
     });
+
+    // The window on Linux, now that the page is there: shown, unless it
+    // starts in the tray, and minimized where there is no tray to start in
+    // (`SHOW`, `ICONIFY`). Shown through tao, which shows what GTK packed
+    // into it too; a window GTK alone shows stays empty.
+    #[cfg(target_os = "linux")]
+    {
+        let shown = window.clone();
+        use_effect(move || {
+            if SHOW.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                shown.set_visible(true);
+                if ICONIFY.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    shown.set_minimized(true);
+                }
+            }
+        });
+        let leaving = window.clone();
+        use_hook(move || leave_on_signals(&leaving));
+    }
 
     let live = frame;
     let frame = frame();
@@ -1891,16 +2086,15 @@ fn TunSwitch(tun: crate::engine::TunView) -> Element {
         (true, false) => (MUTED, BUSY.0),
     };
     let title = match (tun.on, tun.carrying, tun.elevated) {
-        (false, ..) => {
-            "Через bliss идёт только то, что направили в его порты. \
+        (false, ..) => "Через bliss идёт только то, что направили в его порты. \
              Включить TUN — весь трафик машины, включая UDP: звонки, игры, QUIC"
-        }
-        (true, true, _) => "Весь трафик машины идёт через bliss. Выключить",
-        (true, false, false) => {
-            "TUN включён, но адаптеру нужны права администратора: перезапустите bliss \
-             от имени администратора"
-        }
-        (true, false, true) => "TUN включён, но адаптер не поднялся",
+            .to_owned(),
+        (true, true, _) => "Весь трафик машины идёт через bliss. Выключить".to_owned(),
+        (true, false, false) => format!(
+            "TUN включён, но адаптеру не хватает прав: {}",
+            bliss_tun::rights_hint()
+        ),
+        (true, false, true) => "TUN включён, но адаптер не поднялся".to_owned(),
     };
 
     rsx! {
@@ -1997,13 +2191,22 @@ fn VpnCard(vpn: crate::engine::VpnView) -> Element {
     let mut sure = use_signal(|| false);
     let service = match vpn.service {
         Availability::Ready => None,
-        Availability::Stopped => Some(
+        Availability::Stopped if cfg!(windows) => Some(
             "Служба OpenVPN остановлена: запустите «OpenVPN Interactive Service» в службах \
              Windows.",
         ),
-        Availability::Missing => Some(
+        // On Linux: OpenVPN is there, and nothing can start it as root.
+        Availability::Stopped => Some(
+            "Нет pkexec (polkit): без него bliss не может запустить OpenVPN с правами \
+             администратора. Установите пакет polkit.",
+        ),
+        Availability::Missing if cfg!(windows) => Some(
             "Нужен OpenVPN: установите OpenVPN Community — openvpn.net, раздел Community \
              Downloads. Его служба даёт bliss подключаться без прав администратора.",
+        ),
+        Availability::Missing => Some(
+            "Нужен OpenVPN: установите пакет openvpn (например, sudo apt install openvpn). \
+             При подключении система спросит пароль администратора.",
         ),
     };
     let failed = match &vpn.state {
@@ -2257,11 +2460,14 @@ fn ImportForm(
                     onclick: {
                         let submit = submit.clone();
                         move |_| {
-                            if let Some(text) = crate::clipboard::paste() {
-                                let text = text.trim().to_owned();
-                                link.set(text.clone());
-                                submit(text);
-                            }
+                            let submit = submit.clone();
+                            spawn(async move {
+                                if let Some(text) = crate::clipboard::paste().await {
+                                    let text = text.trim().to_owned();
+                                    link.set(text.clone());
+                                    submit(text);
+                                }
+                            });
                         }
                     },
                     icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
@@ -2669,16 +2875,31 @@ fn choice_ring(chosen: bool) -> &'static str {
 ///
 /// Worth the space: this is the only control in bliss that changes how *other*
 /// programs reach the network, and the three words alone do not say that.
+///
+/// On Linux the setting is the desktop's, GNOME's or KDE's, and what follows
+/// it is the programs that read it — browsers and the desktop's own — rather
+/// than everything on the machine.
 fn proxy_note(mode: ProxyMode) -> &'static str {
     match mode {
-        ProxyMode::Unchanged => "bliss не трогает настройки Windows. Прокси прописываете сами.",
-        ProxyMode::Set => {
+        ProxyMode::Unchanged if cfg!(windows) => {
+            "bliss не трогает настройки Windows. Прокси прописываете сами."
+        }
+        ProxyMode::Unchanged => "bliss не трогает настройки системы. Прокси прописываете сами.",
+        ProxyMode::Set if cfg!(windows) => {
             "Весь трафик Windows идёт через bliss, пока туннель поднят. \
                            При выходе настройки вернутся как были."
         }
-        ProxyMode::Clear => {
+        ProxyMode::Set => {
+            "Браузеры и программы, что берут прокси из настроек GNOME или KDE, идут через \
+             bliss, пока туннель поднят. При выходе настройки вернутся как были."
+        }
+        ProxyMode::Clear if cfg!(windows) => {
             "Прокси в Windows выключен — на случай, если его оставила \
                              другая программа."
+        }
+        ProxyMode::Clear => {
+            "Прокси в настройках рабочего стола выключен — на случай, если его оставила \
+             другая программа."
         }
     }
 }
@@ -5386,7 +5607,14 @@ const CONDITION_HINTS: [(&str, &str); 8] = [
     ("geoip:ru", "адреса страны"),
     ("10.0.0.0/8", "адрес или подсеть"),
     ("port:443", "порт или диапазон 6881-6889"),
-    ("process:telegram.exe", "программа"),
+    (
+        if cfg!(windows) {
+            "process:telegram.exe"
+        } else {
+            "process:telegram-desktop"
+        },
+        "программа",
+    ),
 ];
 
 /// A label over a field in the editor.
@@ -6314,7 +6542,11 @@ fn Settings(frame: Frame) -> Element {
                     CheckRow {
                         checked: on,
                         enabled: true,
-                        title: "Запускать вместе с Windows",
+                        title: if cfg!(windows) {
+                            "Запускать вместе с Windows"
+                        } else {
+                            "Запускать при входе в систему"
+                        },
                         hint: "bliss откроется, когда вы войдёте в систему, и сразу поднимет туннель.",
                         onclick: {
                             let controller = controller.clone();
@@ -6326,16 +6558,40 @@ fn Settings(frame: Frame) -> Element {
                         checked: on && minimized,
                         enabled: on,
                         title: "В трее",
-                        hint: "Окно не появится: bliss будет ждать значком у часов.",
+                        hint: if cfg!(windows) {
+                            "Окно не появится: bliss будет ждать значком у часов."
+                        } else {
+                            "Окно не появится: bliss будет ждать значком в трее, а где трея \
+                             нет, откроется свёрнутым."
+                        },
                         onclick: {
                             let controller = controller.clone();
                             move |_| controller.send(Command::Startup { on: true, minimized: !minimized })
                         },
                     }
+                    // Linux: an entry in the application menu, which is also
+                    // where a Wayland desktop takes the window's icon from.
+                    if let Some(listed) = startup.menu {
+                        CheckRow {
+                            checked: listed,
+                            enabled: true,
+                            title: "Значок в меню приложений",
+                            hint: "bliss появится среди программ, и у его окна будет свой значок.",
+                            onclick: {
+                                let controller = controller.clone();
+                                move |_| controller.send(Command::MenuEntry(!listed))
+                            },
+                        }
+                    }
                     if startup.switched_off {
                         span { style: NOTE,
-                            "Автозапуск выключен в Диспетчере задач. Поставьте галочку, и bliss \
-                             включит его снова."
+                            if cfg!(windows) {
+                                "Автозапуск выключен в Диспетчере задач. Поставьте галочку, и \
+                                 bliss включит его снова."
+                            } else {
+                                "Автозапуск выключен в настройках рабочего стола. Поставьте \
+                                 галочку, и bliss включит его снова."
+                            }
                         }
                     }
                     if let Some(path) = startup.elsewhere.clone() {

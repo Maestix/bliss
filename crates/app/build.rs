@@ -4,6 +4,10 @@
 //! shortcuts and Start menu entries use that icon unless told otherwise. The
 //! window loads the same resource at runtime, so the taskbar shows it too
 //! instead of the Dioxus logo.
+//!
+//! Other systems have no resources: embed-resource answers `NotWindows`,
+//! which counts as done, and the window takes its icon from a PNG instead
+//! (`app_icon` in ui.rs).
 
 fn main() {
     println!("cargo:rerun-if-changed=bliss.rc");

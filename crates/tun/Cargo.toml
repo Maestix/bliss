@@ -13,8 +13,14 @@ tokio = { workspace = true }
 tokio-util.workspace = true
 tracing.workspace = true
 
-[target."cfg(windows)".dependencies]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 ipstack.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The device's ioctls, and netlink for its routes.
+libc.workspace = true
+
+[target."cfg(windows)".dependencies]
 wintun-bindings.workspace = true
 windows = { workspace = true, features = [
     "Win32_NetworkManagement_IpHelper",

@@ -10,6 +10,14 @@
 //! `SetClipboardData` the block belongs to the system and must not be freed;
 //! before that, it is ours and has to be. A block read with `GetClipboardData`
 //! is never ours.
+//!
+//! On Linux through GTK's clipboard, which speaks X11 and Wayland alike —
+//! GNOME's too, which offers no other way in to programs it does not draw.
+//! GTK is the window's thread's alone, so a copy asked for from the engine's
+//! thread is handed to it (`glib::MainContext::invoke`), and reading is a
+//! request answered later rather than a wait: `wait_for_text` would turn the
+//! main loop inside tao's own, where an event can arrive at a handler that is
+//! still running. Hence `paste` is `async` everywhere.
 
 /// Put `text` on the clipboard, reporting whether it got there.
 #[cfg(windows)]
@@ -72,14 +80,50 @@ pub fn copy(text: &str) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+/// Put `text` on the clipboard. Always true: the window's thread does it,
+/// now if this is that thread and as soon as it is free otherwise, and GTK
+/// reports nothing back.
+#[cfg(target_os = "linux")]
+pub fn copy(text: &str) -> bool {
+    let text = text.to_owned();
+    gtk::glib::MainContext::default().invoke(move || {
+        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        clipboard.set_text(&text);
+        // Handed to the desktop's clipboard keeper, so it outlives bliss.
+        clipboard.store();
+    });
+    true
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn copy(_text: &str) -> bool {
     false
 }
 
 /// The text on the clipboard, if there is any and nobody else is holding it.
+pub async fn paste() -> Option<String> {
+    #[cfg(windows)]
+    return paste_now();
+    #[cfg(target_os = "linux")]
+    return paste_later().await;
+    #[cfg(not(any(windows, target_os = "linux")))]
+    return None;
+}
+
+/// Asked of GTK, and answered on the window's thread when the owner of the
+/// clipboard has answered it. Called on that thread, as everything in the
+/// window is.
+#[cfg(target_os = "linux")]
+async fn paste_later() -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).request_text(move |_, text| {
+        let _ = tx.send(text.map(str::to_owned));
+    });
+    rx.await.ok().flatten()
+}
+
 #[cfg(windows)]
-pub fn paste() -> Option<String> {
+fn paste_now() -> Option<String> {
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
@@ -111,11 +155,6 @@ pub fn paste() -> Option<String> {
         let _ = CloseClipboard();
         text
     }
-}
-
-#[cfg(not(windows))]
-pub fn paste() -> Option<String> {
-    None
 }
 
 /// Russian agreement for a count of lines, for the "copied N lines" note.
@@ -158,7 +197,7 @@ mod tests {
             // Not a failure of ours, and not worth making the suite flaky over.
             return;
         }
-        let Some(got) = paste() else {
+        let Some(got) = paste_now() else {
             // Taken back between the two calls, for the same reason.
             return;
         };

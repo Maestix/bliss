@@ -145,6 +145,11 @@ pub fn condition(entry: &str) -> Result<(List, String), String> {
     if entry.to_ascii_lowercase().ends_with(".exe") {
         return program(entry).map(|v| (List::Process, v));
     }
+    // A whole path, copied from a file manager on Linux: no domain starts
+    // with a slash.
+    if cfg!(unix) && entry.starts_with('/') {
+        return program(entry).map(|v| (List::Process, v));
+    }
     if let Some((name, number)) = entry.rsplit_once(':')
         && !number.is_empty()
         && number.chars().all(|c| c.is_ascii_digit())
@@ -299,9 +304,11 @@ fn program(value: &str) -> Result<String, String> {
     if name.is_empty() {
         return Err("не указана программа".to_owned());
     }
-    // Windows names a program with its extension, so a rule without one would
-    // never match anything.
-    Ok(if name.contains('.') {
+    // Windows names a program with its extension, and the rule is written
+    // the way its program is shown. Rules match with or without it (routing's
+    // `program_name`), so this is how the rule reads, not whether it works;
+    // Linux names programs without one.
+    Ok(if name.contains('.') || !cfg!(windows) {
         name.to_owned()
     } else {
         format!("{name}.exe")
@@ -410,7 +417,20 @@ mod tests {
         );
         assert_eq!(
             condition("process:telegram"),
-            Ok((List::Process, "telegram.exe".to_owned()))
+            Ok((
+                List::Process,
+                if cfg!(windows) {
+                    "telegram.exe"
+                } else {
+                    "telegram"
+                }
+                .to_owned()
+            ))
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            condition("/snap/firefox/6738/usr/lib/firefox/firefox"),
+            Ok((List::Process, "firefox".to_owned()))
         );
         // Programs send the ASCII form of an international name.
         assert_eq!(

@@ -10,5 +10,5 @@ mod job;
 mod process;
 
 pub use config::{LogLevel, Version, build, minimum_xray_version};
-pub use download::{Channel, DownloadError, Release, client, install, list, select};
+pub use download::{Channel, DownloadError, ENGINE_FILE, Release, client, install, list, select};
 pub use process::{Xray, XrayError, check_version};

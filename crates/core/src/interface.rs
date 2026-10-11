@@ -85,7 +85,111 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::io;
+    use std::net::Ipv4Addr;
+    use std::os::fd::AsRawFd;
+
+    /// Send this socket's traffic out by interface `index`.
+    ///
+    /// `SO_BINDTOIFINDEX` (Linux 5.0) is `SO_BINDTODEVICE` by number, and
+    /// since 5.7 an ordinary user may set either on a socket not yet bound to
+    /// an interface. The route is then looked for among the interface's own
+    /// routes; where it has none — a VPN's tunnel keeps out of the main table
+    /// on purpose — the kernel takes the destination to be on the link, which
+    /// on a point-to-point tunnel is where everything is.
+    pub fn leave_by(socket: &impl AsRawFd, index: u32) -> io::Result<()> {
+        let value = index as libc::c_int;
+        // SAFETY: an int option, passed with its own size, on a descriptor the
+        // caller owns.
+        let mut done = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_BINDTOIFINDEX,
+                (&raw const value).cast(),
+                size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        // Before Linux 5.0 there is only the option by name.
+        if done == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOPROTOOPT) {
+            let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+            // SAFETY: a buffer of IF_NAMESIZE, as if_indextoname asks; the
+            // name it writes is NUL-terminated and passed with its length.
+            if !unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
+                let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+                done = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_BINDTODEVICE,
+                        name.as_ptr().cast(),
+                        len as libc::socklen_t,
+                    )
+                };
+            }
+        }
+        if done == -1 {
+            let error = io::Error::last_os_error();
+            // Linux let an ordinary user bind a socket to an interface only
+            // from 5.7 on; before that it takes CAP_NET_RAW.
+            let why = if error.raw_os_error() == Some(libc::EPERM) {
+                format!("{error} — the kernel is older than 5.7, where this needs CAP_NET_RAW")
+            } else {
+                error.to_string()
+            };
+            return Err(io::Error::new(
+                error.kind(),
+                format!("could not send the connection out by interface {index}: {why}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The interface that holds `address`, by the number a socket is told to
+    /// leave by.
+    pub fn index_of(address: Ipv4Addr) -> io::Result<Option<u32>> {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: getifaddrs fills the pointer with a list freed below.
+        if unsafe { libc::getifaddrs(&mut list) } == -1 {
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(
+                error.kind(),
+                format!("could not read the machine's addresses: {error}"),
+            ));
+        }
+        let mut found = None;
+        let mut entry = list;
+        while !entry.is_null() {
+            // SAFETY: each entry is one getifaddrs allocated, and its address,
+            // when present, is a sockaddr of the family it says.
+            let here = unsafe { &*entry };
+            entry = here.ifa_next;
+            let Some(socket) = (unsafe { here.ifa_addr.as_ref() }) else {
+                continue;
+            };
+            if i32::from(socket.sa_family) != libc::AF_INET {
+                continue;
+            }
+            let v4 = unsafe { &*here.ifa_addr.cast::<libc::sockaddr_in>() };
+            // Network order, which is the order the octets are written in.
+            if Ipv4Addr::from(v4.sin_addr.s_addr.to_ne_bytes()) == address {
+                // SAFETY: the name is a NUL-terminated string in the list.
+                let index = unsafe { libc::if_nametoindex(here.ifa_name) };
+                if index != 0 {
+                    found = Some(index);
+                    break;
+                }
+            }
+        }
+        // SAFETY: the list from the call above, freed once.
+        unsafe { libc::freeifaddrs(list) };
+        Ok(found)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use std::io;
     use std::net::Ipv4Addr;
@@ -93,7 +197,7 @@ mod imp {
     pub fn leave_by<S>(_socket: &S, _index: u32) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "choosing an interface is written for Windows only",
+            "choosing an interface is written for Windows and Linux only",
         ))
     }
 
@@ -109,6 +213,7 @@ mod imp {
 /// usual way round. Swapped, it names an interface that does not exist, and
 /// the call fails with "the requested address is not valid in its context" —
 /// an error that says nothing about byte order.
+#[cfg(any(windows, test))]
 fn interface_option(index: u32) -> [u8; 4] {
     index.to_be_bytes()
 }
@@ -143,7 +248,7 @@ mod tests {
     }
 
     /// Loopback is on every machine, and on its own interface.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn loopback_has_an_interface() {
         let index = index_of(Ipv4Addr::LOCALHOST).expect("the table reads");
@@ -153,5 +258,45 @@ mod tests {
             None,
             "a TEST-NET address is on no interface here"
         );
+    }
+
+    /// A socket told to leave by loopback's interface is bound to it — the
+    /// kernel names the interface back — and still reaches a listener there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_leaves_by_the_interface_it_is_told() {
+        use std::os::fd::AsRawFd;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let to = listener.local_addr().expect("its address");
+        let lo = index_of(Ipv4Addr::LOCALHOST)
+            .expect("the table reads")
+            .expect("loopback has one");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let socket = tokio::net::TcpSocket::new_v4().expect("a socket");
+            leave_by(&socket, lo).expect("loopback's interface");
+
+            let mut name = [0u8; 16];
+            let mut len = name.len() as libc::socklen_t;
+            // SAFETY: a buffer of the length passed, for the interface's name.
+            let read = unsafe {
+                libc::getsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_BINDTODEVICE,
+                    name.as_mut_ptr().cast(),
+                    &mut len,
+                )
+            };
+            assert_eq!(read, 0, "{}", std::io::Error::last_os_error());
+            assert_eq!(&name[..len as usize], b"lo\0", "bound to loopback");
+
+            socket.connect(to).await.expect("reaches the listener");
+        });
     }
 }

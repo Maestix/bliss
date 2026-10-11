@@ -5,22 +5,36 @@
 //! takes the packets themselves; they come back out of a userspace stack as
 //! connections and datagrams, which is the seam the relay already has.
 //!
-//! Everything here needs administrator rights: creating an adapter and moving
-//! routes does. See §7 of AGENTS.md for how it is probed.
+//! Everything here needs rights an ordinary program lacks: creating an adapter
+//! and moving routes does — administrator on Windows, `CAP_NET_ADMIN` on
+//! Linux. See §7 of AGENTS.md for how it is probed.
+//!
+//! Windows' adapter is wintun's, driven through IP Helper (`device.rs`,
+//! `net.rs`); Linux's is the kernel's own TUN device, driven over ioctls and
+//! netlink (`linux_device.rs`, `linux_net.rs`). Both answer to the same names,
+//! so the tunnel itself (`Tun::up`) and the stack it carries are one.
 
 use std::io;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(windows)]
 mod device;
+#[cfg(target_os = "linux")]
+#[path = "linux_device.rs"]
+mod device;
 #[cfg(windows)]
 mod net;
-#[cfg(windows)]
+#[cfg(target_os = "linux")]
+#[path = "linux_net.rs"]
+mod net;
+#[cfg(any(windows, target_os = "linux"))]
 mod stack;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub use device::MTU;
 
 /// The signed library, carried inside bliss.exe.
@@ -30,10 +44,12 @@ pub use device::MTU;
 /// it out beside the engine and loads it from there. Loading a library straight
 /// from memory would leave nothing to check and is what malware does — bliss.exe
 /// is unsigned and has already collected one false positive without any help.
+#[cfg(windows)]
 const LIBRARY: &[u8] = include_bytes!("../assets/wintun.dll");
 
 /// The terms it travels under. Clause 3d is the one that lets bliss ship it:
 /// alongside software that uses it only through the documented API.
+#[cfg(windows)]
 const LICENCE: &str = include_str!("../assets/LICENSE-wintun.txt");
 
 /// Write the library and its licence into the work dir; answer where it went.
@@ -41,6 +57,7 @@ const LICENCE: &str = include_str!("../assets/LICENSE-wintun.txt");
 /// Written only when what is already there is not this, byte for byte: a copy
 /// another bliss has loaded cannot be replaced anyway, and one that is already
 /// right does not need to be.
+#[cfg(windows)]
 pub fn place(work_dir: &Path) -> io::Result<PathBuf> {
     let library = work_dir.join("wintun.dll");
     if std::fs::read(&library).is_ok_and(|found| found == LIBRARY) {
@@ -92,19 +109,38 @@ pub fn elevated() -> bool {
     asked.is_ok() && elevation.TokenIsElevated != 0
 }
 
-#[cfg(not(windows))]
+/// On Linux: `CAP_NET_ADMIN` in the effective set — bliss run as root, or
+/// given the one capability with `setcap cap_net_admin+ep` on its executable.
+#[cfg(target_os = "linux")]
+pub fn elevated() -> bool {
+    device::capable()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn elevated() -> bool {
     false
+}
+
+/// What to do about not being `elevated`, in the window's words.
+pub fn rights_hint() -> &'static str {
+    if cfg!(windows) {
+        "перезапустите bliss от имени администратора"
+    } else {
+        "выдайте bliss право на сетевые настройки: sudo setcap cap_net_admin+ep <путь к bliss> \
+         — и заново после каждого обновления"
+    }
 }
 
 /// The tunnel, for as long as this is held.
 ///
 /// Dropping it puts the machine back: the routes go first, so nothing is being
 /// steered at an adapter that is about to vanish, and then the adapter itself
-/// goes and Windows forgets everything that pointed at it. There is nothing to
-/// undo after a crash, which is the one thing this has over the system proxy —
-/// the adapter cannot outlive the process that made it.
-#[cfg(windows)]
+/// goes and the system forgets everything that pointed at it. There is nothing
+/// to undo after a crash, which is the one thing this has over the system
+/// proxy — the adapter cannot outlive the process that made it. The one
+/// exception is the routes around it on Linux, which the next tunnel takes
+/// away (`net::forget_stale`).
+#[cfg(any(windows, target_os = "linux"))]
 pub struct Tun {
     /// Declared before the device so it is dropped before the device.
     _routes: net::Routes,
@@ -112,7 +148,7 @@ pub struct Tun {
     carrying: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Tun {
     /// Bring the adapter up and start carrying traffic through `serving`.
     ///
@@ -129,8 +165,13 @@ impl Tun {
         serving: Arc<bliss_core::Serving>,
         around: &[Ipv4Addr],
     ) -> io::Result<Self> {
-        let library = place(work_dir)?;
-        let device = device::Device::open(&library)?;
+        #[cfg(windows)]
+        let device = device::Device::open(&place(work_dir)?)?;
+        #[cfg(target_os = "linux")]
+        let mut device = {
+            let _ = work_dir;
+            device::Device::open()?
+        };
         let interface = device.interface();
         net::set_address(interface, device::ADDRESS, device::PREFIX)?;
 
@@ -142,14 +183,23 @@ impl Tun {
             ));
         };
 
+        #[cfg(target_os = "linux")]
+        match net::forget_stale() {
+            Ok(0) => {}
+            Ok(stale) => tracing::info!("tun: took away {stale} route(s) a previous run left"),
+            Err(e) => tracing::warn!("tun: could not look for routes a previous run left: {e}"),
+        }
+
         let mut routes = net::Routes::new();
+        // Around first: on Linux the way to each address is asked of the
+        // kernel, which would answer "the tunnel" once its routes exist.
+        for address in around {
+            routes.around_tunnel(gateway, *address)?;
+        }
         // The two halves of the address space, which beat the machine's own
         // default route by being longer without replacing it.
         routes.through_tunnel(interface, Ipv4Addr::UNSPECIFIED, 1)?;
         routes.through_tunnel(interface, Ipv4Addr::new(128, 0, 0, 0), 1)?;
-        for address in around {
-            routes.around_tunnel(gateway, *address)?;
-        }
         tracing::info!(
             "tun: up on {} via {}, {} address(es) kept outside",
             device::ADDRESS,
@@ -157,10 +207,20 @@ impl Tun {
             around.len()
         );
 
-        let session = device.session();
+        // wintun's session speaks the futures traits and the stack wants
+        // tokio's: the same bytes, two spellings of the same two traits.
+        #[cfg(windows)]
+        let packets = {
+            use tokio_util::compat::FuturesAsyncReadCompatExt;
+            device.session().compat()
+        };
+        #[cfg(target_os = "linux")]
+        let packets = device
+            .packets()
+            .ok_or_else(|| io::Error::other("the device's packets were taken already"))?;
         let carrying = tokio::spawn(async move {
             let carrying = Arc::new(stack::Carrying { serving, gateway });
-            if let Err(e) = stack::serve(session, carrying).await {
+            if let Err(e) = stack::serve(packets, carrying).await {
                 tracing::error!("tun: {e}");
             }
         });
@@ -173,7 +233,7 @@ impl Tun {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Drop for Tun {
     fn drop(&mut self) {
         // The task is parked on a read from a session that is about to be shut
@@ -183,14 +243,10 @@ impl Drop for Tun {
 }
 
 /// Everywhere else, so that the code around it needs no `cfg`.
-///
-/// Wintun is a Windows driver, and the rest of this crate is written against
-/// it; a TUN adapter elsewhere is a different implementation behind the same
-/// name, not a missing feature to paper over.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub struct Tun;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl Tun {
     pub fn up(
         _work_dir: &Path,
@@ -198,12 +254,12 @@ impl Tun {
         _around: &[Ipv4Addr],
     ) -> io::Result<Self> {
         Err(io::Error::other(
-            "bliss carries a TUN adapter on Windows only",
+            "bliss carries a TUN adapter on Windows and Linux only",
         ))
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};

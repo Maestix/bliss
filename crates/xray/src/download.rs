@@ -41,10 +41,13 @@ const ASSET: &str = "Xray-linux-64.zip";
 #[cfg(all(unix, target_arch = "aarch64"))]
 const ASSET: &str = "Xray-linux-arm64-v8a.zip";
 
+/// The engine's file name, in the archive and in the work dir.
+pub const ENGINE_FILE: &str = if cfg!(windows) { "xray.exe" } else { "xray" };
+
 /// Files worth keeping out of the archive. The geo databases are the routing
 /// rule sets for stage 1.5; taking them now costs nothing and saves a second
 /// download later.
-const WANTED: &[&str] = &["xray.exe", "xray", "geoip.dat", "geosite.dat"];
+const WANTED: &[&str] = &[ENGINE_FILE, "geoip.dat", "geosite.dat"];
 
 /// The most an archive may weigh. Xray-windows-64.zip is about 15 MB; the
 /// length the server announces is checked before anything is read or
@@ -106,6 +109,18 @@ pub enum DownloadError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl DownloadError {
+    /// The engine could not be replaced because it is running. Windows alone
+    /// refuses that (a sharing violation); on Linux the rename goes through
+    /// and the running engine keeps the file it had open.
+    pub fn engine_in_use(&self) -> bool {
+        // ERROR_SHARING_VIOLATION. 32 is EPIPE elsewhere, which means nothing
+        // of the kind.
+        cfg!(windows)
+            && matches!(self, Self::Write { source, .. } if source.raw_os_error() == Some(32))
+    }
 }
 
 /// Which releases to consider.
@@ -366,9 +381,10 @@ fn unpack(archive: &[u8], dest_dir: &Path, limit: u64) -> Result<PathBuf, Downlo
         }
 
         let path = dest_dir.join(file_name);
-        write_replacing(&path, &buf)?;
+        let is_executable = file_name == ENGINE_FILE;
+        write_replacing(&path, &buf, is_executable)?;
 
-        if file_name == "xray.exe" || file_name == "xray" {
+        if is_executable {
             executable = Some(path);
         }
     }
@@ -380,8 +396,11 @@ fn unpack(archive: &[u8], dest_dir: &Path, limit: u64) -> Result<PathBuf, Downlo
 ///
 /// A half-written engine is worse than no engine: it passes the "is there a
 /// file" check and then fails to start with something unhelpful. Rename is
-/// atomic, so the file at the destination is always whole.
-fn write_replacing(path: &Path, bytes: &[u8]) -> Result<(), DownloadError> {
+/// atomic, so the file at the destination is always whole — and on Linux an
+/// `executable` one is executable before it gets there, since a zip carries no
+/// mode bits worth trusting and `xray` written as a plain file starts as
+/// "permission denied".
+fn write_replacing(path: &Path, bytes: &[u8], executable: bool) -> Result<(), DownloadError> {
     let tmp = path.with_extension("part");
     let fail = |source| DownloadError::Write {
         path: path.to_path_buf(),
@@ -389,6 +408,17 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> Result<(), DownloadError> {
     };
 
     std::fs::write(&tmp, bytes).map_err(fail)?;
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(source) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(fail(source));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
 
     // Straight over the top. There used to be a `remove_file` here, on the
     // premise that Windows will not rename onto an existing file — it will:
@@ -396,9 +426,11 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> Result<(), DownloadError> {
     // the removal bought nothing and cost the guarantee this function exists
     // for, by leaving a moment with no engine at all if the rename then failed.
     //
-    // A running engine still cannot be replaced — the rename fails with a
-    // sharing violation, which is the right answer and leaves the old one
-    // working. Only the temporary needs clearing up in that case.
+    // A running engine still cannot be replaced on Windows — the rename fails
+    // with a sharing violation, which is the right answer and leaves the old
+    // one working. Only the temporary needs clearing up in that case. On Linux
+    // the rename succeeds: the running engine keeps the file it opened, and
+    // the next start takes the new one.
     if let Err(source) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(fail(source));
@@ -496,7 +528,7 @@ mod tests {
     fn a_file_in_the_archive_larger_than_the_limit_is_refused() {
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
         archive
-            .start_file("xray.exe", zip::write::SimpleFileOptions::default())
+            .start_file(ENGINE_FILE, zip::write::SimpleFileOptions::default())
             .expect("an entry");
         archive.write_all(&[0u8; 1000]).expect("its bytes");
         let archive = archive.finish().expect("an archive").into_inner();
@@ -507,10 +539,44 @@ mod tests {
             matches!(refused, Err(DownloadError::TooLarge { .. })),
             "{refused:?}"
         );
-        assert!(!dir.join("xray.exe").exists(), "nothing written for it");
+        assert!(!dir.join(ENGINE_FILE).exists(), "nothing written for it");
 
         let unpacked = unpack(&archive, &dir, 1000).expect("within the limit");
         assert_eq!(std::fs::read(&unpacked).expect("written").len(), 1000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Linux engine comes out of the zip runnable, and the rule sets
+    /// beside it do not. Written as a plain file, `xray` was refused with
+    /// "permission denied" at its first start.
+    #[cfg(unix)]
+    #[test]
+    fn the_engine_is_unpacked_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in ["xray", "geoip.dat"] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("an entry");
+            archive.write_all(b"#!/bin/sh\n").expect("its bytes");
+        }
+        let archive = archive.finish().expect("an archive").into_inner();
+
+        let dir = std::env::temp_dir().join(format!("bliss-unpack-mode-{}", std::process::id()));
+        let engine = unpack(&archive, &dir, 1000).expect("unpacked");
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("written")
+                .permissions()
+                .mode()
+        };
+        assert_eq!(mode(&engine) & 0o777, 0o755, "the engine runs");
+        assert_eq!(
+            mode(&dir.join("geoip.dat")) & 0o111,
+            0,
+            "a rule set does not"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
