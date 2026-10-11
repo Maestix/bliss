@@ -25,7 +25,7 @@ pub use inbound::{Bound, Inbound, Serving, serve};
 pub use outbound::{
     BoxedDatagram, BoxedStream, DIAL_TIMEOUT, Datagram, EngineInfo, Outbound, SocksOutbound,
 };
-pub use process::{name_for_datagram_port, name_for_port, process_of};
+pub use process::{name_for_connection, name_for_datagram_port, name_for_port, process_of};
 pub use relay::{relay, relay_datagrams};
 pub use routing::{Decision, Router};
 pub use target::{Target, TargetError};

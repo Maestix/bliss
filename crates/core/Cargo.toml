@@ -25,3 +25,8 @@ windows = { workspace = true, features = [
     "Win32_Networking_WinInet",
     "Win32_System_Registry",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Leaving by one interface (SO_BINDTOIFINDEX, getifaddrs), and the system
+# proxy's settings read through a child process.
+libc.workspace = true

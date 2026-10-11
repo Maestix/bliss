@@ -6,11 +6,12 @@ html, body { height: 100%; overflow: hidden; }
 
 /* Nothing in this window is selectable text, and a stray drag-select on a
    title bar or a button looks broken. The tap highlight is the grey square
-   WebView2 leaves behind on a tapped element. */
-body { font-size: 16px; user-select: none; cursor: default; }
+   WebView2 leaves behind on a tapped element. WebKitGTK, Linux's webview,
+   knows only the prefixed name, so both are said. */
+body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: default; }
 /* Except a text box, which is the one place typing and selecting are the
    point. Without this the caret lands but a double-click selects nothing. */
-.field { user-select: text; cursor: text; outline: none; }
+.field { -webkit-user-select: text; user-select: text; cursor: text; outline: none; }
 .field::placeholder { color: #5a506a; }
 .field:focus { box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .45); }
 * { -webkit-tap-highlight-color: transparent; }

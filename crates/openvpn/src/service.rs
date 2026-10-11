@@ -294,8 +294,10 @@ mod imp {
             }
         }
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         Ok(String::from_utf16_lossy(&units))
     }
@@ -336,7 +338,198 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux has no service to ask: OpenVPN is started with root's rights
+/// through polkit — `pkexec`, which asks for an administrator's password in
+/// the desktop's own dialog — or directly by a bliss that is root itself.
+///
+/// `pkexec` replaces itself with OpenVPN, so the process bliss started is
+/// OpenVPN's, by the same pid, with the standard input bliss writes the
+/// profile into and the output it reads OpenVPN's words from. It also arms
+/// the signal a child gets when its parent *thread* ends (`PR_SET_PDEATHSIG`):
+/// started from one of tokio's threads, which come and go, OpenVPN could be
+/// ended halfway through the password, so it is started from a thread that
+/// lasts (`launch`).
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+    use std::sync::mpsc;
+
+    use tokio::process::{Child, Command};
+
+    use super::Availability;
+
+    /// OpenVPN, where distributions put it, or on the PATH.
+    pub fn openvpn() -> Option<PathBuf> {
+        [
+            "/usr/sbin/openvpn",
+            "/usr/bin/openvpn",
+            "/usr/local/sbin/openvpn",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .or_else(|| on_path("openvpn"))
+    }
+
+    fn on_path(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    }
+
+    /// Whether this process is root, and so starts OpenVPN itself.
+    pub fn root() -> bool {
+        // SAFETY: geteuid has no preconditions.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    /// OpenVPN is there, and something can start it with the rights it
+    /// needs. `Stopped` here means the second is missing: no polkit.
+    pub fn availability() -> Availability {
+        match (openvpn(), root() || on_path("pkexec").is_some()) {
+            (None, _) => Availability::Missing,
+            (Some(_), false) => Availability::Stopped,
+            (Some(_), true) => Availability::Ready,
+        }
+    }
+
+    /// What starts OpenVPN with `options`: `pkexec` and OpenVPN's full path,
+    /// or OpenVPN itself for a bliss that is root.
+    pub fn command(openvpn: &Path, options: &[String]) -> Command {
+        let mut command = if root() {
+            Command::new(openvpn)
+        } else {
+            let mut command = Command::new("pkexec");
+            command.arg(openvpn);
+            command
+        };
+        command
+            .args(options)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            // Gone with bliss's own end of things, while it is still bliss's
+            // to end: a pkexec waiting on the password. An OpenVPN running as
+            // root is past it, and leaves on its leash instead.
+            .kill_on_drop(true);
+        command
+    }
+
+    type Task = Box<dyn FnOnce() + Send>;
+
+    /// The thread OpenVPN is started from. It never exits.
+    static LASTING: OnceLock<mpsc::Sender<Task>> = OnceLock::new();
+
+    /// Start `command` from a thread that lasts as long as bliss does.
+    pub async fn launch(mut command: Command) -> std::io::Result<Child> {
+        let sender = LASTING.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Task>();
+            std::thread::Builder::new()
+                .name("bliss-openvpn".to_owned())
+                .spawn(move || {
+                    for task in rx {
+                        task();
+                    }
+                })
+                .expect("a thread to start OpenVPN from");
+            tx
+        });
+        let runtime = tokio::runtime::Handle::current();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sender
+            .send(Box::new(move || {
+                let _entered = runtime.enter();
+                let _ = tx.send(command.spawn());
+            }))
+            .map_err(|_| std::io::Error::other("the thread OpenVPN is started from is gone"))?;
+        rx.await
+            .map_err(|_| std::io::Error::other("the thread OpenVPN is started from is gone"))?
+    }
+
+    /// What an exit before OpenVPN ever called says. `pkexec` answers 126
+    /// when its dialog was dismissed and 127 when it may not, or cannot, ask
+    /// — not authorized, or no polkit agent to show the dialog.
+    pub fn exit_words(code: Option<i32>, through_pkexec: bool) -> String {
+        match (code, through_pkexec) {
+            (Some(126), true) => "запуск OpenVPN отменён в окне пароля".to_owned(),
+            (Some(127), true) => "pkexec не дал запустить OpenVPN: нет прав администратора \
+                                  или нет агента polkit, который спросил бы пароль"
+                .to_owned(),
+            (Some(code), _) => format!("OpenVPN завершился с ошибкой (exit code = {code})"),
+            (None, _) => "OpenVPN завершился, остановленный сигналом".to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_refusal_by_polkit_says_which() {
+            assert!(exit_words(Some(126), true).contains("отменён"));
+            assert!(exit_words(Some(127), true).contains("polkit"));
+            assert!(
+                exit_words(Some(127), false).contains("exit code = 127"),
+                "OpenVPN's own code, when there was no pkexec"
+            );
+            assert!(exit_words(Some(1), true).contains("exit code = 1"));
+        }
+
+        /// pkexec is told OpenVPN's full path: it looks up a bare name in a
+        /// PATH of its own, not bliss's.
+        #[test]
+        fn pkexec_is_given_the_full_path() {
+            let command = command(
+                Path::new("/usr/sbin/openvpn"),
+                &["--verb".into(), "3".into()],
+            );
+            let std = command.as_std();
+            let args: Vec<_> = std
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            if root() {
+                assert_eq!(std.get_program(), "/usr/sbin/openvpn");
+            } else {
+                assert_eq!(std.get_program(), "pkexec");
+                assert_eq!(args.first().map(String::as_str), Some("/usr/sbin/openvpn"));
+            }
+            assert!(args.ends_with(&["--verb".to_owned(), "3".to_owned()]));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::path::Path;
+
+    use super::{Availability, ServiceError, Started};
+
+    pub struct Pipe;
+
+    impl Pipe {
+        pub fn last_word(self) -> Option<String> {
+            None
+        }
+    }
+
+    pub fn availability() -> Availability {
+        super::linux::availability()
+    }
+
+    /// Linux starts OpenVPN through `linux::launch`, not here.
+    pub fn start(_directory: &Path, _options: &str) -> Result<Started, ServiceError> {
+        Err(ServiceError::Missing)
+    }
+
+    /// An OpenVPN running as root cannot be ended from here; it leaves on its
+    /// leash (`session.rs`).
+    pub fn terminate(_pid: u32) {}
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use std::path::Path;
 
@@ -371,8 +564,10 @@ mod tests {
     fn the_startup_data_is_three_terminated_parts() {
         let data = startup_data("C:\\d", "--verb 3", "").expect("short");
         let units: Vec<u16> = data
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         let expected: Vec<u16> = "C:\\d\0--verb 3\0\0".encode_utf16().collect();
         assert_eq!(units, expected);

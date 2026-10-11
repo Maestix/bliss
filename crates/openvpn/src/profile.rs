@@ -41,6 +41,15 @@ pub enum ProfileError {
 /// the first matching filter wins, so these come before any the profile has.
 /// `route-method` is OpenVPN GUI's: pushed, it would take routes away from
 /// the service, which is what adds them for a program without rights.
+///
+/// And a profile written for Windows carries options only Windows' OpenVPN
+/// knows — `ip-win32` above all — which Linux's refuses outright as unknown;
+/// `ignore-unknown-option` lets it pass them by with a warning instead. On
+/// every system, so that the preamble is one length everywhere; where an
+/// option is known the list is never asked. `route-method` is on it although
+/// the user's profile has it and OpenVPN's source was read both ways — as
+/// ignored off Windows and as Windows-only — since on the list it passes
+/// either way.
 const FILTERS: &str = "\
 # Written by bliss from the profile added in its window. The server does not
 # get the machine: its routes and DNS settings are dropped, and bliss asks its
@@ -54,6 +63,7 @@ pull-filter ignore \"dhcp-option\"
 pull-filter ignore \"dns \"
 pull-filter ignore \"block-outside-dns\"
 pull-filter ignore \"register-dns\"
+ignore-unknown-option ip-win32 route-method tap-sleep dhcp-renew dhcp-release dhcp-pre-release pause-exit show-net-up win-sys windows-driver allow-nonadmin
 
 ";
 
@@ -82,7 +92,19 @@ const fn lines_in(text: &str) -> usize {
 /// is far above an ordinary default route's, and a longer prefix wins before
 /// metrics are compared at all, so every other connection keeps the way it
 /// had — TUN adapters included, whose routes are halves of the address space.
+///
+/// Linux needs it only for a `dev tap` profile, and is better without it
+/// otherwise. A socket bound to a tunnel with no route covering the
+/// destination is sent down the tunnel anyway — the kernel takes the
+/// destination to be on the link — while a second default route, however
+/// high its metric, becomes the machine's own the moment the real one goes,
+/// and then everything goes to the work network.
 pub const ROUTE: &str = "route 0.0.0.0 0.0.0.0 vpn_gateway 9999";
+
+/// Whether `ROUTE` goes into a profile whose device is a TAP (`tap`) one.
+pub fn wants_route(tap: bool) -> bool {
+    cfg!(windows) || tap
+}
 
 /// Directives that would give the machine to the server, run programs, or
 /// fight bliss for control of OpenVPN. Commented out, not deleted, so the
@@ -177,6 +199,7 @@ pub fn rewrite(profile: &str) -> Result<String, ProfileError> {
     let mut remote = false;
     let mut login = false;
     let mut code = false;
+    let mut tap = false;
     let mut external: Option<String> = None;
 
     for line in profile.lines() {
@@ -227,6 +250,9 @@ pub fn rewrite(profile: &str) -> Result<String, ProfileError> {
             "auth-user-pass" => login = true,
             "static-challenge" => code = true,
             "askpass" => login = true,
+            "dev" | "dev-type" => {
+                tap |= argument.is_some_and(|a| a.to_ascii_lowercase().starts_with("tap"));
+            }
             file if FILES.contains(&file)
                 && argument.is_some_and(|a| !a.eq_ignore_ascii_case("[inline]")) =>
             {
@@ -262,9 +288,11 @@ pub fn rewrite(profile: &str) -> Result<String, ProfileError> {
         return Err(ProfileError::External(file));
     }
 
-    out.push_str("\n# bliss: one way out through the VPN, for what its rules send here.\n");
-    out.push_str(ROUTE);
-    out.push('\n');
+    if wants_route(tap) {
+        out.push_str("\n# bliss: one way out through the VPN, for what its rules send here.\n");
+        out.push_str(ROUTE);
+        out.push('\n');
+    }
     Ok(out)
 }
 
@@ -325,7 +353,14 @@ TTTTTTTTTTTTTTTT
         // The filters come before anything the profile says.
         let first = written.find("pull-filter ignore \"redirect-gateway\"");
         assert!(first.is_some_and(|at| at < written.find("client").expect("client")));
-        assert!(written.trim_end().ends_with(ROUTE));
+        assert_eq!(
+            written.trim_end().ends_with(ROUTE),
+            cfg!(windows),
+            "a tun profile"
+        );
+        // A Windows-only option passes on Linux, and nothing new is refused
+        // on Windows, whose OpenVPN knows every one of them.
+        assert!(written.contains("\nignore-unknown-option ip-win32 "));
         // route-method stays: the service's own channel overrides it.
         assert!(written.contains("\nroute-method exe\n"));
     }
@@ -449,6 +484,51 @@ TTTTTTTTTTTTTTTT
         let crlf = WORK.replace('\n', "\r\n");
         let written = rewrite(&crlf).expect("usable");
         assert!(written.contains("KKKKKKKKKKKKKKKK"));
-        assert!(written.trim_end().ends_with(ROUTE));
+        assert_eq!(written.trim_end().ends_with(ROUTE), cfg!(windows));
+    }
+
+    /// Every option a profile written for Windows may carry and Linux's
+    /// OpenVPN may not know is either commented out or passed by: the user's
+    /// own profile has `route-method exe`, and an older one `dhcp-release`.
+    #[test]
+    fn windows_only_options_never_stop_linux() {
+        let written = rewrite(WORK).expect("a usable profile");
+        let ignored: Vec<&str> = written
+            .lines()
+            .find_map(|line| line.strip_prefix("ignore-unknown-option "))
+            .expect("the line is there")
+            .split_whitespace()
+            .collect();
+        for option in [
+            "route-method",
+            "ip-win32",
+            "dhcp-release",
+            "dhcp-renew",
+            "dhcp-pre-release",
+            "tap-sleep",
+            "pause-exit",
+            "show-net-up",
+            "win-sys",
+            "windows-driver",
+            "allow-nonadmin",
+        ] {
+            assert!(
+                ignored.contains(&option),
+                "{option} would stop Linux's OpenVPN"
+            );
+        }
+        for dropped in ["block-outside-dns", "register-dns"] {
+            assert!(DROPPED.contains(&dropped), "{dropped} is commented out");
+        }
+    }
+
+    /// A TAP device answers no packet for an address it has no route to, so
+    /// a TAP profile gets the route everywhere; a TUN one on Windows alone.
+    #[test]
+    fn the_route_goes_where_it_is_needed() {
+        let tap = rewrite(&WORK.replace("dev tun\n", "dev tap0\n")).expect("usable");
+        assert!(tap.trim_end().ends_with(ROUTE), "a tap profile, anywhere");
+        let tun = rewrite(WORK).expect("usable");
+        assert_eq!(tun.trim_end().ends_with(ROUTE), cfg!(windows));
     }
 }

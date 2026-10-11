@@ -438,6 +438,8 @@ pub enum Command {
         on: bool,
         minimized: bool,
     },
+    /// Put bliss in the application menu, or take it out (Linux).
+    MenuEntry(bool),
     /// Read the startup entry again: Task Manager, or another copy of bliss,
     /// may have changed it since.
     ReadStartup,
@@ -585,7 +587,7 @@ pub fn engine_path(setup: &Setup) -> Result<PathBuf, String> {
             ))
         };
     }
-    let managed = setup.work_dir.join("xray.exe");
+    let managed = setup.work_dir.join(bliss_xray::ENGINE_FILE);
     if managed.is_file() {
         Ok(managed)
     } else {
@@ -839,11 +841,12 @@ async fn drive(
     let probes = Arc::new(Sweep::new());
 
     let mut proxy = setup.profile.inbound.system_proxy;
+    let system_proxy = SystemProxy::new(setup.work_dir.clone(), frames.clone());
 
-    // The entry Windows starts bliss from at sign-in, and the executable it
-    // should name: this one.
+    // The entry the session starts bliss from at sign-in, and the executable
+    // it should name: this one.
     let startup_keys = crate::startup::Keys::from_env();
-    let exe = std::env::current_exe();
+    let exe = crate::startup::this_program();
     publish_startup(&frames, &startup_keys, exe.as_deref().ok());
 
     // The rule table lives here rather than inside `start`, so it survives a
@@ -879,7 +882,7 @@ async fn drive(
         )
         .await;
     }
-    apply_proxy(proxy, &setup, running.is_some(), &frames);
+    system_proxy.apply(proxy, &setup, running.is_some());
 
     loop {
         tokio::select! {
@@ -889,12 +892,12 @@ async fn drive(
                     Command::Start => {
                         if running.is_none() {
                             running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                            apply_proxy(proxy, &setup, running.is_some(), &frames);
+                            system_proxy.apply(proxy, &setup, running.is_some());
                         }
                     }
                     Command::Stop => {
                         stop_now(&mut running, &frames).await;
-                        apply_proxy(proxy, &setup, false, &frames);
+                        system_proxy.apply(proxy, &setup, false);
                     }
                     Command::Toggle { was_on } => {
                         // Read against what the user saw, not against what has
@@ -903,10 +906,10 @@ async fn drive(
                         // has finished — or failed — while it queued.
                         if was_on {
                             stop_now(&mut running, &frames).await;
-                            apply_proxy(proxy, &setup, false, &frames);
+                            system_proxy.apply(proxy, &setup, false);
                         } else if running.is_none() {
                             running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                            apply_proxy(proxy, &setup, running.is_some(), &frames);
+                            system_proxy.apply(proxy, &setup, running.is_some());
                         }
                     }
                     Command::Restart => {
@@ -914,7 +917,7 @@ async fn drive(
                             parts.stop().await;
                         }
                         running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                        apply_proxy(proxy, &setup, running.is_some(), &frames);
+                        system_proxy.apply(proxy, &setup, running.is_some());
                     }
                     // Switching server means rebuilding the engine: its config
                     // names exactly one, so there is nothing to reload. The old
@@ -952,7 +955,7 @@ async fn drive(
                             if resume {
                                 running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
                             }
-                            apply_proxy(proxy, &setup, running.is_some(), &frames);
+                            system_proxy.apply(proxy, &setup, running.is_some());
                         }
                     }
                     Command::PingAll => ping_all(&setup.servers, &frames, &probes),
@@ -1188,7 +1191,7 @@ async fn drive(
                             // for. Connect, as opening it with one already would.
                             if first && setup.autostart && running.is_none() {
                                 running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                                apply_proxy(proxy, &setup, running.is_some(), &frames);
+                                system_proxy.apply(proxy, &setup, running.is_some());
                             }
                         }
                     }
@@ -1236,7 +1239,7 @@ async fn drive(
                                     false,
                                 );
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy, &system_proxy)
                                         .await;
                                 }
                             }
@@ -1322,7 +1325,7 @@ async fn drive(
                             took_up_engine(&setup, &mut rules, running.as_ref(), &frames);
                             if running.is_none() {
                                 running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                                apply_proxy(proxy, &setup, running.is_some(), &frames);
+                                system_proxy.apply(proxy, &setup, running.is_some());
                             }
                         }
                         Err(why) => {
@@ -1388,7 +1391,7 @@ async fn drive(
                                 // The rows came back without their numbers.
                                 ping_all(&setup.servers, &frames, &probes);
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy, &system_proxy)
                                         .await;
                                 }
                             }
@@ -1442,11 +1445,11 @@ async fn drive(
                                 // The rows came back without their numbers.
                                 ping_all(&setup.servers, &frames, &probes);
                                 if lost {
-                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy)
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy, &system_proxy)
                                         .await;
                                 } else if first && setup.autostart && running.is_none() && !setup.servers.is_empty() {
                                     running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                                    apply_proxy(proxy, &setup, running.is_some(), &frames);
+                                    system_proxy.apply(proxy, &setup, running.is_some());
                                 }
                             }
                             Err(why) => {
@@ -1461,7 +1464,7 @@ async fn drive(
                     }
                     Command::Proxy(mode) => {
                         proxy = mode;
-                        apply_proxy(proxy, &setup, running.is_some(), &frames);
+                        system_proxy.apply(proxy, &setup, running.is_some());
                         // Remembered, like every other choice made in the window.
                         // It used to last only until the window closed.
                         if setup.profile.inbound.system_proxy != mode {
@@ -1485,14 +1488,29 @@ async fn drive(
                                 Ok(()) => tracing::info!(
                                     "startup: {}",
                                     match (on, minimized) {
-                                        (false, _) => "Windows no longer starts bliss",
-                                        (true, false) => "Windows starts bliss at sign-in",
-                                        (true, true) => "Windows starts bliss at sign-in, minimized",
+                                        (false, _) => "the session no longer starts bliss",
+                                        (true, false) => "the session starts bliss at sign-in",
+                                        (true, true) => {
+                                            "the session starts bliss at sign-in, minimized"
+                                        }
                                     }
                                 ),
                                 Err(e) => toaster.show(&frames, format!("автозапуск не изменился: {e}"), true),
                             },
-                            Err(_) => toaster.show(&frames, "не удалось узнать, где лежит bliss.exe", true),
+                            Err(_) => toaster.show(&frames, "не удалось узнать, где лежит программа bliss", true),
+                        }
+                        publish_startup(&frames, &startup_keys, exe.as_deref().ok());
+                    }
+                    Command::MenuEntry(on) => {
+                        match exe.as_deref() {
+                            Ok(path) => match crate::startup::set_menu(&startup_keys, path, on) {
+                                Ok(()) => tracing::info!(
+                                    "startup: {} the application menu",
+                                    if on { "in" } else { "out of" }
+                                ),
+                                Err(e) => toaster.show(&frames, e, true),
+                            },
+                            Err(_) => toaster.show(&frames, "не удалось узнать, где лежит программа bliss", true),
                         }
                         publish_startup(&frames, &startup_keys, exe.as_deref().ok());
                     }
@@ -1586,10 +1604,20 @@ async fn drive(
                             // The window runs elevated as well as not (rule 25),
                             // so the answer is the plain one. The choice is
                             // saved: an elevated start raises the adapter.
-                            let note = "TUN не поднялся: адаптеру нужны права администратора. \
-                                        Выбор сохранён — перезапустите bliss от имени \
-                                        администратора, и он включится сам";
-                            toaster.show(&frames, note.to_owned(), true);
+                            let note = if cfg!(windows) {
+                                "TUN не поднялся: адаптеру нужны права администратора. \
+                                 Выбор сохранён — перезапустите bliss от имени \
+                                 администратора, и он включится сам"
+                                    .to_owned()
+                            } else {
+                                format!(
+                                    "TUN не поднялся: устройству нужно право CAP_NET_ADMIN. \
+                                     Выбор сохранён — {}, перезапустите bliss, и он \
+                                     включится сам",
+                                    bliss_tun::rights_hint()
+                                )
+                            };
+                            toaster.show(&frames, note, true);
                         }
                     }
                     Command::Vpn(on) => {
@@ -1681,7 +1709,7 @@ async fn drive(
                     running = fail(&frames, &format!("движок неожиданно завершился ({status})"));
                     // The machine must not be left pointed at a port that has
                     // just stopped listening.
-                    apply_proxy(proxy, &setup, false, &frames);
+                    system_proxy.apply(proxy, &setup, false);
                 }
                 // An engine installed from outside — `bliss engine install`
                 // in a console — while the window waited for one is taken up
@@ -1698,7 +1726,7 @@ async fn drive(
                         frames.send_modify(|f| f.engine_setup = EngineSetup::Present);
                         took_up_engine(&setup, &mut rules, None, &frames);
                         running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
-                        apply_proxy(proxy, &setup, running.is_some(), &frames);
+                        system_proxy.apply(proxy, &setup, running.is_some());
                     }
                 } else {
                     engine_seen = None;
@@ -1731,44 +1759,99 @@ async fn drive(
     // Asked to go, so its routes go with it. Had bliss simply died, OpenVPN
     // would have left anyway, on the management connection closing.
     vpn.shut().await;
-    // Belt: the window also restores on its way out, and the startup check is
-    // the braces. This covers the ordinary case of the channel closing.
-    let _ = bliss_core::sysproxy::restore(&setup.work_dir);
+    // Belt: the window also puts the settings back on its way out, and the
+    // startup check is the braces. This covers the ordinary case of the
+    // channel closing: the last change asked for is let finish first.
+    system_proxy.finish().await;
+    let _ = bliss_core::sysproxy::leave(&setup.work_dir);
 }
 
-/// Point the machine's proxy settings at us, or put them back.
+/// The machine's proxy settings, changed off the engine loop.
 ///
-/// `serving` is what makes this safe: mode `Set` with nothing listening writes
-/// nothing at all. A proxy aimed at a dead port is indistinguishable, from the
-/// user's chair, from the internet being broken — so the mode is remembered
-/// and takes effect when the tunnel comes up.
-fn apply_proxy(mode: ProxyMode, setup: &Setup, serving: bool, frames: &watch::Sender<Frame>) {
-    let addr = serving.then(|| {
-        let inbound = &setup.profile.inbound;
-        // A proxy value has to name an address a client can dial. If we are
-        // listening on every interface, the one to tell the machine about is
-        // loopback.
-        let ip = if inbound.listen.is_unspecified() {
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-        } else {
-            inbound.listen
-        };
-        SocketAddr::new(ip, inbound.http)
-    });
+/// On Windows a change is three registry values. On Linux it is a chain of
+/// programs — gsettings, and on Plasma kreadconfig and kwriteconfig, some
+/// thirty in all — each allowed seconds, and every click in the window waited
+/// behind them in this loop. Only the latest wish matters, so wishes go
+/// through a watch: one made while another is being applied replaces any
+/// still waiting, and none is applied out of turn.
+struct SystemProxy {
+    wish: watch::Sender<Option<Wish>>,
+    frames: watch::Sender<Frame>,
+    applying: JoinHandle<()>,
+}
 
-    match bliss_core::sysproxy::apply(mode, &setup.work_dir, addr) {
-        Ok(applied) => frames.send_modify(|f| {
-            f.proxy_mode = mode;
-            f.proxy_applied = applied;
-        }),
-        Err(e) => {
-            tracing::error!("system proxy: {e}");
-            frames.send_modify(|f| {
-                f.proxy_mode = mode;
-                f.proxy_applied = false;
-                f.error = Some(format!("не удалось изменить системный прокси: {e}"));
-            });
+#[derive(Clone, Copy)]
+struct Wish {
+    mode: ProxyMode,
+    /// Where bliss serves, or none while it does not.
+    at: Option<SocketAddr>,
+}
+
+impl SystemProxy {
+    fn new(work_dir: PathBuf, frames: watch::Sender<Frame>) -> Self {
+        let (wish, mut wished) = watch::channel(None::<Wish>);
+        let shown = frames.clone();
+        let applying = tokio::spawn(async move {
+            while wished.changed().await.is_ok() {
+                let Some(Wish { mode, at }) = *wished.borrow_and_update() else {
+                    continue;
+                };
+                let dir = work_dir.clone();
+                let applied = tokio::task::spawn_blocking(move || {
+                    bliss_core::sysproxy::apply(mode, &dir, at)
+                })
+                .await;
+                match applied {
+                    Ok(Ok(applied)) => shown.send_modify(|f| f.proxy_applied = applied),
+                    Ok(Err(e)) => {
+                        tracing::error!("system proxy: {e}");
+                        shown.send_modify(|f| {
+                            f.proxy_applied = false;
+                            f.error = Some(format!("не удалось изменить системный прокси: {e}"));
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("system proxy: the change did not finish: {e}");
+                        shown.send_modify(|f| f.proxy_applied = false);
+                    }
+                }
+            }
+        });
+        Self {
+            wish,
+            frames,
+            applying,
         }
+    }
+
+    /// Point the machine's proxy settings at us, or put them back.
+    ///
+    /// `serving` is what makes this safe: mode `Set` with nothing listening
+    /// writes nothing at all. A proxy aimed at a dead port is
+    /// indistinguishable, from the user's chair, from the internet being
+    /// broken — so the mode is remembered and takes effect when the tunnel
+    /// comes up. The choice is on screen at once; whether it took, once it has.
+    fn apply(&self, mode: ProxyMode, setup: &Setup, serving: bool) {
+        let at = serving.then(|| {
+            let inbound = &setup.profile.inbound;
+            // A proxy value has to name an address a client can dial. If we are
+            // listening on every interface, the one to tell the machine about
+            // is loopback.
+            let ip = if inbound.listen.is_unspecified() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                inbound.listen
+            };
+            SocketAddr::new(ip, inbound.http)
+        });
+        self.frames.send_modify(|f| f.proxy_mode = mode);
+        self.wish.send_replace(Some(Wish { mode, at }));
+    }
+
+    /// Let the change being made finish, and take no more.
+    async fn finish(self) {
+        drop(self.wish);
+        let _ = self.applying.await;
     }
 }
 
@@ -2276,6 +2359,7 @@ async fn follow_selection(
     selected: usize,
     wiring: Wiring<'_>,
     proxy: ProxyMode,
+    system_proxy: &SystemProxy,
 ) {
     let frames = wiring.frames;
     let Some(parts) = running.take() else {
@@ -2287,7 +2371,7 @@ async fn follow_selection(
     } else {
         *running = start(setup, selected, wiring).await;
     }
-    apply_proxy(proxy, setup, running.is_some(), frames);
+    system_proxy.apply(proxy, setup, running.is_some());
 }
 
 fn publish_subscriptions(
@@ -2487,8 +2571,7 @@ fn install_problem(e: &bliss_xray::DownloadError) -> String {
             "архив оказался больше, чем бывают сборки xray-core, и его не стали качать".to_owned()
         }
         E::NoExecutable | E::Zip(_) => "в скачанном архиве нет движка".to_owned(),
-        // ERROR_SHARING_VIOLATION: a running engine cannot be replaced.
-        E::Write { source, .. } if source.raw_os_error() == Some(32) => {
+        busy if busy.engine_in_use() => {
             "xray.exe занят: им пользуется работающий движок — возможно, другой копии bliss"
                 .to_owned()
         }
@@ -2623,7 +2706,7 @@ fn publish_startup(
     let startup = match exe {
         Some(exe) => crate::startup::read(keys, exe),
         None => crate::startup::Startup {
-            problem: Some("не удалось узнать, где лежит bliss.exe".to_owned()),
+            problem: Some("не удалось узнать, где лежит программа bliss".to_owned()),
             ..Default::default()
         },
     };
@@ -2855,7 +2938,7 @@ fn begin_tun(
         return false;
     }
     if !bliss_tun::elevated() {
-        tracing::warn!("tun: asked for, but this bliss has no administrator rights");
+        tracing::warn!("tun: asked for, but this bliss has not the rights for it");
         publish_tun(frames, true, false, None);
         return false;
     }
@@ -3119,7 +3202,23 @@ fn reveal(path: &std::path::Path) {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux: `xdg-open`, the desktop's own "open this the way you open such
+/// files" — a folder in its file manager, a `.toml` in its editor.
+#[cfg(target_os = "linux")]
+fn reveal(path: &std::path::Path) {
+    tracing::info!("opening {}", path.display());
+    if let Err(e) = std::process::Command::new("xdg-open")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        tracing::warn!("could not open {}: {e}", path.display());
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn reveal(path: &std::path::Path) {
     tracing::warn!("cannot open {} on this platform", path.display());
 }
@@ -3397,8 +3496,11 @@ mod tests {
             path: PathBuf::from(r"C:\x\xray.exe"),
             source: std::io::Error::from_raw_os_error(32),
         };
-        assert!(
+        // Windows' sharing violation; elsewhere 32 is EPIPE, a write failure
+        // like any other.
+        assert_eq!(
             install_problem(&busy).contains("занят"),
+            cfg!(windows),
             "{}",
             install_problem(&busy)
         );

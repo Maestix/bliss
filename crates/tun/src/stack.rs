@@ -16,10 +16,8 @@ use bliss_core::{Decision, Route, Serving, Target, relay};
 use ipstack::{
     IpStack, IpStackConfig, IpStackStream, IpStackTcpStream, IpStackUdpStream, TcpConfig,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpSocket;
-use tokio_util::compat::FuturesAsyncReadCompatExt;
-use wintun_bindings::AsyncSession;
 
 use crate::device::MTU;
 use crate::net::{self, Gateway};
@@ -42,8 +40,12 @@ pub struct Carrying {
     pub gateway: Gateway,
 }
 
-/// Carry what the adapter gives us until the session ends.
-pub async fn serve(session: AsyncSession, carrying: Arc<Carrying>) -> io::Result<()> {
+/// Carry what the adapter gives us until its packets end: wintun's session on
+/// Windows, the device itself on Linux — a read is a packet either way.
+pub async fn serve<D>(packets: D, carrying: Arc<Carrying>) -> io::Result<()>
+where
+    D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let mut config = IpStackConfig::default();
     config
         .mtu(MTU)
@@ -52,9 +54,7 @@ pub async fn serve(session: AsyncSession, carrying: Arc<Carrying>) -> io::Result
     tcp.timeout = IDLE;
     config.with_tcp_config(tcp);
 
-    // wintun's session speaks the futures traits and the stack wants tokio's:
-    // the same bytes, two spellings of the same two traits.
-    let mut stack = IpStack::new(config, session.compat());
+    let mut stack = IpStack::new(config, packets);
     loop {
         let stream = match stack.accept().await {
             Ok(stream) => stream,
@@ -100,7 +100,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     // do not match a TUN connection until bliss answers the DNS query itself
     // and hands out an address it can recognise again.
     let target = Target::Socket(client.peer_addr());
-    let process = bliss_core::name_for_port(client.local_addr().port());
+    let process = bliss_core::name_for_connection(client.local_addr(), client.peer_addr());
     // One table decides this connection, whatever changes while it is open.
     let decision = decide(serving, &target, process.as_deref());
 
@@ -207,7 +207,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
 /// adapter catches it like any other. Decided by the rules, it would usually
 /// go through the proxy server — a work network reached by way of a server
 /// abroad, if the work server takes connections from there at all.
-const VPN_PROGRAMS: [&str; 1] = ["openvpn.exe"];
+const VPN_PROGRAMS: [&str; 2] = ["openvpn.exe", "openvpn"];
 
 /// The rules' answer, except for the VPN's own connections, which leave the
 /// ordinary way whatever the rules say.

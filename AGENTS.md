@@ -6,16 +6,18 @@ claim was fact-checked against the code, git and this machine when the file was
 written — if you find one that has gone stale, fix the file in the same commit
 as the code. Read the whole file before the first edit.
 
-bliss is a proxy client for Windows, written in Rust. It began as a VLESS +
-REALITY client and now reads a link for every kind of server xray-core can
-reach: VLESS, VMess, Trojan, Shadowsocks, SOCKS, Hysteria 2 and WireGuard, over
-every transport xray still has. Stage 1
+bliss is a proxy client for Windows and Linux, written in Rust. It began as a
+VLESS + REALITY client and now reads a link for every kind of server xray-core
+can reach: VLESS, VMess, Trojan, Shadowsocks, SOCKS, Hysteria 2 and WireGuard,
+over every transport xray still has. Stage 1
 (current) drives an external `xray-core` process and owns everything around it:
 its own SOCKS5/HTTP inbound, a relay with per-connection accounting, routing,
 the machine's proxy settings, and a Dioxus desktop window. Beside the tunnel it
 can hold a work VPN — the official OpenVPN, started through OpenVPN's own
-service and kept to bliss's rules (§10a). Stage 3 replaces xray
-with a native TLS 1.3 + REALITY + VLESS stack behind the same `Outbound` trait.
+service (on Linux through polkit) and kept to bliss's rules (§10a). Stage 3
+replaces xray with a native TLS 1.3 + REALITY + VLESS stack behind the same
+`Outbound` trait. Windows is where bliss is used every day; Linux is the port
+of 9 October 2026, built and tested in WSL, its window not yet run (§12).
 The long-form plan, in Russian, lives outside the repo at
 `%USERPROFILE%\.claude\plans\cryptic-conjuring-stroustrup.md`.
 
@@ -38,7 +40,9 @@ The long-form plan, in Russian, lives outside the repo at
     attached to a message on 4 October and so read whole — the user was told
     to have it replaced), the `[vpn]` section of the real profile, and
     `%LOCALAPPDATA%\bliss\data\openvpn\profile.ovpn`, which bliss writes as
-    the VPN starts and deletes once OpenVPN has read it.
+    the VPN starts and deletes once OpenVPN has read it;
+  - on Linux the same two files live at `~/.config/bliss/bliss.toml` and
+    `~/.local/share/bliss/xray.json` (in WSL too, which is the user's).
 
   All but the first live outside the repository; never copy them in. The user
   once pasted the head of the work profile, with the `remote` line blanked and
@@ -71,7 +75,10 @@ The long-form plan, in Russian, lives outside the repo at
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`, so you
   know which of the two will happen. On September 14 the user's bliss had died
   with the proxy set and v2rayN had since taken the proxy over; the probe window
-  started after that deleted the file and changed nothing.
+  started after that deleted the file and changed nothing. In WSL the
+  snapshot is in `~/.local/share/bliss`, the setting in WSL's own dconf
+  (`gsettings list-recursively org.gnome.system.proxy`): WSL has a real dconf
+  and session bus, so a bliss there sets a system proxy for WSL's programs.
 - **Talk to the user in Russian.** Code, comments, docs and commit messages are
   in English.
 
@@ -81,10 +88,10 @@ The long-form plan, in Russian, lives outside the repo at
 |---|---|---|
 | `crates/proto` | `bliss-proto` | pure data: the parsed server — protocol, security, transport — and its redacting types (`server.rs`); share links, one parser per scheme in `link/` (`vless.rs`, `vmess.rs`, `trojan.rs`, `shadowsocks.rs`, `socks.rs`, `hysteria2.rs`, `wireguard.rs`) and the transport and TLS parameters they share (`link/stream.rs`); TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`); leaving by one interface (`interface.rs`), dialling through one — the VPN's — with its own DNS servers (`through.rs`, `dns.rs`) |
-| `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
-| `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision in a Job Object, GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
-| `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`), the machine's addresses and routes (`net.rs`), and packets turned into connections and flows (`stack.rs`) |
-| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with Windows (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
+| `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service and, on Linux, `pkexec` (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
+| `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision tied to bliss's life — a Job Object, on Linux the parent-death signal (`job.rs`) — GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
+| `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`; Linux's own TUN device, `linux_device.rs`), the machine's addresses and routes (`net.rs`; over netlink, `linux_net.rs`), and packets turned into connections and flows (`stack.rs`); `tests/netns.rs` carries a connection and a datagram through Linux's device in a namespace of its own (§2) |
+| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), Linux's tray (`tray_linux.rs`) and single window (`instance.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with the session (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
@@ -115,12 +122,30 @@ Runtime paths on Windows:
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
   (`crates/proto/src/profile.rs`)
 
+Runtime paths on Linux, the same calls (`directories`) giving XDG's folders:
+
+- profile: `~/.config/bliss/bliss.toml`
+- work dir: `~/.local/share/bliss` — `xray` (no `.exe`, unpacked with its
+  exec bit), the rule sets, `xray.json`, `bliss.log`,
+  `system-proxy-backup.txt`; no `openvpn\` files: the profile goes to OpenVPN
+  on its standard input
+- WebKit's own data: `~/.cache/<exe stem>/webview` (`linux_config` in ui.rs)
+  — left to itself WebKit writes into `~/.local/share/<program>`, which for
+  bliss is the work dir
+- in `$XDG_RUNTIME_DIR`: `bliss-window-<exe stem>.lock` and `.sock` (the
+  single window, `instance.rs`), `<exe stem>-tray/` (the tray icon's picture),
+  `bliss-openvpn-<pid>.sock` (OpenVPN's call, while it is made)
+- autostart: `~/.config/autostart/bliss.desktop`, and the application menu's
+  entry `~/.local/share/applications/<exe stem>.desktop` with its icon in
+  `~/.local/share/icons/hicolor/96x96/apps/` — each written on a click in
+  the settings, never on launch (`startup.rs`)
+
 ## 2. Commands
 
 ```bash
 cargo fmt --all
 cargo clippy --all-targets   # no warnings (default members; --workspace adds the spike)
-cargo test                   # default members, ~230 tests
+cargo test                   # default members, ~240 tests
 cargo build -p bliss         # target/debug/bliss.exe
 ```
 
@@ -183,6 +208,57 @@ cargo build -p bliss         # target/debug/bliss.exe
   then replace the `.snap` (or rerun that one test with `INSTA_UPDATE=always`).
   Never accept a snapshot you have not read.
 - A running `bliss.exe` locks the binary: close it before `cargo build`.
+
+**On Linux, in WSL.** The user's WSL Ubuntu 24.04 is the Linux this port was
+built and tested on. Its default Rust (1.86) is too old for the lockfile, so
+Rust 1.97.0 sits beside it as a second toolchain (installed 9 October; the
+default was left alone). Build from the Windows checkout into a target dir on
+Linux's own file system, and switch off the Windows user's cargo config, which
+cargo finds by walking up from `/mnt/c/...` (§3, trap 11):
+
+```bash
+cd /mnt/c/Users/Maestix/Desktop/Projects/Rust/bliss
+export CARGO_TARGET_DIR=$HOME/bliss-target RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=
+cargo +1.97.0 test -p bliss-proto -p bliss-core -p bliss-xray -p bliss-openvpn -p bliss-tun
+cargo +1.97.0 test -p bliss-tun --test netns -- --ignored --nocapture
+```
+
+- Everything but the window builds and tests with what WSL has. The window
+  needs the GTK and WebKitGTK development packages, which take `sudo`:
+  `build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev
+  libsoup-3.0-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev`. As
+  of 9 October they are not installed; the user was asked to.
+- **Without them the window can still be checked.** The `-sys` crates only ask
+  pkg-config whether a library is there and how new it is, and a check links
+  nothing: a folder of stand-in `.pc` files (name, `Version: 99.0.0`, empty
+  `Libs` and `Cflags`) on `PKG_CONFIG_PATH` lets `cargo check` and `cargo
+  clippy -p bliss --all-targets` run. Three were needed: `libsoup-3.0`,
+  `webkit2gtk-4.1`, `gdk-x11-3.0` (GTK's own runtime is in WSL). Never point a
+  build or a test at them; they type-check and nothing more. Use a target dir
+  of its own for this, or the real build later reuses the stand-ins' results.
+- **The window crate's tests that need no window still run**, from a crate of
+  their own outside the repository: a `lib.rs` that takes `startup.rs` and
+  `instance.rs` in by `#[path]`, a `mod ui` with `MARK` in it (what
+  startup.rs takes from the window), the repository's `Cargo.lock` copied
+  beside it, and `directories`, `libc`, `tokio` and `tracing` as its
+  dependencies. That is how the autostart entry, the menu's entry and the
+  single window's claim and raise were run on Linux, 7 tests.
+- **The TUN end to end test needs no root**: it runs itself again under
+  `unshare --user --map-root-user --net`, root in a namespace with nothing in
+  it, with a dummy interface for an uplink and an echo for an engine. The
+  device, its routes — the two halves, one around it, a stale one a "killed
+  bliss" left — a connection and a datagram there and back, and nothing left
+  after. Before that, a tunnel over another VPN's halves is refused, naming
+  its interface, with theirs left as they were; and an address kept around
+  the tunnel that already has a route of someone else's keeps it, after the
+  tunnel too. Half a second. Ubuntu on a desktop may refuse unprivileged user
+  namespaces (`kernel.apparmor_restrict_unprivileged_userns`); WSL does not.
+  Seen failing with the stale-route clean-up, with the route removal, and
+  with routes added by replacing (each of the last two guards on its own)
+  taken out.
+- Nothing of the window has been run on Linux, nor OpenVPN's Linux path: WSL
+  has no WebKitGTK and no OpenVPN, and polkit there has no agent to ask the
+  password with. WSLg would show the window once the packages are in.
 
 CLI (`bliss --help`, and `--help` on each subcommand):
 
@@ -302,6 +378,24 @@ These cost the most time on this project. None of them announce themselves.
     until the `waitfor` was ended by hand. When a guard is about a child being
     ended, run its check against the broken code in the background, and end
     the child yourself.
+11. **WSL finds the Windows user's cargo config.** Cargo looks for
+    `.cargo/config.toml` in every folder above the one it runs in, and from
+    `/mnt/c/Users/Maestix/Desktop/...` that includes
+    `/mnt/c/Users/Maestix/.cargo/config.toml`, whose `rustc-wrapper = "kache"`
+    names a Windows program: every build failed with "could not execute
+    process `kache …` (never executed)". `RUSTC_WRAPPER=` and
+    `CARGO_BUILD_RUSTC_WRAPPER=` empty switch it off (§2).
+12. **`wsl.exe` from Git Bash gets its paths rewritten too** (trap 6): a script
+    passed as `/mnt/c/...` arrived as `C:/Program Files/Git/mnt/c/...`. Set
+    `MSYS_NO_PATHCONV=1` for every `wsl.exe` call. Its own messages come out in
+    UTF-16, with NULs between the letters (`tr -d '\000'`), and every call
+    starts with a warning that the Windows `localhost` proxy is not mirrored
+    into WSL — which also means WSL reaches the network directly, not through
+    the user's v2rayN.
+13. **Scripted edits written through the shell broke twice on 9 October**,
+    trap 1 again: a `\n` in a test became a real newline in a byte string, and
+    a `\\0` became a real NUL in a Rust source file. Write a replacement script
+    with the Write tool and run the file; never put one in a heredoc.
 
 ## 4. Commits
 
@@ -343,7 +437,11 @@ These cost the most time on this project. None of them announce themselves.
   unpacked from it (256 MB, whatever its zip header says) and its checksum
   file (64 KB) in `download.rs` — the archive was read whole into a buffer
   sized by the server's word, and each file by the header's. The project
-  exists because another client's GUI reached 7.8 GB this way.
+  exists because another client's GUI reached 7.8 GB this way. Linux added
+  three: OpenVPN's output kept for why it stopped (64 KB, lines of 4 KB, the
+  rest dropped as it arrives, `Tail` in session.rs), the program names
+  remembered between socket tables (256, process.rs) and the recent owners
+  tried first (8).
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
@@ -367,6 +465,19 @@ These cost the most time on this project. None of them announce themselves.
   loop sets `Delay`; do the same.
 - **A `Semaphore` created inside a function limits one call, not the program.**
   The ping sweep's permits live in a long-lived struct.
+- **Code after `ui::launch` never runs.** tao ends the event loop with
+  `process::exit`, on Windows as on Linux, so the system proxy was "put back on
+  the way out" by a line that had never once executed: «Выход» left the
+  machine pointed at a dead port until bliss next started and `recover` found
+  the snapshot. Found by reading dioxus-desktop for the Linux port on 9
+  October. What must happen as bliss leaves happens in `LoopDestroyed`
+  (`with_custom_event_handler` in `launch`).
+- **On Linux "parent" means the thread.** `PR_SET_PDEATHSIG` signals a child
+  when the *thread* that forked it ends, and tokio's threads come and go
+  (`block_in_place` hands a worker's core away; idle blocking threads exit
+  after ten seconds). The engine is forked from a thread that lasts as long as
+  bliss (`job.rs`, `the_engine_outlives_the_thread_that_asked_for_it`), and so
+  is `pkexec`, which arms the same signal itself (`service::linux::launch`).
 
 **Security and privacy**
 
@@ -415,6 +526,20 @@ These cost the most time on this project. None of them announce themselves.
   host, and a kept-alive client could send its next request, for another host, to
   the first one.
 - SOCKS5 address types are 1/3/4; VLESS uses 1/2/3 for the same three things.
+- **A connection's program is found by both its ends** (`name_for_connection`:
+  the program's address and the inbound's, or the TUN's two). Linux hands a
+  local port already in use to a new connection whenever the pair of ends
+  differs, so there the port alone named whichever socket the table listed
+  last — another program's, and a `process:` rule decided by it. Windows
+  gives each connection a port of its own and asks by the port. Datagrams,
+  mostly unconnected, are still asked by their port
+  (`a_connection_is_found_by_both_its_ends`, seen failing by the port).
+- **A program is the same program with or without `.exe`.** Rules compare
+  program names without case and without a trailing `.exe` (`program_name` in
+  routing.rs), so a profile carried between Windows and Linux keeps its
+  program rules: `Telegram.exe` there is `Telegram` here. Typed in the editor,
+  a bare name gets `.exe` on Windows only, and a Linux path (`/usr/bin/…`) is
+  read as a program.
 
 **The profile and the work dir**
 
@@ -466,7 +591,9 @@ These cost the most time on this project. None of them announce themselves.
 - **Assume another bliss shares the work dir** — a test run, a stray copy, the
   user's own instance. `bliss.log` is appended, and trimmed only if an open with
   `share_mode(0)` succeeds, because Rust opens files with `FILE_SHARE_DELETE` and
-  deleting a log another process writes to succeeds silently. The system-proxy
+  deleting a log another process writes to succeeds silently. Linux has no
+  sharing modes: every bliss holds a shared `flock` on the log it appends to,
+  and a trim goes ahead only if an exclusive one can be had. The system-proxy
   snapshot records its owner's pid, and while that process lives nobody else
   restores it or overwrites it (`set` returns `ProxyError::OwnedElsewhere`). The
   check is in `restore`, which every path goes through — the tunnel stopping,
@@ -477,6 +604,51 @@ These cost the most time on this project. None of them announce themselves.
 - **On Windows `std::fs::rename` replaces an existing file**
   (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`); never `remove_file` first.
   Replacing a running `xray.exe` fails with a sharing violation, as intended.
+  On Linux it succeeds — the running engine keeps the file it opened — so
+  `DownloadError::engine_in_use` is Windows' alone (error 32 is EPIPE there).
+- **The system proxy on Linux is the desktop's** (`sysproxy.rs`, `imp` for
+  Linux): GNOME's `org.gnome.system.proxy` through `gsettings`, written
+  wherever dconf keeps it — Firefox reads it on every desktop, Chromium on
+  the GNOME family — and on Plasma KDE's `kioslaverc` too, through
+  `kwriteconfig5`/`6` and the `reparseSlaveConfiguration` signal. A desktop
+  with neither says so (`NoDesktopProxy`). The snapshot is the same file in
+  the same `key=value` lines, each key naming its store (`gnome:…`, `kde:…`),
+  so it goes back into the stores it came from; Windows' keys are the
+  `enable`/`server`/`bypass` every earlier build wrote, so an old snapshot
+  still restores. Two keys are written only to keep the old setting from
+  misleading programs around bliss's: GNOME's `use-authentication` (off, so
+  the old proxy's login is not sent to bliss; the login itself is never read)
+  and KDE's `ReversedException`. Only stand-in `gsettings` and
+  `kreadconfig`/`kwriteconfig` scripts have run it (`gnome_settings_go_back_as_they_were`,
+  `kde_settings_go_back_as_they_were`); no desktop has.
+  - **Each store goes back on its own** (`imp::still_ours`): on Plasma
+    GNOME's settings (Firefox's) and KDE's are two, and a person who turned
+    the proxy off in Plasma's settings left Firefox on bliss's dead port when
+    one signature decided for both (`each_store_goes_back_on_its_own`).
+  - **Settings that cannot be read are not settings someone changed**: the
+    snapshot stays for the next start, where it used to be forgotten
+    (`a_snapshot_that_cannot_be_read_back_is_kept`).
+  - **A running copy is a running bliss**, not any process with its number:
+    pids here are handed out in order from boot, so after a restart the
+    snapshot's owner was whatever started at that point, which kept the
+    snapshot for ever and had `set` refuse over a copy that was not there.
+    `process_alive` reads `/proc/<pid>/exe` for a name with `bliss` in it
+    (`a_reused_number_is_not_a_running_copy`).
+  - Its tools run with `LC_ALL=C`: their messages are read for what they say.
+- **The system proxy is changed off the engine loop, one change at a time.**
+  On Linux a change is a chain of programs — some thirty on Plasma, each
+  allowed seconds — and every click waited behind them. `SystemProxy` in
+  engine.rs takes wishes through a watch, so only the latest waiting one is
+  applied, in a blocking task; the choice is on screen at once, whether it
+  took once it has. Inside the process `sysproxy` takes one change at a
+  time (`CHANGING`): the window puts the settings back on its own thread as
+  bliss ends, and a restore that read them halfway through a `set` would
+  forget the snapshot and leave the machine on bliss's port. After the
+  restore on the way out (`leave`) nothing is set again
+  (`nothing_is_set_once_bliss_has_left`, whose work dir cannot hold a
+  snapshot, so that a broken guard stops before the machine's settings). The
+  panic hook restores only if no change is under way (`restore_unless_busy`):
+  waiting could hang the very thread that panicked.
 - **Changing a server restarts the tunnel; changing rules does not.** A rule
   change goes through `commit_routing`: save the profile, compile the table, hand
   it to `Serving::set_router`. The next connection is decided by it and those
@@ -509,7 +681,8 @@ These cost the most time on this project. None of them announce themselves.
   subscription fetch runs in a task of its own and returns as
   `Command::Fetched` through a *weak* sender: a strong one, held by the loop
   itself, would keep the command channel open forever, and the loop would never
-  see the window go.
+  see the window go. So do raising the adapter (§9) and changing the system
+  proxy (above).
 
 **Starting with Windows**
 
@@ -532,6 +705,13 @@ These cost the most time on this project. None of them announce themselves.
   (§7). `the_entry_round_trips_through_the_registry` uses a key of its own one
   level under `Software` and deletes it; nested two levels deep, it left the
   empty parent behind.
+- **On Linux the entry is an XDG autostart file**, `bliss.desktop` in
+  `~/.config/autostart`, written whole on a click and renamed into place. The
+  desktop's own switch is in the file — `Hidden=true` (the spec's) or
+  `X-GNOME-Autostart-enabled=false` (GNOME's) — and reads as off, as Task
+  Manager's does. A path the `Exec` line would need two layers of escaping for
+  (`"`, `` ` ``, `$`, `\`, `%`) is refused in words rather than escaped wrong.
+  `BLISS_STARTUP_KEY` names a scratch folder there.
 
 **Style**
 
@@ -946,6 +1126,81 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     of coming from the memory level, was in the build before it too, and is
     rule 23's to answer.
 
+27. **On Linux the window is WebKitGTK's, and the tray is not the window.**
+    Read in the sources of tao, wry, tray-icon, muda and dioxus-desktop on
+    9 October; none of it has been run yet (§12).
+    - **The window is built hidden and shown by bliss** (`SHOW`, in an effect
+      of `App`). dioxus-desktop builds every window hidden on Windows and
+      shows it after the first render, but on Linux builds it as asked, and
+      a page in a window built visible applies each change on an animation
+      frame (`headless` false in dioxus's interpreter) and waits for the
+      page to say so before it polls the program again. A hidden window gets
+      no animation frames: the first change after the window went into the
+      tray was the last, every `use_future` stood still — the tray's menu,
+      a second copy's raise — and only a click on «Открыть» woke it. Built
+      hidden, the page applies changes as they come, as on Windows. Shown
+      through tao, which shows what GTK packed into the window too.
+    - **The tray is a native menu** (`tray_linux.rs`). tray-icon drives an
+      AppIndicator, which reports no clicks — the host opens the item's menu
+      itself — shows no icon at all without a menu, and panics inside
+      `build()` when its library is missing. So rule 23 is Windows' alone:
+      Linux gets an icon with a menu of the main switches (state, connect,
+      open, servers — 30 at most —, presets, system proxy, quit), kept in step
+      by `tray_linux::MODEL`, which the frame loop updates in the tray too,
+      where the page gets no frames. Clicks arrive through
+      `use_muda_event_handler`; dioxus routes the tray's menu there too, and
+      `use_tray_menu_event_handler` never fires. A check item ticks itself
+      when clicked, so every click puts the ticks back as the engine has them.
+    - **No tray host, no hiding.** `tray_linux::host` asks for the library
+      (`dlopen`) and for someone on the session bus taking
+      StatusNotifierItems — GNOME as Fedora ships it has nobody; Ubuntu's
+      extension and Plasma are. Without both, the close button leaves bliss
+      (`WindowCloses`, the proxy put back in `LoopDestroyed`) and a start in
+      the tray opens minimized instead — after the first render (`ICONIFY`),
+      so rule 20's guard holds on every platform. A start in the tray, which
+      is the one at sign-in, waits up to ten seconds for the host while the
+      library is there (`SIGN_IN`): Plasma starts a session's programs
+      beside the service that takes their icons, and the one answer decides
+      the whole run.
+    - **A second copy brings the first up** (`instance.rs`): it sends `show`
+      and its launcher's activation token over the claim's socket, and the
+      first `present`s its window with the token — through GTK, since tao's
+      `set_visible` then `set_focus` drops the focus, and Wayland gives a
+      window that asks without a token "bliss is ready" instead. On a desktop
+      with no tray it is the only way back to a hidden window. `present`
+      shows what is inside first (`show_all`): GTK's `present` shows the
+      window alone, and one that started in the tray, never shown, came up
+      empty — tao packs the page into a box that is shown only with it.
+    - **A signal leaves as «Выход» does.** SIGTERM ends every program of a
+      session as it closes, and it ended bliss where it stood: nothing put the
+      proxy back, and the next session started on bliss's dead port. glib
+      hears SIGTERM, SIGHUP and SIGINT on the window's thread
+      (`leave_on_signals`) and closes the window as the last one, so
+      `LoopDestroyed` runs. A display that dies first still ends bliss
+      without it; the startup check is for that.
+    - **WebKitGTK knows `-webkit-user-select` only**; app.css says both.
+    - **Its GPU path draws a blank window** under WSLg, NVIDIA and some
+      Wayland compositors. `main` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+      first thing, before any thread, unless the person set it; dioxus's own
+      switch sets it later, races the threads and sends children to X11, and
+      `launch` turns it off.
+    - **WebKit's data would land in the work dir** (`~/.local/share/bliss` is
+      its default for a program called bliss): `launch` gives it
+      `~/.cache/<exe stem>/webview`, and the window a ground colour, since on
+      Linux it is shown before the page is.
+    - **The clipboard is GTK's**, on the window's thread: a copy from the
+      engine's thread goes through `glib::MainContext::invoke`, and a paste is
+      a request answered later — `paste` is `async` everywhere — because
+      `wait_for_text` would run a main loop inside tao's.
+    - Expect from tao on Linux: no `ScaleFactorChanged`, so `WindowIcons`
+      does nothing there; `is_minimized` stays false under Wayland, so a
+      minimized window still counts as `seen` and draws; no window positions,
+      keep-above or skip-taskbar under Wayland; an icon from the window only
+      under X11 — Wayland takes it from a `.desktop` file, which bliss writes
+      when asked (§12). Whether WebKitGTK throttles a hidden page's timers
+      and animations, and whether tao's edge resizing works over the page,
+      are open.
+
 ## 7. Verifying a UI change: look at the real window
 
 A replica page proves a mechanism, not that the code changed. For any UI bug,
@@ -1218,6 +1473,44 @@ table.
   tunnel; DNS still goes out the physical interface, which is a leak Windows
   makes worse by asking every adapter at once; and there is no service or
   helper, so TUN needs the whole of bliss running as administrator.
+- **On Linux the device is the kernel's own** (`linux_device.rs`):
+  `/dev/net/tun`, one `TUNSETIFF` (`IFF_TUN | IFF_NO_PI`), its address, mask,
+  MTU and flags by ioctl, and the descriptor read and written through tokio's
+  `AsyncFd` — one read a packet — straight into ipstack, with no compat layer.
+  No new dependency: the `tun` crate (WTFPL) would have been one. The rights
+  are `CAP_NET_ADMIN`, read from `CapEff` in `/proc/self/status`, and the
+  window's words name the fix: `sudo setcap cap_net_admin+ep <path to
+  bliss>`, again after every update, since a new file has no capability.
+  Running the window as root is no answer: pkexec takes `WAYLAND_DISPLAY`
+  away, and root's dconf and session bus are not the user's.
+- **Its routes go over netlink, written by hand** (`linux_net.rs`), never
+  through `ip`: a program started by a `setcap`'d bliss does not inherit the
+  capability. Four messages: a route added (`NLM_F_CREATE | NLM_F_EXCL`,
+  as `ip route add`), one taken away, the kernel's answer to
+  "which way to this address" (`RTM_GETROUTE`, unprivileged, policy rules
+  included — `gateway` asks it for `1.1.1.1`, and each address kept around
+  the tunnel is asked for on its own, before the tunnel's routes exist), and
+  the whole table. Every route carries `rtm_protocol` 98 (`proto 98` in `ip
+  route`): the device's routes die with it, but the ones around it do not, so
+  the next tunnel takes away any route of that number first
+  (`net::forget_stale`).
+- **A route is added, never replaced.** One of the same prefix and metric
+  that is there after `forget_stale` is another program's. Replaced — the
+  first version did, to take over what a dead bliss left — it carried
+  number 98 and went with bliss's routes when the tunnel stopped: another
+  VPN's halves of the address space, and its traffic out around it until it
+  reconnected. Now a tunnel over another's halves is refused, in words that
+  name its interface ("another VPN?"), and an address kept around the
+  tunnel that already has a route of its own keeps it, untouched after.
+- **A direct dial under the tunnel is bound to the uplink** with
+  `SO_BINDTOIFINDEX` (`SO_BINDTODEVICE` by name before Linux 5.0), which an
+  ordinary user may set since 5.7: bound, a socket is routed among its
+  interface's routes alone, and the tunnel's halves never see it — no fwmark,
+  no policy rule, nothing to undo.
+- **What the Linux tunnel does not know about**: OpenVPN's own connection
+  (§10a) — its process is root's, and no table names it for a user's bliss —
+  and the DNS systemd-resolved sends per link. Neither has been looked at on
+  a real machine.
 
 ## 10. xray-core facts
 
@@ -1434,6 +1727,38 @@ why (the second point below). What the real runs taught:
   refused in words (`ProfileError`), and a prompt at run time ends the
   connection; IPv6 through the VPN; the VPN's switch in the tray's menu.
 
+**On Linux** there is no service. Read in OpenVPN's, polkit's and the
+kernel's sources on 9 October; never run (§12).
+
+- **OpenVPN runs as root through `pkexec`**, which asks for an administrator's
+  password in the desktop's own dialog at every start (polkit's default for
+  `org.freedesktop.policykit.exec`), or directly when bliss is root. pkexec
+  replaces itself with OpenVPN, so the pid bliss started is OpenVPN's. It
+  answers 126 for a dismissed dialog and 127 for no right or no polkit agent,
+  and both are said in words (`service::linux::exit_words`). It arms the
+  parent-death signal itself, so it is started from a thread that lasts
+  (`launch`, §5). An OpenVPN running as root cannot be ended from here:
+  `signal SIGTERM` over the management interface, and the leash, are all.
+- **The profile goes in on OpenVPN's standard input** (`--config stdin`), and
+  the key never touches the disk; OpenVPN names a refused line `stdin:<n>`,
+  which `their_line` maps back as it maps the file's path on Windows.
+- **There is no `--log`**: a root OpenVPN's log would be root's. Its output is
+  read instead, the last 64 KB of it kept in memory for why it stopped.
+- **It calls over a unix socket** in `$XDG_RUNTIME_DIR` (`bliss-openvpn-<pid>.sock`),
+  and the call is taken only when the kernel says the caller is the process
+  bliss started and is root (`SO_PEERCRED`) — `process_of` cannot answer for
+  a root process's sockets, whose descriptors are closed to a user.
+- **The profile gains a line everywhere**: `ignore-unknown-option` for the
+  options only Windows' OpenVPN knows (`ip-win32` above all), which Linux's
+  refuses as unknown. On Windows it changes nothing — the real-OpenVPN test
+  passed with it on 9 October.
+- **`ROUTE` goes into a `dev tap` profile only**, on Linux: a socket bound to
+  a tunnel is sent down it even with no route there (the kernel takes the
+  destination to be on the link), while a second default route becomes the
+  machine's own the moment the real one goes.
+- Not done there: the TUN's way around OpenVPN's own connection (§9), and
+  bliss's DNS for the VPN has only ever met Windows.
+
 ## 11. Where things stand
 
 **Done in stage 1:** renderer spike; profile and link parsing; xray management
@@ -1504,6 +1829,8 @@ timeout for half-open connections; the first-run wizard (1.8); the 12-hour
 memory run. The window's install has been run against a dead proxy only: a
 real download from GitHub through it has not been made.
 
+**Linux, ported on 9 October:** see §12.
+
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes
 on WebView2), idle CPU ≤ 1% with the tunnel up, RSS growth ≤ 5% over a 12-hour
@@ -1538,3 +1865,62 @@ the certificate HMAC). The byte-level spec is in the plan's section «Прото
 детали для этапа 3» — `session_id` at offset 39 of the marshalled ClientHello,
 VLESS field order port → atyp → address, VLESS Encryption and Vision framing.
 Follow it byte for byte, not from memory.
+
+## 12. Linux, as of 9 October
+
+The user asked for Linux support on 9 October. Everything Windows-only
+already sat behind `cfg(windows)` with stubs elsewhere, so the shared crates
+compiled on Linux from the start; the work was giving each stub its Linux
+body. The behaviour of the libraries underneath — tao, wry, tray-icon, muda,
+dioxus-desktop on Linux; the kernel's TUN and netlink; OpenVPN, pkexec and
+polkit; GNOME's and KDE's proxy settings — was read in their sources by two
+research agents first, and the answers are in §5, §6 rule 27, §9 and §10a.
+
+**Ported, and run on Linux** (WSL Ubuntu 24.04, kernel 6.6, Rust 1.97.0):
+
+- the engine's leash (`job.rs`), seen failing with the signal taken out and
+  with the fork moved off the lasting thread; its file name (`xray`) and exec
+  bit;
+- which program holds a connection, from `/proc` (`process.rs`), by both
+  its ends: the parsers are tested on every platform, the lookups against
+  this process and `sleep`, the two caps against their limits;
+- leaving by one interface (`interface.rs`), checked by the name the kernel
+  gives back;
+- the system proxy (`sysproxy.rs`) against stand-in `gsettings` and
+  `kreadconfig`/`kwriteconfig` scripts: written, read back as bliss's, and put
+  back to the last line, a password beside them never copied; each store
+  put back on its own, an unreadable snapshot kept, and a running copy told
+  from a process that inherited its number;
+- starting with the session and the application menu's entry (`startup.rs`),
+  in a scratch folder, and the single window and its raise (`instance.rs`),
+  on a scratch lock and socket — both through the crate of their own in §2,
+  since the window crate does not link without WebKitGTK;
+- the TUN device and its routes (`crates/tun`), end to end in a namespace;
+- the pieces of OpenVPN's Linux path that run without OpenVPN: its options,
+  the caller check by `SO_PEERCRED`, the capped tail of its output.
+
+**Type-checked only** — the window crate, with stand-in pkg-config files
+(§2): the window, the tray, the clipboard, `present`, the routes from tray
+clicks, the window built hidden and shown, the wait for a tray host, the
+signals that leave. **Never run anywhere**: OpenVPN through pkexec, the system proxy on a
+real GNOME or KDE, TUN with a `setcap`'d window. Say so when any of it comes
+up, and take the user's first run as the test it is.
+
+To see the window in WSL (WSLg shows it; it has no tray host, so the close
+button leaves bliss there): the packages in §2, then from the checkout
+`cargo +1.97.0 run -p bliss` with the variables of §2. Use `BLISS_PROFILE`
+and `BLISS_WORK_DIR` as on Windows (§7) — a probe in WSL otherwise writes the
+user's WSL profile.
+
+For a person running it: the runtime libraries are WebKitGTK 4.1, GTK 3 and
+libxdo (`libwebkit2gtk-4.1-0 libgtk-3-0 libxdo3` on Ubuntu), and optionally
+`libayatana-appindicator3-1` for the tray, `openvpn` and polkit for the work
+VPN, and `setcap cap_net_admin+ep` on the binary for TUN. Nothing is packaged
+yet: no `.deb`, and no AppImage (whose mount ignores file capabilities, so TUN
+would need another way there; the autostart entry names the AppImage's own
+file, from `APPIMAGE`, rather than its mount). The settings screen puts
+bliss in the application menu on a click — «Значок в меню приложений»,
+`~/.local/share/applications/<exe stem>.desktop` and the mark beside it in
+`icons/hicolor/96x96/apps` — which is also where a Wayland desktop takes the
+window's icon from: the file is named after the program, which is the app id
+GTK gives the window.

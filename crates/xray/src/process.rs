@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 
 use crate::config::Version;
-use crate::job::Job;
+use crate::job;
 
 #[derive(Debug, Error)]
 pub enum XrayError {
@@ -57,14 +57,16 @@ pub enum XrayError {
 /// A running xray-core.
 ///
 /// Its lifetime is tied to ours twice over: `kill_on_drop` for the ordinary
-/// paths, and a Job Object for the ones where `Drop` never runs. See `job.rs` —
-/// the second one is not belt-and-braces, it was a real leak.
+/// paths, and the kernel's leash for the ones where `Drop` never runs — a Job
+/// Object on Windows, the parent-death signal on Linux. See `job.rs`: the
+/// second one is not belt-and-braces, it was a real leak.
 pub struct Xray {
     child: Child,
     port: u16,
     config_path: PathBuf,
-    /// Held, not used: the job dies with this field, and its members with it.
-    _job: Option<Job>,
+    /// Held, not used: on Windows the job dies with this field, and its
+    /// members with it.
+    _leash: job::Held,
 }
 
 impl Xray {
@@ -112,28 +114,7 @@ impl Xray {
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
 
-        let job = match Job::kill_on_close() {
-            Ok(job) => Some(job),
-            Err(e) => {
-                tracing::warn!("no job object ({e}) — a force-killed bliss may leak the engine");
-                None
-            }
-        };
-
-        let mut child = command.spawn().map_err(XrayError::Spawn)?;
-
-        // Assigned immediately after spawn. There is a hair of a window before
-        // this in which the child could spawn its own children outside the job;
-        // closing it needs CREATE_SUSPENDED, which tokio does not expose, and
-        // xray spawns nothing, so the window is not worth the machinery.
-        #[cfg(windows)]
-        if let (Some(job), Some(handle)) = (job.as_ref(), child.raw_handle()) {
-            // SAFETY: the handle comes from the child we just created, which
-            // carries the rights AssignProcessToJobObject needs.
-            if let Err(e) = unsafe { job.adopt(handle as isize) } {
-                tracing::warn!("could not put the engine in the job object: {e}");
-            }
-        }
+        let (mut child, leash) = job::spawn(command).await.map_err(XrayError::Spawn)?;
 
         // xray writes everything to stdout; stderr is drained too so a full pipe
         // can never block the child.
@@ -148,7 +129,7 @@ impl Xray {
             child,
             port,
             config_path,
-            _job: job,
+            _leash: leash,
         };
         xray.await_listening(Duration::from_secs(10)).await?;
         Ok(xray)

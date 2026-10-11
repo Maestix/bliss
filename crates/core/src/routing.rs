@@ -202,13 +202,24 @@ impl Compiled {
         if self.ports.iter().any(|r| r.contains(port)) {
             return true;
         }
-        if let Some(process) = process {
-            let process = process.to_ascii_lowercase();
-            if self.processes.contains(&process) {
-                return true;
-            }
+        if let Some(process) = process
+            && self.processes.contains(&program_name(process))
+        {
+            return true;
         }
         false
+    }
+}
+
+/// A program's name as rules compare it: without case, and without the
+/// `.exe` Windows names its programs with. A profile carried from Windows to
+/// Linux says `Telegram.exe` where Linux says `Telegram`, and the other way
+/// round a rule written on Linux would never match on Windows.
+fn program_name(name: &str) -> String {
+    let name = name.trim().to_ascii_lowercase();
+    match name.strip_suffix(".exe") {
+        Some(stem) if !stem.is_empty() => stem.to_owned(),
+        _ => name,
     }
 }
 
@@ -300,11 +311,7 @@ impl Router {
                 domains: rule.domain.iter().map(|d| Pattern::parse(d)).collect(),
                 cidrs: Vec::new(),
                 ports: Vec::new(),
-                processes: rule
-                    .process
-                    .iter()
-                    .map(|p| p.trim().to_ascii_lowercase())
-                    .collect(),
+                processes: rule.process.iter().map(|p| program_name(p)).collect(),
                 sites: Vec::new(),
                 ips: Vec::new(),
                 countries: rule
@@ -771,6 +778,35 @@ mod tests {
         assert_eq!(r.decide(&t, Some("chrome.exe")).route, Route::Proxy);
         // An unnamed process must not match a process rule by accident.
         assert_eq!(r.decide(&t, None).route, Route::Proxy);
+    }
+
+    /// A profile carried between Windows and Linux keeps its program rules:
+    /// `.exe` is Windows' way of naming a program, not part of the program.
+    #[test]
+    fn a_program_is_the_same_program_with_or_without_exe() {
+        let mut chat = rule(Action::Direct, "chat");
+        chat.process = vec!["Telegram.exe".into(), "discord".into()];
+        let r = router(vec![chat], Action::Proxy);
+
+        let t = Target::domain("chat.example", 443);
+        assert_eq!(
+            r.decide(&t, Some("Telegram")).route,
+            Route::Direct,
+            "on Linux"
+        );
+        assert_eq!(r.decide(&t, Some("telegram.exe")).route, Route::Direct);
+        assert_eq!(
+            r.decide(&t, Some("Discord.exe")).route,
+            Route::Direct,
+            "on Windows"
+        );
+        assert_eq!(r.decide(&t, Some("discord")).route, Route::Direct);
+        assert_eq!(r.decide(&t, Some("telegram-desktop")).route, Route::Proxy);
+        assert_eq!(
+            r.decide(&t, Some(".exe")).route,
+            Route::Proxy,
+            "no name at all"
+        );
     }
 
     /// A rule that cannot work is reported when the table is built, rather

@@ -1,6 +1,7 @@
-//! bliss — a VLESS + REALITY client for Windows.
+//! bliss — a VLESS + REALITY client for Windows and Linux.
 
-// No console window beside the real one. A console-subsystem program gets a
+// No console window beside the real one, on Windows; elsewhere this does
+// nothing. A console-subsystem program gets a
 // console from Windows before `main` runs, so a double-click opened a black
 // window next to bliss that did nothing but echo a log already written to
 // bliss.log. The commands that print join the terminal they were started from
@@ -16,6 +17,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod clipboard;
 mod engine;
 mod icons;
+#[cfg(target_os = "linux")]
+mod instance;
 mod logs;
 mod profile_file;
 mod rule_text;
@@ -37,8 +40,8 @@ use tracing_subscriber::{EnvFilter, fmt};
 #[derive(Parser)]
 #[command(name = "bliss", version, about = "VLESS + REALITY client")]
 struct Cli {
-    /// Open the window minimized. Windows passes this when it starts bliss at
-    /// sign-in and the settings ask for a minimized window.
+    /// Open the window minimized. The session passes this when it starts bliss
+    /// at sign-in and the settings ask for a minimized window.
     #[arg(long)]
     minimized: bool,
     #[command(subcommand)]
@@ -74,7 +77,8 @@ enum Command {
         /// Pretend the connection came from this program, for process rules.
         #[arg(long, value_name = "NAME")]
         process: Option<String>,
-        /// Profile to read the rules from. Defaults to %APPDATA%\bliss\bliss.toml.
+        /// Profile to read the rules from. Defaults to bliss.toml in the user's
+        /// settings: %APPDATA%\bliss on Windows, ~/.config/bliss on Linux.
         path: Option<PathBuf>,
     },
     /// Start the engine and serve traffic.
@@ -105,7 +109,8 @@ enum EngineCmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Download an engine into %LOCALAPPDATA%\bliss\data and verify its checksum.
+    /// Download an engine into the work dir and verify its checksum:
+    /// %LOCALAPPDATA%\bliss\data on Windows, ~/.local/share/bliss on Linux.
     Install {
         /// A specific version, e.g. 26.7.28. Without it: the newest stable
         /// release, or the newest of any kind with --newest.
@@ -124,6 +129,9 @@ enum EngineCmd {
 }
 
 fn main() -> Result<()> {
+    // Before any thread exists, since it changes the environment.
+    #[cfg(target_os = "linux")]
+    webkit_environment();
     // Before anything can print, clap's own --help and usage errors included.
     // The window prints nowhere; see `wants_console`.
     if wants_console(std::env::args_os().skip(1)) {
@@ -313,13 +321,19 @@ fn raise_the_running_window() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+use instance::{only_window, raise_the_running_window};
+
+#[cfg(not(any(windows, target_os = "linux")))]
 struct OnlyWindow;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn only_window() -> Option<OnlyWindow> {
     Some(OnlyWindow)
 }
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn raise_the_running_window() {}
 
 /// Open the window.
 ///
@@ -327,22 +341,25 @@ fn only_window() -> Option<OnlyWindow> {
 /// insists on the main thread — so the engine gets a runtime of its own.
 fn window(minimized: bool) -> Result<()> {
     // Only one window at a time, and this is where a second copy stops.
-    let Some(_only) = only_window() else {
+    #[allow(unused_mut)]
+    let Some(mut only) = only_window() else {
         tracing::info!("another bliss already has the window; leaving it to that one");
         raise_the_running_window();
         return Ok(());
     };
+    #[cfg(target_os = "linux")]
+    let raises = only.take_raises();
+    #[cfg(not(target_os = "linux"))]
+    let raises = None;
     let setup = window_setup()?;
     let work_dir = setup.work_dir.clone();
     let controller = engine::spawn(setup).wrap_err("could not start the engine thread")?;
-    ui::launch(controller, minimized);
-
-    // The engine thread is detached, so it may not get to run its own cleanup
-    // when the event loop ends and the process winds down. This is the ordinary
-    // close path and it happens here, on the thread that is definitely alive.
-    if let Err(e) = bliss_core::sysproxy::restore(&work_dir) {
-        tracing::error!("could not restore the system proxy on the way out: {e}");
-    }
+    // The event loop ends the process itself, so nothing after this runs —
+    // which is why the system proxy is put back from inside the loop, as it
+    // ends (`launch`), and why the claim, held in `only`, lasts as long as the
+    // process does.
+    ui::launch(controller, minimized, work_dir, raises);
+    drop(only);
     Ok(())
 }
 
@@ -355,7 +372,7 @@ fn window(minimized: bool) -> Result<()> {
 fn guard_system_proxy(work_dir: PathBuf) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = bliss_core::sysproxy::restore(&work_dir);
+        let _ = bliss_core::sysproxy::restore_unless_busy(&work_dir);
         previous(info);
     }));
 }
@@ -618,16 +635,11 @@ async fn install_engine(
     println!();
     let path = match installed {
         Ok(path) => path,
-        // ERROR_SHARING_VIOLATION: the engine of a running bliss.
-        Err(bliss_xray::DownloadError::Write { path, source })
-            if source.raw_os_error() == Some(32) =>
-        {
-            bail!(
-                "{} is in use by a running engine. Stop the tunnel in the bliss window, or \
-                 leave bliss (tray menu → Выход), and run this again.",
-                path.display()
-            )
-        }
+        // The engine of a running bliss, which Windows will not replace.
+        Err(e) if e.engine_in_use() => bail!(
+            "{e}: a running engine is using it. Stop the tunnel in the bliss window, or \
+             leave bliss (tray menu → Выход), and run this again."
+        ),
         Err(e) => return Err(e).wrap_err("could not install the engine"),
     };
 
@@ -707,7 +719,7 @@ Ctrl-C to stop.
 
     tokio::signal::ctrl_c().await?;
     report(&controller.frame());
-    if let Err(e) = bliss_core::sysproxy::restore(&work_dir) {
+    if let Err(e) = bliss_core::sysproxy::leave(&work_dir) {
         tracing::error!("could not restore the system proxy on the way out: {e}");
     }
     // The engine is a child in a Job Object, so it goes when we do.
@@ -788,6 +800,8 @@ where
         .append(true)
         .open(&path)
         .ok()?;
+    #[cfg(unix)]
+    share_the_log(&file);
     Some(
         fmt::layer()
             .with_ansi(false)
@@ -818,7 +832,30 @@ fn held_by_no_one_else(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-#[cfg(not(windows))]
+/// Linux deletes a file another process is writing just as quietly, and has
+/// no sharing modes to ask with. So every bliss holds a shared `flock` on the
+/// log it appends to (`share_the_log`), and a trim goes ahead only if an
+/// exclusive one can be had: nobody else has the file open.
+#[cfg(unix)]
+fn held_by_no_one_else(path: &std::path::Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // SAFETY: flock on a descriptor this function owns; it lets go on close.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Say that this process has the log open, for as long as it does.
+#[cfg(unix)]
+fn share_the_log(file: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: flock on a descriptor the caller keeps open; a failure only
+    // means another copy may trim the log under us, as before.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+}
+
+#[cfg(not(any(windows, unix)))]
 fn held_by_no_one_else(_path: &std::path::Path) -> bool {
     true
 }
@@ -923,6 +960,30 @@ fn attach_console() {
 
 #[cfg(not(windows))]
 fn attach_console() {}
+
+/// WebKitGTK's GPU path draws nothing — a blank or white window — on more
+/// machines than it should: under WSLg, which has no `/dev/dri`, with
+/// NVIDIA's driver, and on Wayland compositors (dioxus issues 3667 and 4528).
+/// Dioxus switches it off for Wayland with `/dev/dri` alone, and only after
+/// the event loop and bliss's own threads exist, where changing the
+/// environment is a race; `launch` tells it not to. This switches it off for
+/// all three, first thing, unless the person set it themselves.
+#[cfg(target_os = "linux")]
+fn webkit_environment() {
+    const NAME: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    if std::env::var_os(NAME).is_some() {
+        return;
+    }
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|kind| kind == "wayland");
+    let wsl = std::fs::read_to_string("/proc/version")
+        .is_ok_and(|version| version.to_ascii_lowercase().contains("microsoft"));
+    let nvidia = std::path::Path::new("/proc/driver/nvidia").exists();
+    if wayland || wsl || nvidia {
+        // SAFETY: the first thing main does, before any thread is started.
+        unsafe { std::env::set_var(NAME, "1") };
+    }
+}
 
 /// Whether this start is a command, which prints and so wants a console.
 ///
@@ -1066,7 +1127,8 @@ fn describe(c: &ServerConfig) -> String {
 }
 
 fn project_dirs() -> Result<directories::ProjectDirs> {
-    directories::ProjectDirs::from("", "", "bliss").ok_or_else(|| eyre!("cannot locate %APPDATA%"))
+    directories::ProjectDirs::from("", "", "bliss")
+        .ok_or_else(|| eyre!("cannot locate the user's home folder"))
 }
 
 fn default_profile_path() -> Result<PathBuf> {
@@ -1079,7 +1141,9 @@ fn default_profile_path() -> Result<PathBuf> {
     // %APPDATA%\bliss\bliss.toml, not the crate's config_dir(): that appends a
     // "config" folder, which is a unix habit. On Windows an app's settings live
     // directly under its own folder in Roaming, and this is a file users edit.
-    let base = directories::BaseDirs::new().ok_or_else(|| eyre!("cannot locate %APPDATA%"))?;
+    // On Linux the same call is ~/.config/bliss/bliss.toml, where they live.
+    let base = directories::BaseDirs::new()
+        .ok_or_else(|| eyre!("cannot locate the user's home folder"))?;
     Ok(base.config_dir().join("bliss").join("bliss.toml"))
 }
 

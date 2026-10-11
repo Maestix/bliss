@@ -217,8 +217,13 @@ async fn dial_and_relay(
     // while it is open.
     let router = serving.router();
     // The process is looked up before the decision rather than after, because a
-    // rule may be about the program rather than the destination.
-    let process = crate::process::name_for_port(peer.port());
+    // rule may be about the program rather than the destination. By both ends
+    // of the connection: Linux gives one local port to connections to
+    // different places, and the port alone could name another program.
+    let process = match client.get_ref().local_addr() {
+        Ok(inbound) => crate::process::name_for_connection(peer, inbound),
+        Err(_) => crate::process::name_for_port(peer.port()),
+    };
     let decision = router.decide(&target, process.as_deref());
 
     // Blocked is answered, not dropped. A refusal a program can see becomes an

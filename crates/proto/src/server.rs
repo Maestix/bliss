@@ -424,7 +424,7 @@ impl ShortId {
             return Err(bad());
         }
         let mut bytes = [0u8; 8];
-        for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        for (i, pair) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let s = std::str::from_utf8(pair).map_err(|_| bad())?;
             bytes[i] = u8::from_str_radix(s, 16).map_err(|_| bad())?;
         }
