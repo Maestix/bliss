@@ -3,7 +3,7 @@ name = "bliss"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "VLESS + REALITY client for Windows and Linux"
+description = "A proxy client for Windows and Linux"
 
 [[bin]]
 name = "bliss"

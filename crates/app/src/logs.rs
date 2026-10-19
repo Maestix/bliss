@@ -146,6 +146,85 @@ impl Visit for Message {
     }
 }
 
+/// The most one run of bliss writes into bliss.log.
+///
+/// The file used to be trimmed when bliss started and never while it ran, so
+/// a run could make it as large as the disk: a friend's bliss filled 305 GB
+/// with one warning repeated, at some 600 MB/s, before anyone noticed — the
+/// TUN stack spinning on an ended device (`Ended` in bliss-tun). An ordinary
+/// run writes a few lines an hour at the default level, so this is never met
+/// unless something has gone wrong, and then it stops the disk, not the log
+/// pane, which keeps its last lines as before.
+pub const RUN_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// bliss.log as one run writes it: appended to until the run has written
+/// `limit` bytes, then one line saying so, then nothing more.
+pub struct LogFile<W> {
+    file: W,
+    written: u64,
+    limit: u64,
+    full: bool,
+}
+
+impl<W: std::io::Write> LogFile<W> {
+    pub fn new(file: W, limit: u64) -> Self {
+        Self {
+            file,
+            written: 0,
+            limit,
+            full: false,
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for LogFile<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.full {
+            return Ok(buf.len());
+        }
+        if self.written + buf.len() as u64 > self.limit {
+            self.full = true;
+            writeln!(
+                self.file,
+                "--- this run has written {} MB here, the most one run may; what follows is in the window's log only ---",
+                self.limit / (1024 * 1024)
+            )?;
+            return Ok(buf.len());
+        }
+        self.file.write_all(buf)?;
+        self.written += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// Cut the log at `path` down to its last `keep` bytes or less, from the
+/// start of a line: the end of the last run is what someone opening it after
+/// a problem wants. It used to be deleted whole once past its size, and with
+/// it the record of the run that made it grow.
+pub fn keep_tail(path: &std::path::Path, keep: u64) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len <= keep {
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start(len - keep))?;
+    let mut tail = Vec::with_capacity(keep as usize);
+    file.take(keep).read_to_end(&mut tail)?;
+    let start = tail
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(tail.len(), |at| at + 1);
+    let trimmed = path.with_extension("log.trim");
+    std::fs::write(&trimmed, &tail[start..])?;
+    std::fs::rename(&trimmed, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +264,48 @@ mod tests {
     #[test]
     fn history_copes_with_asking_for_more_than_there_is() {
         assert!(history(CAPACITY * 10).len() <= CAPACITY);
+    }
+
+    /// A run writes up to its limit, says so once, and then nothing: the
+    /// same warning a million times is a few lines and a note, not the disk.
+    #[test]
+    fn the_file_stops_at_its_limit() {
+        use std::io::Write;
+
+        let mut log = LogFile::new(Vec::new(), 100);
+        for n in 0..1000 {
+            writeln!(log, "warning {n:04} the same again").expect("written");
+        }
+        let text = String::from_utf8(log.file).expect("text");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "three lines and the note: {text}");
+        assert!(lines[3].contains("the most one run may"), "{text}");
+        assert!(text.len() < 100 + 200, "{} bytes", text.len());
+    }
+
+    /// The trim keeps the newest lines, whole, and no more than asked.
+    #[test]
+    fn the_trim_keeps_the_last_whole_lines() {
+        use std::fmt::Write;
+
+        let dir = std::env::temp_dir().join(format!("bliss-log-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let path = dir.join("bliss.log");
+        let mut text = String::new();
+        for n in 0..1000 {
+            writeln!(text, "line {n:04}").expect("formatted");
+        }
+        std::fs::write(&path, &text).expect("written");
+
+        keep_tail(&path, 100).expect("trimmed");
+        let kept = std::fs::read_to_string(&path).expect("read");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(kept.len() <= 100, "{} bytes", kept.len());
+        assert!(kept.starts_with("line "), "starts on a line: {kept:?}");
+        assert!(
+            kept.ends_with("line 0999\n"),
+            "ends with the newest: {kept:?}"
+        );
     }
 }

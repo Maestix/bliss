@@ -577,7 +577,7 @@ mod xdg {
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=bliss\n\
-             Comment=VLESS + REALITY client\n\
+             Comment=Proxy client\n\
              Exec={exec}\n\
              Terminal=false\n\
              X-GNOME-Autostart-enabled=true\n"
@@ -665,7 +665,7 @@ mod xdg {
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=bliss\n\
-             Comment=VLESS + REALITY client\n\
+             Comment=Proxy client\n\
              Exec={exec}\n\
              Icon={icon}\n\
              Terminal=false\n\

@@ -1556,6 +1556,10 @@ mod tests {
     /// to whatever this boot started at that point — on Linux pids are
     /// handed out in order from boot. A process that is not bliss is not a
     /// running copy; this one, the test, is called bliss.
+    ///
+    /// Asked once `sleep` is `sleep`: the kernel wakes the parent of a `vfork`
+    /// a moment before the child's executable is its own, and for that moment
+    /// the child reads as this test — which is called bliss.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_reused_number_is_not_a_running_copy() {
@@ -1563,6 +1567,13 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("sleep");
+        let exe = format!("/proc/{}/exe", stranger.id());
+        for _ in 0..100 {
+            if std::fs::read_link(&exe).is_ok_and(|path| path.ends_with("sleep")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let counted = imp::process_alive(stranger.id());
         let _ = stranger.kill();
         let _ = stranger.wait();
