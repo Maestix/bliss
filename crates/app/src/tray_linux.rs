@@ -174,6 +174,7 @@ pub fn present(window: &dioxus::desktop::DesktopContext, token: Option<&str>) {
         shown.set_startup_id(token);
     }
     shown.show_all();
+    shown.deiconify();
     shown.present();
 }
 
@@ -462,6 +463,7 @@ pub fn Tray(frame: Signal<Frame>) -> Element {
                 return;
             };
             while let Some(token) = raises.recv().await {
+                tracing::info!("window: another copy asked for it");
                 catch_up(&window, frame, &controller);
                 present(&window, token.as_deref());
             }

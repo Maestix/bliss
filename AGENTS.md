@@ -17,7 +17,8 @@ can hold a work VPN — the official OpenVPN, started through OpenVPN's own
 service (on Linux through polkit) and kept to bliss's rules (§10a). Stage 3
 replaces xray with a native TLS 1.3 + REALITY + VLESS stack behind the same
 `Outbound` trait. Windows is where bliss is used every day; Linux is the port
-of 9 October 2026, built and tested in WSL, its window not yet run (§12).
+of 9 October 2026, built and tested in WSL, its window first run in WSLg on
+11 October (§12).
 The long-form plan, in Russian, lives outside the repo at
 `%USERPROFILE%\.claude\plans\cryptic-conjuring-stroustrup.md`.
 
@@ -91,7 +92,7 @@ The long-form plan, in Russian, lives outside the repo at
 | `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service and, on Linux, `pkexec` (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision tied to bliss's life — a Job Object, on Linux the parent-death signal (`job.rs`) — GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
 | `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`; Linux's own TUN device, `linux_device.rs`), the machine's addresses and routes (`net.rs`; over netlink, `linux_net.rs`), and packets turned into connections and flows (`stack.rs`); `tests/netns.rs` carries a connection and a datagram through Linux's device in a namespace of its own (§2) |
-| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), Linux's tray (`tray_linux.rs`) and single window (`instance.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with the session (`startup.rs`), log ring buffer (`logs.rs`), clipboard |
+| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), Linux's tray (`tray_linux.rs`) and single window (`instance.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with the session (`startup.rs`), log ring buffer (`logs.rs`), clipboard, the stand-ins that keep libxdo out of Linux's binary (`no_xdo.rs`, guarded by `tests/libraries.rs`) |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
@@ -219,30 +220,26 @@ cargo finds by walking up from `/mnt/c/...` (§3, trap 11):
 ```bash
 cd /mnt/c/Users/Maestix/Desktop/Projects/Rust/bliss
 export CARGO_TARGET_DIR=$HOME/bliss-target RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=
-cargo +1.97.0 test -p bliss-proto -p bliss-core -p bliss-xray -p bliss-openvpn -p bliss-tun
+cargo +1.97.0 test --workspace --exclude bliss-spike   # ~260 tests
 cargo +1.97.0 test -p bliss-tun --test netns -- --ignored --nocapture
+cargo +1.97.0 build --release -p bliss   # $HOME/bliss-target/release/bliss, 16 MB
 ```
 
-- Everything but the window builds and tests with what WSL has. The window
-  needs the GTK and WebKitGTK development packages, which take `sudo`:
-  `build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev
-  libsoup-3.0-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev`. As
-  of 9 October they are not installed; the user was asked to.
-- **Without them the window can still be checked.** The `-sys` crates only ask
-  pkg-config whether a library is there and how new it is, and a check links
-  nothing: a folder of stand-in `.pc` files (name, `Version: 99.0.0`, empty
-  `Libs` and `Cflags`) on `PKG_CONFIG_PATH` lets `cargo check` and `cargo
-  clippy -p bliss --all-targets` run. Three were needed: `libsoup-3.0`,
-  `webkit2gtk-4.1`, `gdk-x11-3.0` (GTK's own runtime is in WSL). Never point a
-  build or a test at them; they type-check and nothing more. Use a target dir
-  of its own for this, or the real build later reuses the stand-ins' results.
-- **The window crate's tests that need no window still run**, from a crate of
-  their own outside the repository: a `lib.rs` that takes `startup.rs` and
-  `instance.rs` in by `#[path]`, a `mod ui` with `MARK` in it (what
-  startup.rs takes from the window), the repository's `Cargo.lock` copied
-  beside it, and `directories`, `libc`, `tokio` and `tracing` as its
-  dependencies. That is how the autostart entry, the menu's entry and the
-  single window's claim and raise were run on Linux, 7 tests.
+- **The window needs GTK's and WebKitGTK's development packages**, which take
+  `sudo` and so the user's password: `build-essential pkg-config
+  libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libxdo-dev
+  libayatana-appindicator3-dev librsvg2-dev`, 234 packages with what they
+  pulled in. The user installed them on 11 October, from a terminal tab this
+  agent opened with the command, typing the password themselves (WebKitGTK
+  2.52.6, GTK 3.24.41). The window crate builds and its 94 tests pass there;
+  `text_survives_the_round_trip` is Windows' alone, so nothing in that run
+  touches the clipboard — which WSLg shares with Windows.
+- Before they were in, two stopgaps did: stand-in `.pc` files on
+  `PKG_CONFIG_PATH` (name, `Version: 99.0.0`, empty `Libs` and `Cflags`) let
+  `cargo check` and `clippy` type-check the window without linking it, and a
+  crate of its own outside the repository ran `startup.rs` and `instance.rs`
+  by `#[path]`. Neither is needed now; never point a real build at the
+  stand-ins.
 - **The TUN end to end test needs no root**: it runs itself again under
   `unshare --user --map-root-user --net`, root in a namespace with nothing in
   it, with a dummy interface for an uplink and an echo for an engine. The
@@ -256,9 +253,9 @@ cargo +1.97.0 test -p bliss-tun --test netns -- --ignored --nocapture
   Seen failing with the stale-route clean-up, with the route removal, and
   with routes added by replacing (each of the last two guards on its own)
   taken out.
-- Nothing of the window has been run on Linux, nor OpenVPN's Linux path: WSL
-  has no WebKitGTK and no OpenVPN, and polkit there has no agent to ask the
-  password with. WSLg would show the window once the packages are in.
+- **The window runs in WSLg** (§12 for what was seen). OpenVPN's Linux path
+  does not: WSL has no OpenVPN, and polkit there has no agent to ask the
+  password with.
 
 CLI (`bliss --help`, and `--help` on each subcommand):
 
@@ -396,6 +393,20 @@ These cost the most time on this project. None of them announce themselves.
     trap 1 again: a `\n` in a test became a real newline in a byte string, and
     a `\\0` became a real NUL in a Rust source file. Write a replacement script
     with the Write tool and run the file; never put one in a heredoc.
+14. **Right after `spawn`, a child on Linux can still be its parent.** The
+    kernel wakes the parent of a `vfork` (which is how `Command` spawns there)
+    a moment before the child's executable is its own, so `/proc/<pid>/exe`
+    can name the test binary, and a child that has not yet exec'd holds every
+    one of the parent's sockets. Three tests failed, once each, in some
+    twenty runs of every test at once: two read `sleep` as the test binary
+    (whose name has `bliss` in it), one traced its own socket to a parallel
+    test's child.
+    A test about a child's identity waits until the child is what it
+    became; the lookup gives a shared socket to its older holder.
+15. **`wsl.exe -- <command>` runs it through a shell first**, so a `$x` or a
+    `$(…)` meant for the inner `bash -c` is expanded, empty, before it gets
+    there. Put the commands in a script and run the file (`wsl.exe -d Ubuntu
+    -- bash /mnt/c/…/script.sh`), as with trap 13.
 
 ## 4. Commits
 
@@ -442,6 +453,16 @@ These cost the most time on this project. None of them announce themselves.
   rest dropped as it arrives, `Tail` in session.rs), the program names
   remembered between socket tables (256, process.rs) and the recent owners
   tried first (8).
+- **bliss.log has a cap while bliss runs, not only when it starts**: one run
+  writes at most 16 MB into it (`logs::RUN_LIMIT`, a line saying so, then
+  nothing; `the_file_stops_at_its_limit`), and at start a file past 2 MB is
+  cut to its last 1 MB of whole lines (`logs::keep_tail`) rather than
+  deleted, so the end of the run that made it grow survives. It was trimmed
+  at start alone: on 18 October a friend's bliss wrote 305 GB of one warning
+  into it at some 600 MB/s, until their disk had 12 GB left (§9, an ended
+  device). The window's log pane keeps its 400 lines whatever the file does.
+  The default filter is `info,ipstack=error`: ipstack warns about every
+  packet it cannot hand on, which nobody can act on.
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
@@ -589,7 +610,7 @@ These cost the most time on this project. None of them announce themselves.
     applied to it, and the fetch from the new address keeps the card's
     "loading".
 - **Assume another bliss shares the work dir** — a test run, a stray copy, the
-  user's own instance. `bliss.log` is appended, and trimmed only if an open with
+  user's own instance. `bliss.log` is appended, and trimmed (to its tail) only if an open with
   `share_mode(0)` succeeds, because Rust opens files with `FILE_SHARE_DELETE` and
   deleting a log another process writes to succeeds silently. Linux has no
   sharing modes: every bliss holds a shared `flock` on the log it appends to,
@@ -1128,7 +1149,8 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
 
 27. **On Linux the window is WebKitGTK's, and the tray is not the window.**
     Read in the sources of tao, wry, tray-icon, muda and dioxus-desktop on
-    9 October; none of it has been run yet (§12).
+    9 October, and first run on 11 October in WSLg, which has no tray (§12):
+    what is said below about the tray is still read, not seen.
     - **The window is built hidden and shown by bliss** (`SHOW`, in an effect
       of `App`). dioxus-desktop builds every window hidden on Windows and
       shows it after the first render, but on Linux builds it as asked, and
@@ -1468,6 +1490,21 @@ table.
   while ipstack wants tokio's, which is what `tokio-util`'s `compat` is for.
 - **ipstack ends a connection with `block_in_place`**, so it must run on a
   multi-threaded runtime. Both of bliss's are.
+- **An ended device is the end** (`Ended` in stack.rs). A wintun session that
+  has been shut down answers every read at once, with nothing — `Ok(0)`, for
+  ever (`ReadState::Closed` in wintun-bindings' async session). ipstack's
+  loop takes each answer for a packet, cannot hand it on once bliss has
+  stopped taking streams, logs `process_device_read error: Send Error channel
+  closed`, and reads again without once yielding — so the abort `Tun::drop`
+  sends it never lands, and it runs until the process ends. Switching TUN off
+  shuts the session down while the task that takes the streams is still being
+  cancelled, a race: a friend's bliss hit it on 18 October and wrote 305 GB
+  of that line at some 600 MB/s, and they could not make it happen again.
+  `Ended` turns the first empty read or failure into a wait that never ends,
+  said once in the log, and the stack's task yields and is aborted. With a
+  device that ended bare, the stack read it 158 828 times in 0.2 s; through
+  `Ended`, once (`an_ended_device_is_read_once`). The cap on bliss.log (§5)
+  is the second wall.
 - **Still missing, and each is a visible hole:** IPv6 is neither carried nor
   blocked, so a machine with working IPv6 reaches IPv6 sites around the
   tunnel; DNS still goes out the physical interface, which is a leak Windows
@@ -1866,7 +1903,7 @@ the certificate HMAC). The byte-level spec is in the plan's section «Прото
 VLESS field order port → atyp → address, VLESS Encryption and Vision framing.
 Follow it byte for byte, not from memory.
 
-## 12. Linux, as of 9 October
+## 12. Linux, as of 11 October
 
 The user asked for Linux support on 9 October. Everything Windows-only
 already sat behind `cfg(windows)` with stubs elsewhere, so the shared crates
@@ -1883,7 +1920,8 @@ research agents first, and the answers are in §5, §6 rule 27, §9 and §10a.
   bit;
 - which program holds a connection, from `/proc` (`process.rs`), by both
   its ends: the parsers are tested on every platform, the lookups against
-  this process and `sleep`, the two caps against their limits;
+  this process and `sleep`, the two caps against their limits, and a socket
+  a child inherited counted as the parent's (trap 14);
 - leaving by one interface (`interface.rs`), checked by the name the kernel
   gives back;
 - the system proxy (`sysproxy.rs`) against stand-in `gsettings` and
@@ -1893,29 +1931,77 @@ research agents first, and the answers are in §5, §6 rule 27, §9 and §10a.
   from a process that inherited its number;
 - starting with the session and the application menu's entry (`startup.rs`),
   in a scratch folder, and the single window and its raise (`instance.rs`),
-  on a scratch lock and socket — both through the crate of their own in §2,
-  since the window crate does not link without WebKitGTK;
+  on a scratch lock and socket;
 - the TUN device and its routes (`crates/tun`), end to end in a namespace;
 - the pieces of OpenVPN's Linux path that run without OpenVPN: its options,
   the caller check by `SO_PEERCRED`, the capped tail of its output.
 
-**Type-checked only** — the window crate, with stand-in pkg-config files
-(§2): the window, the tray, the clipboard, `present`, the routes from tray
-clicks, the window built hidden and shown, the wait for a tray host, the
-signals that leave. **Never run anywhere**: OpenVPN through pkexec, the system proxy on a
-real GNOME or KDE, TUN with a `setcap`'d window. Say so when any of it comes
-up, and take the user's first run as the test it is.
+**The window, in WSLg on 11 October**, on scratch paths (below), native
+Wayland and again under X11 (`GDK_BACKEND=x11`):
 
-To see the window in WSL (WSLg shows it; it has no tray host, so the close
-button leaves bliss there): the packages in §2, then from the checkout
-`cargo +1.97.0 run -p bliss` with the variables of §2. Use `BLISS_PROFILE`
-and `BLISS_WORK_DIR` as on Windows (§7) — a probe in WSL otherwise writes the
-user's WSL profile.
+- it opens — built hidden, shown after the first render — and is drawn as on
+  Windows: Comfortaa with its Cyrillic, the pictures, the gliding chart with
+  its readout under the pointer, the rule editor's dialog inside the window;
+- the screens and the rail's highlight; the settings' Linux words; the
+  starting rules added to the profile, with the warnings a work dir without
+  geo files gives; the live log; maximized, the page grows (rule 16);
+- the two checkboxes write the autostart entry and the menu's, with the
+  96 px mark, quoted path and `StartupWMClass`;
+- a second copy leaves in 65 ms, and the first logs the ask
+  ("window: another copy asked for it"). It does not come back from
+  minimized: WSLg's compositor lets no client un-minimize itself, under
+  Wayland or X11, and a copy started from a script has no activation token.
+  On a desktop the launcher gives one; unseen;
+- SIGTERM: "signal 15: leaving", out through `LoopDestroyed`, exit 0;
+- WSLg has no GPU here: Mesa warns about EGL and ZINK, WebKit draws in
+  software, and it is fine.
 
-For a person running it: the runtime libraries are WebKitGTK 4.1, GTK 3 and
-libxdo (`libwebkit2gtk-4.1-0 libgtk-3-0 libxdo3` on Ubuntu), and optionally
-`libayatana-appindicator3-1` for the tray, `openvpn` and polkit for the work
-VPN, and `setcap cap_net_admin+ep` on the binary for TUN. Nothing is packaged
+**Not run anywhere**: the tray and its menu (WSLg has no tray host, so the
+close button leaves bliss there), the clipboard, a tunnel through a real
+server, OpenVPN through pkexec, the system proxy on a real GNOME or KDE, TUN
+from a `setcap`'d window. Say so when any of it comes up, and take the
+user's first run as the test it is.
+
+To see the window in WSL: build as in §2 and run it with `BLISS_PROFILE`,
+`BLISS_WORK_DIR` and `BLISS_STARTUP_KEY` on scratch paths, and
+`XDG_CACHE_HOME` too, or WebKit's data lands in the user's WSL home — a probe
+otherwise writes the user's WSL profile, work dir and autostart. Run it from
+a terminal tab the user can see and stop (`run_in_terminal`, `wsl -d Ubuntu
+-e bash <script>`): the window lives as long as that `wsl` does. The default
+proxy mode leaves WSL's dconf alone; check `gsettings get
+org.gnome.system.proxy mode` before and after anyway. To look at the window
+from Windows, it belongs to `msrdc.exe` — that is what to grant a screen
+tool. Typing into it through injected Unicode text arrives as nothing, and
+key presses arrive in the user's layout (Russian: `foo` is `ащщ`); type
+nothing that matters that way.
+
+**The release build** is made in WSL (§2), about three and a half minutes
+from cold with fat LTO, and was first handed to the user on 15 October, on
+their Desktop as `bliss`.
+
+- **A build made on Ubuntu 24.04 needs glibc 2.39.** Rust's standard library
+  names `pidfd_spawnp` and `pidfd_getpid` weakly, but the binary's version
+  need on `GLIBC_2.39` is not marked weak, so the loader refuses an older
+  glibc outright: Ubuntu 22.04, Debian 12 and Mint 21 cannot start it. A
+  build for those has to be made on one of them.
+- **It needs no libxdo** (`no_xdo.rs`). muda links it for Copy and Paste
+  menu items bliss never shows, and the link alone put `libxdo.so.3` among
+  the libraries the binary could not start without; Arch's xdotool ships
+  `libxdo.so.4`, so the first release build could not have started on Arch.
+  dioxus-desktop takes muda with its default features, so the link stays;
+  three stand-in functions in the binary leave the linker nothing to take
+  from the library, and it drops it. `tests/libraries.rs` reads the
+  program's own `DT_NEEDED`: a unit test's binary has no `main` of bliss's,
+  drops libxdo either way, and passed with the stand-ins gone. The build
+  still needs `libxdo-dev`, to link against before dropping it.
+
+For a person running it: the runtime libraries are WebKitGTK 4.1 and GTK 3
+(`libwebkit2gtk-4.1-0` on Ubuntu, `webkit2gtk-4.1` on Arch, which brings
+GTK, libsoup and the rest), and optionally `libayatana-appindicator3-1`
+(Arch: `libayatana-appindicator`) for the tray — on GNOME with the
+AppIndicator extension too (`gnome-shell-extension-appindicator`) —,
+`openvpn` and polkit for the work VPN, and `setcap cap_net_admin+ep` on the
+binary for TUN. Nothing is packaged
 yet: no `.deb`, and no AppImage (whose mount ignores file capabilities, so TUN
 would need another way there; the autostart entry names the AppImage's own
 file, from `APPIMAGE`, rather than its mount). The settings screen puts

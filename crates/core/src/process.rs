@@ -478,11 +478,21 @@ mod imp {
             else {
                 continue;
             };
-            sockets_of(pid, |inode| {
-                owners.insert(inode, pid);
-            });
+            sockets_of(pid, |inode| claim(&mut owners, inode, pid));
         }
         owners
+    }
+
+    /// A socket's owner, as a scan meets its holders. One two processes hold
+    /// is the older one's, the lower pid: a child holds its parent's sockets
+    /// from the fork until its exec closes them, and a scan that met it there
+    /// had a connection named after whatever the child went on to become.
+    /// Seen in the tests, where a parallel test's child took this one's.
+    fn claim(owners: &mut HashMap<u64, u32>, inode: u64, pid: u32) {
+        owners
+            .entry(inode)
+            .and_modify(|owner| *owner = (*owner).min(pid))
+            .or_insert(pid);
     }
 
     /// The inode of every socket `pid` holds.
@@ -519,8 +529,49 @@ mod imp {
     }
 
     #[cfg(test)]
-    mod caps {
+    mod tests {
+        use std::os::fd::AsRawFd;
+
         use super::*;
+
+        /// A socket a child inherited is still the parent's: here one this
+        /// test leaves open across `sleep`'s exec, so both hold it for real.
+        #[test]
+        fn a_socket_two_processes_hold_is_the_older_ones() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+            let stream = std::net::TcpStream::connect(listener.local_addr().expect("its address"))
+                .expect("connects");
+            let fd = stream.as_raw_fd();
+            let link = std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("the link");
+            let inode = proc_net::socket_inode(link.as_os_str().as_bytes()).expect("a socket");
+            // SAFETY: flags of a descriptor this test owns, put back at once.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+            let child = std::process::Command::new("sleep").arg("30").spawn();
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            let mut child = child.expect("sleep");
+            let mut holds = false;
+            for _ in 0..200 {
+                sockets_of(child.id(), |held| holds |= held == inode);
+                if holds {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let owners = every_socket();
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(holds, "the child holds the socket too");
+            assert_eq!(owners.get(&inode), Some(&std::process::id()));
+        }
+
+        #[test]
+        fn a_claim_keeps_the_lower_pid_whatever_the_order() {
+            let mut owners = HashMap::new();
+            claim(&mut owners, 7, 300);
+            claim(&mut owners, 7, 200);
+            claim(&mut owners, 7, 400);
+            assert_eq!(owners.get(&7), Some(&200));
+        }
 
         #[test]
         fn the_recent_owners_stay_few() {
@@ -863,16 +914,27 @@ mod linux_tests {
     }
 
     /// Another program is named by its executable: `sleep` stands in for a
-    /// browser.
+    /// browser. Asked until it is `sleep`, a moment at most: the kernel wakes
+    /// the parent of a `vfork` before the child's executable is its own, and
+    /// for that moment `/proc/<pid>/exe` is still the parent's — seen once,
+    /// as the test binary's name, in a run of every test at once.
     #[test]
     fn another_program_is_named_by_its_executable() {
         let Ok(mut child) = std::process::Command::new("sleep").arg("30").spawn() else {
             return;
         };
         let pid = child.id();
-        assert_eq!(imp::image_name(pid).as_deref(), Some("sleep"));
+        let mut name = imp::image_name(pid);
+        for _ in 0..100 {
+            if name.as_deref() == Some("sleep") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            name = imp::image_name(pid);
+        }
         let _ = child.kill();
         let _ = child.wait();
+        assert_eq!(name.as_deref(), Some("sleep"));
     }
 }
 

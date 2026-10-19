@@ -1,4 +1,4 @@
-//! bliss — a VLESS + REALITY client for Windows and Linux.
+//! bliss — a proxy client for Windows and Linux.
 
 // No console window beside the real one, on Windows; elsewhere this does
 // nothing. A console-subsystem program gets a
@@ -20,6 +20,8 @@ mod icons;
 #[cfg(target_os = "linux")]
 mod instance;
 mod logs;
+#[cfg(target_os = "linux")]
+mod no_xdo;
 mod profile_file;
 mod rule_text;
 mod startup;
@@ -38,7 +40,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Parser)]
-#[command(name = "bliss", version, about = "VLESS + REALITY client")]
+#[command(name = "bliss", version, about = "Proxy client")]
 struct Cli {
     /// Open the window minimized. The session passes this when it starts bliss
     /// at sign-in and the settings ask for a minimized window.
@@ -139,7 +141,14 @@ fn main() -> Result<()> {
     }
     color_eyre::install()?;
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_env("BLISS_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        // ipstack warns about every packet it cannot hand on — one for a
+        // connection that has just closed, and a flood for a device that has
+        // ended (`Ended` in bliss-tun) — none of which a person can act on,
+        // and enough of which would spend the run's share of bliss.log.
+        .with(
+            EnvFilter::try_from_env("BLISS_LOG")
+                .unwrap_or_else(|_| EnvFilter::new("info,ipstack=error")),
+        )
         .with(fmt::layer().with_target(false).without_time())
         .with(file_layer())
         .with(logs::Recorder)
@@ -775,13 +784,15 @@ fn elide(s: &str, width: usize) -> String {
 ///
 /// Appended to, not truncated: truncating meant that a second bliss — a test
 /// run, a stray copy — erased the record of the first, which is exactly when
-/// the log is wanted. Trimmed when it gets large rather than rotated, since one
-/// file someone can open beats a directory of numbered ones.
+/// the log is wanted. Trimmed to its last lines when it gets large rather than
+/// rotated, since one file someone can open beats a directory of numbered
+/// ones; and a run writes no more than `logs::RUN_LIMIT` into it.
 fn file_layer<S>() -> Option<impl tracing_subscriber::Layer<S>>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     const LIMIT: u64 = 2 * 1024 * 1024;
+    const KEEP: u64 = 1024 * 1024;
 
     // The directory has to exist before a file can be opened in it. On a first
     // run it does not: nothing has written there yet, and the first thing that
@@ -793,7 +804,7 @@ where
 
     let path = dir.join("bliss.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIMIT) && held_by_no_one_else(&path) {
-        let _ = std::fs::remove_file(&path);
+        let _ = logs::keep_tail(&path, KEEP);
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -806,9 +817,10 @@ where
         fmt::layer()
             .with_ansi(false)
             .with_target(false)
-            // A handle per event is a syscall we can afford at a few lines a
-            // second, and it keeps this to one function with no new dependency.
-            .with_writer(move || file.try_clone().expect("clone the log handle")),
+            .with_writer(std::sync::Mutex::new(logs::LogFile::new(
+                file,
+                logs::RUN_LIMIT,
+            ))),
     )
 }
 
