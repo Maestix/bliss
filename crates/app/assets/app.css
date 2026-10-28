@@ -510,6 +510,19 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
 }
 .splitter:hover::before, .splitter.dragging::before { width: 76px; background-color: rgba(238, 130, 196, .65); }
 .drag-veil { position: fixed; inset: 0; z-index: 50; cursor: row-resize; }
+.drag-veil.cols { cursor: col-resize; }
+/* The grips between the server list's columns: 12px, the width of the gap
+   they stand in, with a hairline that shows on hover and while dragged. */
+.col-grip {
+  position: absolute; top: -4px; bottom: 2px; width: 12px;
+  display: grid; justify-items: center; cursor: col-resize;
+}
+.col-grip::before {
+  content: ""; width: 2px; border-radius: 1px;
+  background-color: rgba(239, 232, 245, .10);
+  transition: background-color .14s ease;
+}
+.col-grip:hover::before, .col-grip.dragging::before { background-color: rgba(238, 130, 196, .65); }
 
 /* Text boxes keep their ground and hairline here rather than inline, so the
    focus rule can change the hairline: inline, it outranked `.field:focus`, and

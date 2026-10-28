@@ -1223,6 +1223,29 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       and animations, and whether tao's edge resizing works over the page,
       are open.
 
+28. **One spacing scale** (the note above `SCREEN_HEAD` in ui.rs): 12px
+    between any two cards, the rail and the screen included (a screen is
+    `padding:18px 20px 18px 12px`), 16px inside a card, 12px inside a tile
+    within one. Every screen's heading row is `SCREEN_HEAD`, 34px at least,
+    so the first card starts at one height with or without a button beside
+    the heading; a screen's scrolling column is `SCROLL_COLUMN`, reaching into
+    the right padding by its scrollbar so its cards end where the others do.
+    A checkbox row reaches 10px into its card's padding for its hover ground
+    (`CheckRow`), so the card's text starts at the card's edge. The user found
+    14, 15, 18 and 20px cards side by side, settings cards 9px narrower than
+    the rest, and the rail 20px from everything.
+29. **The server list's columns are dragged** (`ServerColumns`): grips in
+    the header between the name and the address, and between the address
+    and the protocol; a double click puts one back. The header measures the
+    list (`onresize`) and the columns are pixels from then on, the address
+    taking what is left, so a row always fits
+    (`dragged_server_columns_still_fit_the_list`). Text is cut in code to the
+    measured width at 0.6em a letter (`letters_in`), the whole of it in the
+    tooltip. Seen in the window on 28 October: a long VPN name shown whole
+    once dragged wide, a drag far past a limit with no dead stretch on the
+    way back, the reset. Widths last until bliss closes, as the log's height
+    does.
+
 ## 7. Verifying a UI change: look at the real window
 
 A replica page proves a mechanism, not that the code changed. For any UI bug,
