@@ -175,11 +175,33 @@ const IDLE: (&str, &str, &str) = ("#766a88", "rgba(118,106,136,.16)", "rgba(118,
 // A failure is the one state that asks to be looked at.
 const FAILED: (&str, &str, &str) = (BAD, "rgba(229,107,111,.26)", "rgba(229,107,111,.12)");
 
+// The spacing scale, which every screen keeps: 12px between any two cards —
+// the rail and the screen beside it too, so a screen's left padding is 12px
+// and its right 20px, the rail's own distance from the window's edge — 18px
+// above and below, 16px inside a card, 12px inside a tile within a card. The
+// cards had grown 14, 15, 18 and 20px of their own, side by side on one
+// screen, and the rail stood 20px from everything; the user saw both.
+
+/// A screen's heading row: as tall as a heading with a button beside it, so
+/// the first card starts at one height on every screen.
+const SCREEN_HEAD: &str = "display:flex;align-items:baseline;gap:10px;min-height:34px;flex:none";
+/// A screen's scrolling column. It reaches into the screen's right padding by
+/// its scrollbar's width (9px, and 3px to spare), so its cards end where
+/// every other screen's do rather than 9px short of them.
+const SCROLL_COLUMN: &str =
+    "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;margin-right:-12px;padding-right:3px";
+
 /// The log pane's height on the logs screen, in CSS pixels. Global, because
 /// the screen is built afresh on every visit and the height should outlive it.
 static LOG_HEIGHT: GlobalSignal<f64> = Signal::global(|| DEFAULT_LOG_HEIGHT);
 const DEFAULT_LOG_HEIGHT: f64 = 230.0;
 const MIN_LOG_HEIGHT: f64 = 110.0;
+/// The server list's own width, as its header measures it, and the two
+/// columns someone dragged to a width of their own (`None`: the default
+/// share). Global for the reason `LOG_HEIGHT` is.
+static SERVER_LIST_WIDTH: GlobalSignal<f64> = Signal::global(|| 0.0);
+static SERVER_NAME_WIDTH: GlobalSignal<Option<f64>> = Signal::global(|| None);
+static SERVER_KIND_WIDTH: GlobalSignal<Option<f64>> = Signal::global(|| None);
 /// What the connections table is narrowed to, and in which order.
 static TABLE_QUERY: GlobalSignal<String> = Signal::global(String::new);
 static TABLE_SORT: GlobalSignal<Sort> = Signal::global(|| Sort::Newest);
@@ -1822,10 +1844,10 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
 
     rsx! {
         div {
-            style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:13px;\
-                    padding:18px 20px;overflow:hidden",
+            style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;\
+                    padding:18px 20px 18px 12px;overflow:hidden",
 
-            div { style: "display:flex;align-items:baseline;gap:10px",
+            div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Подключение" }
                 span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{elide(&frame.server_tag, 40)}"
@@ -1845,7 +1867,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
             if !reason.is_empty() {
                 div {
                     style: "flex:none;display:flex;flex-direction:column;gap:9px;\
-                            padding:10px 13px;border-radius:8px;\
+                            padding:12px;border-radius:8px;\
                             background-color:rgba(229,107,111,.10);\
                             box-shadow:inset 0 0 0 1px rgba(229,107,111,.26)",
                     span {
@@ -1867,7 +1889,7 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
 
             div {
                 style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:11px;\
-                        padding:15px;background-color:var(--color-surface);\
+                        padding:16px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
 
                 TabBar {
@@ -1978,7 +2000,7 @@ fn StatusCards(frame: Frame) -> Element {
                 // The night scene behind the status: `.status-card` in app.css.
                 class: "status-card",
                 style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
-                        padding:18px;background-color:var(--color-surface);\
+                        padding:16px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
                 div {
                     style: "flex:none;display:flex;flex-direction:column;align-items:center;gap:11px",
@@ -2042,7 +2064,7 @@ fn StatusCards(frame: Frame) -> Element {
                 // narrow window so the state word beside it still fits.
                 class: "stats-card",
                 style: "flex:none;display:flex;flex-direction:column;gap:10px;\
-                        padding:14px;background-color:var(--color-surface);\
+                        padding:16px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
                 StatRow {
                     label: "Задержка",
@@ -2217,19 +2239,19 @@ fn VpnCard(vpn: crate::engine::VpnView) -> Element {
 
     rsx! {
         div {
-            style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:15px;\
+            style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:16px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             span { style: "font:700 16px/1 var(--font-heading);padding:0 0 8px", "Рабочий VPN" }
             span {
-                style: "padding:0 10px 6px;font-size:13px;line-height:1.5;color:var(--color-neutral-500)",
+                style: "padding:0 0 6px;font-size:13px;line-height:1.5;color:var(--color-neutral-500)",
                 "Для рабочих сайтов, по профилю OpenVPN (.ovpn), который выдали на работе. \
                  Через VPN идёт только то, что правила отправляют «через VPN»: остальной \
                  трафик и DNS остаются как были."
             }
             if let Some(note) = service {
                 span {
-                    style: "padding:2px 10px 6px;font-size:12.5px;line-height:1.45;color:#cbbaf4",
+                    style: "padding:2px 0 6px;font-size:12.5px;line-height:1.45;color:#cbbaf4",
                     "{note}"
                 }
             }
@@ -2252,12 +2274,12 @@ fn VpnCard(vpn: crate::engine::VpnView) -> Element {
                 // the note above says so already.
                 if let Some(why) = failed.filter(|_| vpn.service == Availability::Ready) {
                     span {
-                        style: "padding:2px 10px 4px 39px;font-size:12.5px;line-height:1.45;\
+                        style: "padding:2px 0 4px 29px;font-size:12.5px;line-height:1.45;\
                                 color:#f2a7ad;word-break:break-word",
                         "{why}"
                     }
                 }
-                div { style: "display:flex;flex-wrap:wrap;gap:8px;padding:6px 10px 2px",
+                div { style: "display:flex;flex-wrap:wrap;gap:8px;padding:6px 0 2px",
                     OvpnPicker { label: "Заменить файл" }
                     Button {
                         label: if sure() { "Точно удалить?" } else { "Удалить" },
@@ -2278,7 +2300,7 @@ fn VpnCard(vpn: crate::engine::VpnView) -> Element {
                 }
             } else {
                 div {
-                    style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:6px 10px 2px",
+                    style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:6px 0 2px",
                     OvpnPicker { label: "Выбрать файл .ovpn" }
                     span { style: "font-size:12.5px;color:var(--color-neutral-600)",
                         "или скопируйте текст файла и нажмите Ctrl+V"
@@ -2351,7 +2373,7 @@ fn AddServerCard(frame: Frame) -> Element {
         div {
             // The same night scene as the status card it stands in for.
             class: "status-card",
-            style: "flex:none;display:flex;flex-direction:column;gap:14px;padding:20px 22px;\
+            style: "flex:none;display:flex;flex-direction:column;gap:14px;padding:16px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             div { style: "display:flex;flex-direction:column;gap:6px;max-width:540px",
@@ -2617,15 +2639,60 @@ fn ServersTab(frame: Frame) -> Element {
     // A delete clicked once, by the row's place in the list; the second deletes.
     let armed = use_signal(|| None::<usize>);
     let sections = server_sections(&frame.servers, &GROUP_OPEN());
+    let columns = ServerColumns::new(
+        SERVER_LIST_WIDTH(),
+        SERVER_NAME_WIDTH(),
+        SERVER_KIND_WIDTH(),
+    );
+    let grid = columns.map_or_else(|| SERVER_COLUMNS.to_owned(), |c| c.css());
+    // Where a drag began: which border, the pointer's place, the column's width.
+    let mut drag = use_signal(|| None::<(ColumnBorder, f64, f64)>);
 
     rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:7px",
             div {
                 class: "list-head",
-                style: "display:grid;{SERVER_COLUMNS};padding:0 10px 6px;font-size:12px;\
+                style: "display:grid;{grid};position:relative;padding:0 10px 6px;font-size:12px;\
                         letter-spacing:.09em;text-transform:uppercase;\
                         color:var(--color-neutral-500);\
                         border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--color-divider)",
+                // The content box: the padding and the scrollbar's gutter are
+                // left out, as the rows below have them.
+                onresize: move |e: ResizeEvent| {
+                    if let Ok(size) = e.get_content_box_size() {
+                        let width = size.width + SERVER_PAD * 2.0;
+                        if (SERVER_LIST_WIDTH() - width).abs() >= 1.0 {
+                            *SERVER_LIST_WIDTH.write() = width;
+                        }
+                    }
+                },
+                if let Some(c) = columns {
+                    // Each grip is centred on the gap it stands in.
+                    for (border, left, start) in [
+                        (ColumnBorder::Name, SERVER_PAD + c.name, c.name),
+                        (ColumnBorder::Kind, SERVER_PAD + c.name + 12.0 + c.addr, c.kind),
+                    ] {
+                        div {
+                            key: "{border:?}",
+                            class: if drag().is_some_and(|(b, _, _)| b == border) { "col-grip dragging" } else { "col-grip" },
+                            style: "left:{left}px",
+                            title: "Потяните, чтобы изменить ширину. Двойной клик — как было",
+                            onmousedown: move |e: MouseEvent| {
+                                e.prevent_default();
+                                // The name holds still while the protocol's
+                                // border moves: the address gives and takes.
+                                if border == ColumnBorder::Kind && SERVER_NAME_WIDTH().is_none() {
+                                    *SERVER_NAME_WIDTH.write() = Some(c.name);
+                                }
+                                drag.set(Some((border, e.client_coordinates().x, start)));
+                            },
+                            ondoubleclick: move |_| match border {
+                                ColumnBorder::Name => *SERVER_NAME_WIDTH.write() = None,
+                                ColumnBorder::Kind => *SERVER_KIND_WIDTH.write() = None,
+                            },
+                        }
+                    }
+                }
                 span { "Имя" }
                 span { "Адрес" }
                 span { "Протокол" }
@@ -2636,6 +2703,39 @@ fn ServersTab(frame: Frame) -> Element {
                     "Отклик"
                 }
                 span {}
+            }
+            // Over the whole window while dragging, as the log's bar has it.
+            if let Some((border, from, start)) = drag() {
+                div {
+                    class: "drag-veil cols",
+                    onmousemove: move |e: MouseEvent| {
+                        use dioxus::prelude::dioxus_elements::input_data::MouseButton;
+                        if !e.held_buttons().contains(MouseButton::Primary) {
+                            drag.set(None);
+                            return;
+                        }
+                        let moved = e.client_coordinates().x - from;
+                        let width = SERVER_LIST_WIDTH();
+                        // Stored as the columns will draw it, so a drag past
+                        // a limit does not leave a stretch that moves nothing
+                        // on the way back.
+                        match border {
+                            ColumnBorder::Name => {
+                                let kind = SERVER_KIND_WIDTH();
+                                if let Some(c) = ServerColumns::new(width, Some(start + moved), kind) {
+                                    *SERVER_NAME_WIDTH.write() = Some(c.name);
+                                }
+                            }
+                            ColumnBorder::Kind => {
+                                let name = SERVER_NAME_WIDTH();
+                                if let Some(c) = ServerColumns::new(width, name, Some(start - moved)) {
+                                    *SERVER_KIND_WIDTH.write() = Some(c.kind);
+                                }
+                            }
+                        }
+                    },
+                    onmouseup: move |_| drag.set(None),
+                }
             }
 
             div { style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden",
@@ -2807,7 +2907,7 @@ fn SystemProxy(frame: Frame) -> Element {
     rsx! {
         div {
             style: "grid-column:1 / -1;display:flex;flex-direction:column;gap:8px;\
-                    padding:12px 13px;border-radius:8px;\
+                    padding:12px;border-radius:8px;\
                     background-color:rgba(239,232,245,.03)",
             div { style: "display:flex;align-items:center;gap:11px",
                 crate::icons::Shield { size: 17, color: ACCENT }
@@ -2922,7 +3022,7 @@ fn ActionCard(
             // The resting tint and the hover are `.act-card` in app.css. Inline,
             // the tint outranked the hover, and the cards gave no sign of life.
             class: if enabled { "act act-card" } else { "act act-card disabled" },
-            style: "display:flex;align-items:center;gap:11px;padding:12px 13px;border-radius:8px;{tone}",
+            style: "display:flex;align-items:center;gap:11px;padding:12px;border-radius:8px;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
             {icon}
             div { style: "display:flex;flex-direction:column;gap:2px;min-width:0",
@@ -3078,8 +3178,8 @@ fn Connections(frame: Frame) -> Element {
             // The same padding as the other screens, so the rail's card lines up
             // with this one's too.
             style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
-                    padding:18px 20px",
-            div { style: "display:flex;align-items:baseline;gap:10px",
+                    padding:18px 20px 18px 12px",
+            div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Логи и трафик" }
                 // Clipped rather than wrapped: the heading and the buttons beside
                 // it keep one line, and this is the part that can give way.
@@ -3265,10 +3365,10 @@ fn Routing(frame: Frame) -> Element {
 
     rsx! {
         div {
-            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:13px;\
-                    padding:18px 20px",
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
+                    padding:18px 20px 18px 12px",
 
-            div { style: "display:flex;align-items:baseline;gap:10px",
+            div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Маршрутизация" }
                 span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{rule_count(view)} · остальное {view.fallback.label()}"
@@ -3290,7 +3390,7 @@ fn Routing(frame: Frame) -> Element {
             // No rules at all: offer the starting set rather than an empty list.
             if view.rules.is_empty() {
                 div {
-                    style: "flex:none;display:flex;align-items:center;gap:13px;padding:14px;\
+                    style: "flex:none;display:flex;align-items:center;gap:13px;padding:16px;\
                             border-radius:8px;background-color:var(--color-surface);\
                             box-shadow:inset 0 0 0 1px rgba(238,130,196,.24)",
                     div { style: "display:flex;flex-direction:column;gap:3px;min-width:0",
@@ -3318,7 +3418,7 @@ fn Routing(frame: Frame) -> Element {
 
             if !view.warnings.is_empty() {
                 div {
-                    style: "flex:none;display:flex;flex-direction:column;gap:5px;padding:11px 13px;\
+                    style: "flex:none;display:flex;flex-direction:column;gap:5px;padding:12px;\
                             border-radius:8px;\
                             background-color:rgba(203,186,244,.07);\
                             box-shadow:inset 0 0 0 1px rgba(203,186,244,.18)",
@@ -3637,7 +3737,7 @@ fn RuleList(view: crate::engine::RoutingView, vpn: bool) -> Element {
 
     rsx! {
         div {
-            style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;padding:15px;\
+            style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;padding:16px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             div { style: "display:flex;align-items:baseline;gap:10px",
@@ -3822,7 +3922,7 @@ fn Checker(
     rsx! {
         div {
             style: "width:288px;flex:none;display:flex;flex-direction:column;gap:11px;\
-                    padding:15px;background-color:var(--color-surface);\
+                    padding:16px;background-color:var(--color-surface);\
                     border-radius:8px;box-shadow:var(--shadow-sm)",
             span { style: "font:700 16px/1 var(--font-heading)", "Проверить адрес" }
             span {
@@ -3859,7 +3959,7 @@ fn Checker(
             if condition {
                 div {
                     style: "display:flex;flex-direction:column;align-items:flex-start;gap:9px;\
-                            padding:11px;border-radius:4px;background-color:rgba(238,130,196,.07);\
+                            padding:12px;border-radius:4px;background-color:rgba(238,130,196,.07);\
                             box-shadow:inset 0 0 0 1px rgba(238,130,196,.22)",
                     span { style: "font-size:13px;line-height:1.45;color:var(--color-neutral-300)",
                         "Это условие для правила, а здесь проверяется адрес сайта. \
@@ -4506,7 +4606,10 @@ mod tests {
     /// and no other's, and a narrow window lost the table's order.
     #[test]
     fn table_columns_do_not_grow_with_their_text() {
-        for columns in [CONNECTION_COLUMNS, SERVER_COLUMNS] {
+        let measured = ServerColumns::new(900.0, Some(400.0), None)
+            .expect("room for the columns")
+            .css();
+        for columns in [CONNECTION_COLUMNS, SERVER_COLUMNS, measured.as_str()] {
             let tracks = columns
                 .strip_prefix("grid-template-columns:")
                 .and_then(|rest| rest.split(';').next())
@@ -4518,6 +4621,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// However the server list's columns are dragged, the row fits the list:
+    /// name, address and protocol never take more than the room there is, and
+    /// neither text column goes below its least. With nothing dragged, the
+    /// name and the address share as the fractions did.
+    #[test]
+    fn dragged_server_columns_still_fit_the_list() {
+        for width in [520.0, 700.0, 900.0, 1400.0, 2600.0] {
+            let room = width - SERVER_PAD * 2.0 - SERVER_FIXED;
+            for name in [None, Some(-500.0), Some(10.0), Some(300.0), Some(5000.0)] {
+                for kind in [None, Some(-50.0), Some(40.0), Some(200.0), Some(5000.0)] {
+                    let c = ServerColumns::new(width, name, kind).expect("room");
+                    assert!(
+                        (c.name + c.addr + c.kind - room).abs() < 0.01,
+                        "{width} {name:?} {kind:?}: {c:?}"
+                    );
+                    assert!(
+                        c.name >= MIN_TEXT_COLUMN && c.addr >= MIN_TEXT_COLUMN,
+                        "{c:?}"
+                    );
+                    assert!(c.kind >= 70.0, "{c:?}");
+                }
+            }
+        }
+        let c = ServerColumns::new(1000.0, None, None).expect("room");
+        assert_eq!(c.kind, SERVER_KIND);
+        assert!((c.name / c.addr - 1.2 / 1.4).abs() < 0.01, "{c:?}");
+        // Too narrow for a table: the fractions draw it, as before measuring.
+        assert_eq!(ServerColumns::new(300.0, None, None), None);
+    }
+
+    /// A wider column shows more of a name, and a name that fits is whole.
+    #[test]
+    fn a_wider_column_cuts_a_name_later() {
+        let name = "Netherlands · Amsterdam · VPN premium 10 Gbit/s";
+        let narrow = elide(name, letters_in(150.0, 14.5));
+        let wide = elide(name, letters_in(450.0, 14.5));
+        assert!(
+            narrow.ends_with('\u{2026}') && narrow.chars().count() < 20,
+            "{narrow}"
+        );
+        assert_eq!(wide, name);
     }
 
     /// The inline radii are literals because the token form does not survive
@@ -5943,9 +6089,84 @@ fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
 
 /// The server list's columns: name, address, protection, ping, and the bin.
 /// Name and address never grow past their share, for the reason given at
-/// `CONNECTION_COLUMNS`.
+/// `CONNECTION_COLUMNS`. This is the shape before the header has measured the
+/// list; after that `ServerColumns` gives it in pixels.
 const SERVER_COLUMNS: &str =
     "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 30px;gap:12px";
+const SERVER_KIND: f64 = 136.0;
+/// Ping, the bin, and the four gaps between the five columns.
+const SERVER_FIXED: f64 = 78.0 + 30.0 + 4.0 * 12.0;
+/// The row's padding on either side, as the header has it.
+const SERVER_PAD: f64 = 10.0;
+/// Narrower than this, a name or an address is no longer worth a column.
+const MIN_TEXT_COLUMN: f64 = 80.0;
+
+/// The server list's columns in pixels, once the list's width is known.
+///
+/// The name and the protocol can be dragged wider or narrower — VPN providers
+/// name their servers at length, and a name cut at 22 characters left servers
+/// that could not be told apart. The address takes what is left, so the row
+/// always fits the list, whatever the window does after a drag.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ServerColumns {
+    name: f64,
+    addr: f64,
+    kind: f64,
+}
+
+impl ServerColumns {
+    /// `width` is the list's content width; `name` and `kind` what someone
+    /// dragged them to, if they did.
+    fn new(width: f64, name: Option<f64>, kind: Option<f64>) -> Option<Self> {
+        let text = width - SERVER_PAD * 2.0 - SERVER_FIXED;
+        if text < MIN_TEXT_COLUMN * 2.0 + 70.0 {
+            return None;
+        }
+        let kind = kind
+            .unwrap_or(SERVER_KIND)
+            .clamp(70.0, (text - MIN_TEXT_COLUMN * 2.0).min(320.0))
+            .round();
+        let rest = text - kind;
+        // The default share is the one the fractions above give.
+        let name = name
+            .unwrap_or(rest * 1.2 / 2.6)
+            .clamp(MIN_TEXT_COLUMN, rest - MIN_TEXT_COLUMN)
+            .round();
+        Some(Self {
+            name,
+            addr: rest - name,
+            kind,
+        })
+    }
+
+    /// The address is `1fr` rather than its pixels, so that a grouped row,
+    /// indented by 20px, loses them from the address and not off its end.
+    fn css(&self) -> String {
+        format!(
+            "grid-template-columns:{}px minmax(0,1fr) {}px 78px 30px;gap:12px",
+            self.name, self.kind
+        )
+    }
+}
+
+/// How many characters of text `px` wide fit, at `size` pixels a letter.
+///
+/// The renderer subset has no `text-overflow` (rule 5), so text is cut in
+/// code, and a guess at the letter's width is all there is: Comfortaa's
+/// letters average about half an em, wide capitals and Cyrillic more, so 0.6
+/// leaves room for a name of capitals rather than cutting it mid-letter.
+fn letters_in(px: f64, size: f64) -> usize {
+    ((px / (size * 0.6)).floor() as usize).max(4)
+}
+
+/// Which border between the server list's columns a drag moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ColumnBorder {
+    /// Between the name and the address: moves the name's right edge.
+    Name,
+    /// Between the address and the protocol: moves the protocol's left edge.
+    Kind,
+}
 
 /// A run of the server list: the servers added by hand, or one subscription's.
 #[derive(Clone, Debug, PartialEq)]
@@ -6022,7 +6243,19 @@ fn ServerLine(
     let controller = use_context::<Controller>();
     let select = controller.clone();
     let arming = armed() == Some(index);
-    let name = elide(&server.tag, 22);
+    let columns = ServerColumns::new(
+        SERVER_LIST_WIDTH(),
+        SERVER_NAME_WIDTH(),
+        SERVER_KIND_WIDTH(),
+    );
+    let grid = columns.map_or_else(|| SERVER_COLUMNS.to_owned(), |c| c.css());
+    // Cut to the columns' measured widths; 22 and 26 letters before the list
+    // has been measured, as the fractions drew it in the default window.
+    let (name_letters, addr_letters) = columns.map_or((22, 26), |c| {
+        let indent = if grouped { 20.0 } else { 0.0 };
+        (letters_in(c.name, 14.5), letters_in(c.addr - indent, 13.5))
+    });
+    let name = elide(&server.tag, name_letters);
     let tag = server.tag.clone();
     // Indented under its subscription's name. Always present, so a changing
     // value is all the renderer ever sees here (the note at the top).
@@ -6040,7 +6273,7 @@ fn ServerLine(
             // property that vanishes from a style string is restored by the
             // renderer, so the previous server would keep its marker.
             class: if server.current { "srv current" } else { "srv" },
-            style: "display:grid;{SERVER_COLUMNS};align-items:center;padding:8px 10px 8px {left}px;\
+            style: "display:grid;{grid};align-items:center;padding:8px 10px 8px {left}px;\
                     border-radius:4px",
             onclick: move |_| select.send(Command::Select(index)),
             onmouseleave: move |_| {
@@ -6048,11 +6281,16 @@ fn ServerLine(
                     armed.set(None);
                 }
             },
-            span { style: "font-size:14.5px;min-width:0;overflow:hidden;white-space:nowrap", "{name}" }
+            span {
+                style: "font-size:14.5px;min-width:0;overflow:hidden;white-space:nowrap",
+                title: "{server.tag}",
+                "{name}"
+            }
             span {
                 style: "min-width:0;overflow:hidden;white-space:nowrap;font-size:13.5px;\
                         color:var(--color-neutral-400);font-family:ui-monospace,Consolas,monospace",
-                "{elide(&server.addr, 26)}"
+                title: "{server.addr}",
+                "{elide(&server.addr, addr_letters)}"
             }
             span {
                 style: "overflow:hidden;white-space:nowrap;font-size:13px;color:var(--color-neutral-500)",
@@ -6104,9 +6342,9 @@ fn Subscriptions(frame: Frame) -> Element {
 
     rsx! {
         div {
-            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:13px;\
-                    padding:18px 20px",
-            div { style: "display:flex;align-items:baseline;gap:10px",
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
+                    padding:18px 20px 18px 12px",
+            div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Подписки" }
                 span {
                     style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;\
@@ -6128,10 +6366,10 @@ fn Subscriptions(frame: Frame) -> Element {
             // as wide as they are. Above the scrolling list it was wider by the
             // list's scrollbar, and no card's edge lined up with it.
             div {
-                style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
-                        display:flex;flex-direction:column;gap:13px",
+                style: "{SCROLL_COLUMN};\
+                        display:flex;flex-direction:column;gap:12px",
                 div {
-                    style: "flex:none;display:flex;flex-direction:column;gap:10px;padding:15px;\
+                    style: "flex:none;display:flex;flex-direction:column;gap:10px;padding:16px;\
                             background-color:var(--color-surface);border-radius:8px;\
                             box-shadow:var(--shadow-sm)",
                     span { style: "font:700 16px/1 var(--font-heading)", "Добавить подписку" }
@@ -6227,7 +6465,7 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
     rsx! {
         div {
             // The form's padding above it, so their contents start at one edge.
-            style: "flex:none;display:flex;align-items:flex-start;gap:13px;padding:15px;\
+            style: "flex:none;display:flex;align-items:flex-start;gap:13px;padding:16px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             onmouseleave: move |_| armed.set(false),
@@ -6521,21 +6759,21 @@ fn Settings(frame: Frame) -> Element {
     });
     let startup = frame.startup.clone();
     let (on, minimized) = (startup.on, startup.minimized);
-    const NOTE: &str = "padding:2px 10px 4px 39px;font-size:12.5px;line-height:1.45;color:#cbbaf4";
+    const NOTE: &str = "padding:2px 0 4px 29px;font-size:12.5px;line-height:1.45;color:#cbbaf4";
 
     rsx! {
         div {
-            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:13px;\
-                    padding:18px 20px",
-            div { style: "display:flex;align-items:baseline;gap:10px",
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
+                    padding:18px 20px 18px 12px",
+            div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Настройки" }
             }
 
             div {
-                style: "flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;\
-                        display:flex;flex-direction:column;gap:13px",
+                style: "{SCROLL_COLUMN};\
+                        display:flex;flex-direction:column;gap:12px",
                 div {
-                    style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:15px;\
+                    style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:16px;\
                             background-color:var(--color-surface);border-radius:8px;\
                             box-shadow:var(--shadow-sm)",
                     span { style: "font:700 16px/1 var(--font-heading);padding:0 0 8px", "Запуск" }
@@ -6596,7 +6834,7 @@ fn Settings(frame: Frame) -> Element {
                     }
                     if let Some(path) = startup.elsewhere.clone() {
                         div { style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;\
-                                      padding:2px 10px 4px 39px",
+                                      padding:2px 0 4px 29px",
                             span {
                                 style: "min-width:0;font-size:12.5px;line-height:1.45;color:#cbbaf4;\
                                         word-break:break-all",
@@ -6615,7 +6853,7 @@ fn Settings(frame: Frame) -> Element {
                     }
                     if let Some(problem) = startup.problem.clone() {
                         span {
-                            style: "padding:2px 10px 4px 39px;font-size:12.5px;line-height:1.45;color:#f2a7ad",
+                            style: "padding:2px 0 4px 29px;font-size:12.5px;line-height:1.45;color:#f2a7ad",
                             "{problem}"
                         }
                     }
@@ -6645,7 +6883,8 @@ fn CheckRow(
     rsx! {
         div {
             class: "{class}",
-            style: "display:flex;align-items:flex-start;gap:11px;padding:9px 10px;border-radius:4px",
+            style: "display:flex;align-items:flex-start;gap:11px;margin:0 -10px;padding:9px 10px;\
+                    border-radius:4px",
             onclick: move |e| if enabled { onclick.call(e) },
             div { class: "check-box",
                 if checked {
