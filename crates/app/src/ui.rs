@@ -57,10 +57,9 @@ mod tray_linux;
 #[cfg(target_os = "linux")]
 use tray_linux::Tray;
 
-/// The mark alone, 96 px: the window's icon and the tray's off Windows, where
-/// there are no resources to take it from (on Windows it is `bliss.ico`'s
-/// frame of the same size).
-#[cfg(not(windows))]
+/// The mark alone, 96 px: at the head of the rail, and the window's icon and
+/// the tray's off Windows, where there are no resources to take it from (on
+/// Windows those are `bliss.ico`'s frame of the same size).
 pub(crate) const MARK: &[u8] = include_bytes!("../assets/bliss-mark.png");
 
 /// A second copy's asks to show the window (`instance.rs`), for `Tray` to take.
@@ -100,6 +99,8 @@ const RAIL_CAT_URL: &str = "url(rail-cat.jpg)";
 const TRAY_BUNNY: &[u8] = include_bytes!("../assets/tray-bunny.jpg");
 /// How app.css names the bunny, for `STYLES` to replace.
 const TRAY_BUNNY_URL: &str = "url(tray-bunny.jpg)";
+/// How app.css names the mark at the head of the rail, for `STYLES` to replace.
+const MARK_URL: &str = "url(bliss-mark.png)";
 /// Comfortaa, subset to what the window draws; see the @font-face in theme.css.
 const FONT: &[u8] = include_bytes!("../assets/comfortaa.woff2");
 /// How theme.css names the font, for `THEME_STYLES` to replace.
@@ -119,6 +120,7 @@ static STYLES: LazyLock<String> = LazyLock::new(|| {
         .replace(SCENE_URL, &data_url("image/jpeg", SCENE))
         .replace(RAIL_CAT_URL, &data_url("image/jpeg", RAIL_CAT))
         .replace(TRAY_BUNNY_URL, &data_url("image/jpeg", TRAY_BUNNY))
+        .replace(MARK_URL, &data_url("image/png", MARK))
 });
 
 /// theme.css with the font inlined. Nothing is fetched: the window opens before
@@ -182,9 +184,13 @@ const FAILED: (&str, &str, &str) = (BAD, "rgba(229,107,111,.26)", "rgba(229,107,
 // cards had grown 14, 15, 18 and 20px of their own, side by side on one
 // screen, and the rail stood 20px from everything; the user saw both.
 
-/// A screen's heading row: as tall as a heading with a button beside it, so
-/// the first card starts at one height on every screen.
-const SCREEN_HEAD: &str = "display:flex;align-items:baseline;gap:10px;min-height:34px;flex:none";
+/// A screen's heading row (every screen but the main one, which opens on its
+/// cards): as tall as a heading with a button beside it, so the first card
+/// starts at one height on every screen, and clear of the window's buttons
+/// floating at its right end (`WindowControls`: 98px, 26px in from the edge,
+/// and a 12px gap, less the screen's own 20px).
+const SCREEN_HEAD: &str =
+    "display:flex;align-items:baseline;gap:10px;min-height:34px;flex:none;padding-right:116px";
 /// A screen's scrolling column. It reaches into the screen's right padding by
 /// its scrollbar's width (9px, and 3px to spare), so its cards end where
 /// every other screen's do rather than 9px short of them.
@@ -450,7 +456,8 @@ pub fn launch(
                 .with_title("bliss")
                 // The design draws its own chrome, so Windows must not draw
                 // any. Everything the frame used to do — drag, minimise,
-                // maximise, close — is re-implemented in TitleBar below.
+                // maximise, close — is re-implemented in WindowControls and
+                // DragStrip below.
                 .with_decorations(false)
                 .with_inner_size(LogicalSize::new(1040.0, 660.0))
                 .with_min_inner_size(LogicalSize::new(880.0, 560.0))
@@ -1325,6 +1332,7 @@ fn set_icons(window: &Window, scale: f64) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Connection,
+    Servers,
     Traffic,
     Subscriptions,
     Routing,
@@ -1335,6 +1343,7 @@ impl Screen {
     fn key(self) -> &'static str {
         match self {
             Self::Connection => "connection",
+            Self::Servers => "servers",
             Self::Traffic => "traffic",
             Self::Subscriptions => "subscriptions",
             Self::Routing => "routing",
@@ -1343,15 +1352,14 @@ impl Screen {
     }
 }
 
-/// The lower card on the connection screen holds three things, not one.
+/// The lower card on the connection screen holds two things, not one.
 ///
-/// Tabs rather than three more sidebar destinations: all three are about the
-/// server you are connected to right now, so they belong next to it. It also
-/// fills a card that was a chart and a lot of nothing.
+/// Tabs rather than more sidebar destinations: both are about the connection
+/// you have right now, so they belong next to it. The server list was a third
+/// tab, until it got a screen of its own (`Servers`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Traffic,
-    Servers,
     Actions,
 }
 
@@ -1359,7 +1367,6 @@ impl Tab {
     fn key(self) -> &'static str {
         match self {
             Self::Traffic => "traffic",
-            Self::Servers => "servers",
             Self::Actions => "actions",
         }
     }
@@ -1367,7 +1374,6 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Self::Traffic => "Трафик",
-            Self::Servers => "Серверы",
             Self::Actions => "Действия",
         }
     }
@@ -1493,22 +1499,24 @@ fn App() -> Element {
         WindowIcons {}
         WindowZoom {}
         Tray { frame: live }
-        ToastLine { toast: frame.toast.clone() }
+        ToastLine { toast: toast_shown(frame.toast.clone(), TRAY_MENU()) }
         if TRAY_MENU() {
             TrayMenu { frame: frame.clone() }
         }
-        // The title bar spans the whole window, as in the reference, with the
-        // sidebar beginning underneath it. Folded away by class while the tray
-        // has the window: an inline `display` would be restored and stick.
+        // The rail and the screen side by side, reaching the window's top;
+        // the window's buttons and the strip it is dragged by float over
+        // them. Folded away by class while the tray has the window: an
+        // inline `display` would be restored and stick.
         div {
             class: if TRAY_MENU() { "shell folded" } else { "shell" },
             // `display` is in `.shell`, not here: an inline property outranks
             // every class rule, and the tray's menu folds this away by class.
-            style: "width:100vw;height:100vh;flex-direction:column;\
+            style: "position:relative;width:100vw;height:100vh;flex-direction:column;\
                     background-color:var(--color-bg);overflow:hidden;color:var(--color-text)",
-            TitleBar { engine: frame.engine.clone() }
+            DragStrip {}
+            WindowControls {}
             div { style: "flex:1;min-height:0;display:flex",
-                Sidebar { screen, tab, frame: frame.clone() }
+                Sidebar { screen, frame: frame.clone() }
                 // The key changes with the screen, which forces a fresh node
                 // and lets the fade-in replay instead of being skipped.
                 {
@@ -1517,6 +1525,11 @@ fn App() -> Element {
                         Screen::Connection => rsx! {
                             div { key: "{key}", class: "screen", style: SCREEN,
                                 Connection { frame: frame.clone(), tab }
+                            }
+                        },
+                        Screen::Servers => rsx! {
+                            div { key: "{key}", class: "screen", style: SCREEN,
+                                Servers { frame: frame.clone() }
                             }
                         },
                         Screen::Traffic => rsx! {
@@ -1585,69 +1598,73 @@ fn WindowIcons() -> Element {
 
 // --- chrome ---------------------------------------------------------------
 
+/// The window's three buttons, floating in its top-right corner.
+///
+/// There is no title bar: the rail and the cards reach the window's top with
+/// the margin they keep at its foot, and these sit over the corner, level
+/// with the screens' headings, on the main screen inside the numbers' card,
+/// whose rows start below them. Small rounded plates rather than Windows'
+/// 46x38 strip, which would have bitten a corner out of that card. Their look
+/// is `.wctl` and `.wbtn` in app.css; drawn as SVG rather than typed as a
+/// glyph, because the characters for these sit on a text baseline and come
+/// out thin and off-centre at any size.
 #[component]
-fn TitleBar(engine: String) -> Element {
+fn WindowControls() -> Element {
     let window = dioxus::desktop::use_window();
-
     rsx! {
-        div {
-            style: "display:flex;align-items:center;height:38px;flex:none;padding-left:20px;\
-                    flex-shrink:0",
-            // The whole strip left of the buttons drags the window, which is
-            // what a real title bar does and what the frame used to give us.
-            div {
-                style: "flex:1;height:38px;display:flex;align-items:center;gap:12px;cursor:default",
-                onmousedown: {
+        div { class: "wctl",
+            WindowButton {
+                kind: "min",
+                onclick: {
                     let window = window.clone();
-                    move |_| window.drag()
+                    move |_| window.set_minimized(true)
                 },
-                span {
-                    style: "font-size:13px;letter-spacing:.14em;text-transform:uppercase;\
-                            color:var(--color-neutral-600)",
-                    "bliss"
-                }
-                if !engine.is_empty() {
-                    span { style: "font-size:13px;color:var(--color-neutral-700)", "{engine}" }
-                }
             }
-            div { style: "display:flex;flex:none",
-                WindowButton {
-                    kind: "min",
-                    onclick: {
-                        let window = window.clone();
-                        move |_| window.set_minimized(true)
-                    },
-                }
-                WindowButton {
-                    kind: "max",
-                    onclick: {
-                        let window = window.clone();
-                        move |_| {
-                            let maximized = window.is_maximized();
-                            window.set_maximized(!maximized);
-                        }
-                    },
-                }
-                WindowButton {
-                    kind: "close",
-                    onclick: {
-                        let window = window.clone();
-                        move |_| window.close()
-                    },
-                }
+            WindowButton {
+                kind: "max",
+                onclick: {
+                    let window = window.clone();
+                    move |_| toggle_maximized(&window)
+                },
+            }
+            WindowButton {
+                kind: "close",
+                onclick: {
+                    let window = window.clone();
+                    move |_| window.close()
+                },
             }
         }
     }
 }
 
+/// The strip along the window's top edge, in the margin above the cards: with
+/// the head of the rail, what the window is dragged by. A double click
+/// maximizes, as on a title bar.
+#[component]
+fn DragStrip() -> Element {
+    let window = dioxus::desktop::use_window();
+    rsx! {
+        div {
+            class: "drag-strip",
+            onmousedown: {
+                let window = window.clone();
+                move |_| window.drag()
+            },
+            ondoubleclick: move |_| toggle_maximized(&window),
+        }
+    }
+}
+
+fn toggle_maximized(window: &dioxus::desktop::DesktopContext) {
+    let maximized = window.is_maximized();
+    window.set_maximized(!maximized);
+}
+
 /// One of the three window controls.
-///
-/// 46x38 is the Windows metric and stays; only the mark inside grew. Drawn as
-/// SVG rather than typed as a glyph, because the characters for these sit on a
-/// text baseline and come out thin and off-centre at any size that fits the bar.
 #[component]
 fn WindowButton(kind: &'static str, onclick: EventHandler<MouseEvent>) -> Element {
-    const SIZE: u32 = 17;
+    const SIZE: u32 = 14;
     let class = if kind == "close" {
         "wbtn wbtn-close"
     } else {
@@ -1656,7 +1673,6 @@ fn WindowButton(kind: &'static str, onclick: EventHandler<MouseEvent>) -> Elemen
     rsx! {
         div {
             class: "{class}",
-            style: "width:46px;height:38px;display:grid;place-items:center;cursor:default",
             onclick: move |e| onclick.call(e),
             match kind {
                 "min" => rsx! { crate::icons::Minimise { size: SIZE, color: MUTED } },
@@ -1672,14 +1688,11 @@ fn WindowButton(kind: &'static str, onclick: EventHandler<MouseEvent>) -> Elemen
 /// Direction 1a's navigation: labels, not just icons. Six destinations is past
 /// the point where an icon rail stays guessable.
 #[component]
-fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Element {
+fn Sidebar(screen: Signal<Screen>, frame: Frame) -> Element {
+    let window = dioxus::desktop::use_window();
     let here = screen();
-    // Servers live in a tab of the connection screen rather than in a screen of
-    // their own, so the rail points at the tab. Which means "Подключение" is
-    // only the current place while that tab is not the one showing — otherwise
-    // two rail items would light up for one view.
     let on_connection = here == Screen::Connection;
-    let at_servers = on_connection && tab() == Tab::Servers;
+    let at_servers = here == Screen::Servers;
 
     rsx! {
         div {
@@ -1691,18 +1704,30 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                     margin:18px 0 18px 20px;padding:10px;border-radius:8px;\
                     background-color:var(--color-surface);box-shadow:var(--shadow-sm)",
 
+            // With the strip along the top edge, what the window is dragged
+            // by now that there is no title bar.
+            div {
+                class: "rail-brand",
+                onmousedown: {
+                    let window = window.clone();
+                    move |_| window.drag()
+                },
+                ondoubleclick: move |_| toggle_maximized(&window),
+                div { class: "rail-brand-mark" }
+                span {
+                    style: "font-weight:700;font-size:20px;line-height:1;\
+                            font-family:var(--font-heading);color:var(--color-text)",
+                    "bliss"
+                }
+            }
+
             NavItem {
                 label: "Подключение",
-                active: on_connection && !at_servers,
+                active: on_connection,
                 enabled: true,
-                onclick: move |_| {
-                    screen.set(Screen::Connection);
-                    if tab() == Tab::Servers {
-                        tab.set(Tab::Traffic);
-                    }
-                },
+                onclick: move |_| screen.set(Screen::Connection),
                 icon: rsx! {
-                    crate::icons::Power { size: 18, color: nav_tint(on_connection && !at_servers, true) }
+                    crate::icons::Power { size: 18, color: nav_tint(on_connection, true) }
                 },
             }
             NavItem {
@@ -1719,10 +1744,7 @@ fn Sidebar(screen: Signal<Screen>, mut tab: Signal<Tab>, frame: Frame) -> Elemen
                 count: frame.servers.len(),
                 active: at_servers,
                 enabled: true,
-                onclick: move |_| {
-                    screen.set(Screen::Connection);
-                    tab.set(Tab::Servers);
-                },
+                onclick: move |_| screen.set(Screen::Servers),
                 icon: rsx! { crate::icons::Globe { size: 18, color: nav_tint(at_servers, true) } },
             }
 
@@ -1847,23 +1869,24 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
             style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;\
                     padding:18px 20px 18px 12px;overflow:hidden",
 
-            div { style: "{SCREEN_HEAD}",
-                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Подключение" }
-                span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
-                    "{elide(&frame.server_tag, 40)}"
-                }
-                if !frame.routing.presets.is_empty() {
-                    PresetPills { view: frame.routing.clone() }
-                }
-                if frame.vpn.name.is_some() {
-                    VpnChip { vpn: frame.vpn.clone(), alone: frame.routing.presets.is_empty() }
-                }
+            // No heading: the screen opens on the connection itself, its card
+            // level with the top of the rail. The heading said «Подключение»
+            // over a card that says nothing else, and held the server's name,
+            // the presets and the VPN's chip, which are the card's now.
+
+            // Before the first server there is no status to show, so the card
+            // that would hold it asks for a server instead.
+            if frame.servers.is_empty() {
+                AddServerCard { frame: frame.clone() }
+            } else {
+                StatusCards { frame: frame.clone() }
             }
 
             // The reason a start failed. The engine has always carried it in the
             // frame and the window never read it, so a failure was a red ring
             // saying "Ошибка" and nothing else — the explanation existed only in
             // the log, which is one screen away and not where anyone looks first.
+            // Under the cards, which then stay where they always are.
             if !reason.is_empty() {
                 div {
                     style: "flex:none;display:flex;flex-direction:column;gap:9px;\
@@ -1877,14 +1900,6 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                     }
                     EngineInstall { setup: frame.engine_setup.clone() }
                 }
-            }
-
-            // Before the first server there is no status to show, so the card
-            // that would hold it asks for a server instead.
-            if frame.servers.is_empty() {
-                AddServerCard { frame: frame.clone() }
-            } else {
-                StatusCards { frame: frame.clone() }
             }
 
             div {
@@ -1908,13 +1923,6 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                                 span { style: "color:var(--color-neutral-400)", "↑ {rate(frame.up_rate)}" }
                             }
                         },
-                        // Says what the number is before anyone reads it as a
-                        // promise the tunnel will be this fast.
-                        Tab::Servers => rsx! {
-                            span { style: "font-size:13px;color:var(--color-neutral-600)",
-                                "отклик — TCP-рукопожатие до сервера, мимо туннеля"
-                            }
-                        },
                         Tab::Actions => rsx! {},
                     },
                 }
@@ -1927,7 +1935,6 @@ fn Connection(frame: Frame, tab: Signal<Tab>) -> Element {
                     style: "flex:1;min-height:0;display:flex;flex-direction:column",
                     match tab() {
                         Tab::Traffic => rsx! { TrafficTab { frame: frame.clone() } },
-                        Tab::Servers => rsx! { ServersTab { frame: frame.clone() } },
                         Tab::Actions => rsx! { ActionsTab { frame: frame.clone() } },
                     }
                 }
@@ -1993,13 +2000,37 @@ fn StatusCards(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
     let (tone, outer, inner) = tones(frame.state);
     let on = frame.state.is_on();
+    let detail = server_detail(&frame.flow, &frame.fingerprint);
+    // The room the server's name has: the page, less the rail, the screen's
+    // padding, the numbers' card (narrower under 980px, `.stats-card`), the
+    // gap, this card's padding and the ring's column. Redrawn with every
+    // frame, so a resize is caught within half a second.
+    let (page, _) = viewport();
+    let stats = if page <= 980.0 { 190.0 } else { 232.0 };
+    let name_room = page - 236.0 - 32.0 - stats - 12.0 - 32.0 - 96.0;
+    // Less what shares its line: the presets ("пресет" and a pill a name,
+    // about 7.5px a letter at 12.5px) and the VPN's chip. They give way past
+    // under half the line, hiding the pills that do not fit (`PresetPills`).
+    let presets: f64 = match frame.routing.presets.as_slice() {
+        [] => 0.0,
+        names => {
+            60.0 + names
+                .iter()
+                .map(|name| name.chars().count() as f64 * 7.5 + 32.0)
+                .sum::<f64>()
+        }
+    };
+    let chip = if frame.vpn.name.is_some() { 72.0 } else { 0.0 };
+    let shared = (presets + chip).min(name_room * 0.45);
+    let name = elide(&frame.server_tag, letters_in(name_room - shared, 16.0));
 
     rsx! {
-        div { style: "display:flex;gap:13px;align-items:stretch;flex:none",
+        div { style: "display:flex;gap:12px;align-items:stretch;flex:none",
             div {
                 // The night scene behind the status: `.status-card` in app.css.
+                // Relative, for the listening ports in its corner.
                 class: "status-card",
-                style: "flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
+                style: "position:relative;flex:1;min-width:0;display:flex;align-items:center;gap:18px;\
                         padding:16px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
                 div {
@@ -2015,26 +2046,44 @@ fn StatusCards(frame: Frame) -> Element {
                     }
                     TunSwitch { tun: frame.tun.clone() }
                 }
-                    // Clips on a narrow card instead of running under the switch beside it.
-                    div { style: "display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden",
-                    span {
-                        // Longhands, not the `font:` shorthand: see the
-                        // note at the top of this file.
-                        style: "font-weight:700;font-size:25px;line-height:1.1;\
-                                font-family:var(--font-heading);color:{tone}",
-                        "{frame.state.label()}"
-                    }
-                    span { style: "font-size:14px;color:var(--color-neutral-400)",
-                        // A server without TLS has no name to show, and a line
-                        // opening on a separator looks like something fell off.
-                        if frame.sni.is_empty() {
-                            "{frame.server_addr}"
-                        } else {
-                            "{elide(&frame.sni, 26)} · {frame.server_addr}"
+                // Everything about the connection in one place: which server,
+                // in what state, where, and how it hides. The server's name
+                // stood in the screen's heading and its fingerprint among the
+                // numbers beside this card, three places for one thing.
+                // Clips on a narrow card instead of running under the switch beside it.
+                div { style: "display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden",
+                    // The name, and on its line the presets and the VPN's
+                    // chip, which stood in the screen's heading.
+                    div { style: "display:flex;align-items:center;gap:10px;min-width:0;min-height:26px",
+                        // Its own width, already cut to its share in code:
+                        // the presets give way to it, hiding the pills that
+                        // no longer fit, not the other way round.
+                        span {
+                            style: "flex:none;max-width:100%;font-weight:700;font-size:16px;line-height:1.3;\
+                                    font-family:var(--font-heading);color:var(--color-text);\
+                                    white-space:nowrap;overflow:hidden",
+                            title: "{frame.server_tag}",
+                            "{name}"
+                        }
+                        if !frame.routing.presets.is_empty() {
+                            PresetPills { view: frame.routing.clone() }
+                        }
+                        if frame.vpn.name.is_some() {
+                            VpnChip { vpn: frame.vpn.clone(), alone: frame.routing.presets.is_empty() }
                         }
                     }
                     span {
-                        // One line: `VLESS · xhttp · reality · vision` is long,
+                        // Longhands, not the `font:` shorthand: see the
+                        // note at the top of this file.
+                        style: "font-weight:700;font-size:25px;line-height:1.15;\
+                                font-family:var(--font-heading);color:{tone}",
+                        "{frame.state.label()}"
+                    }
+                    span { style: "font-size:14px;color:var(--color-neutral-400);white-space:nowrap",
+                        "{address_line(&frame.sni, &frame.server_addr)}"
+                    }
+                    span {
+                        // One line: `VLESS · xhttp · reality · firefox` is long,
                         // and a narrow card clips its tail rather than growing.
                         style: "font-size:14px;color:var(--color-neutral-500);white-space:nowrap",
                         if on {
@@ -2042,18 +2091,20 @@ fn StatusCards(frame: Frame) -> Element {
                             // and right once a second; see `FIGURE_EM`.
                             span { "В сети " }
                             Ticking { text: frame.uptime.clone() }
-                            span { " · {frame.flow}" }
+                            span { " · {detail}" }
                         } else {
-                            "{frame.flow}"
+                            "{detail}"
                         }
                     }
                 }
                 // One switch: the ring. A pill switch beside it did the same
                 // thing, and two controls for one action read as two actions.
+                // In the lower corner, out of the lines' way, so the server's
+                // name and the presets beside it have the card's width.
                 // `.listen` in app.css: hidden in a narrow window.
                 span {
                     class: "listen",
-                    style: "margin-left:auto;align-self:flex-start;font-size:13px;\
+                    style: "position:absolute;bottom:14px;right:16px;font-size:13px;\
                             color:var(--color-neutral-600);white-space:nowrap",
                     "{frame.listen}"
                 }
@@ -2063,8 +2114,11 @@ fn StatusCards(frame: Frame) -> Element {
                 // Its width is `.stats-card` in app.css, which narrows it in a
                 // narrow window so the state word beside it still fits.
                 class: "stats-card",
-                style: "flex:none;display:flex;flex-direction:column;gap:10px;\
-                        padding:16px;background-color:var(--color-surface);\
+                // 38px at the top: the window's buttons float in this card's
+                // corner (`.wctl`, down to 48px from the window's top), and
+                // the rows start 8px under them.
+                style: "flex:none;display:flex;flex-direction:column;justify-content:center;gap:8px;\
+                        padding:38px 16px 16px;background-color:var(--color-surface);\
                         border-radius:8px;box-shadow:var(--shadow-sm)",
                 StatRow {
                     label: "Задержка",
@@ -2073,12 +2127,44 @@ fn StatusCards(frame: Frame) -> Element {
                         None => "—".to_owned(),
                     },
                 }
+                // The rates were on the traffic tab alone; the fingerprint
+                // that stood here is the connection's, and went to its card.
+                StatRow { label: "Сейчас ↓", value: rate(frame.down_rate) }
+                StatRow { label: "Сейчас ↑", value: rate(frame.up_rate) }
                 StatRow { label: "Сессия ↓", value: bytes(frame.down_total) }
                 StatRow { label: "Сессия ↑", value: bytes(frame.up_total) }
                 StatRow { label: "Соединений", value: frame.active.to_string() }
-                StatRow { label: "uTLS", value: frame.fingerprint.clone() }
             }
         }
+    }
+}
+
+/// Where the server is: its address, and the name its TLS shows when that is
+/// another name — REALITY's borrowed site, or a server reached by address.
+/// When the name is the host already in the address, it is said once: the
+/// card read `host · host:443`.
+fn address_line(sni: &str, addr: &str) -> String {
+    let host = addr
+        .rsplit_once(':')
+        .map_or(addr, |(host, _)| host)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    // A server without TLS has no name to show, and a line opening on a
+    // separator looks like something fell off.
+    if sni.is_empty() || sni.eq_ignore_ascii_case(host) {
+        addr.to_owned()
+    } else {
+        format!("{} · {addr}", elide(sni, 26))
+    }
+}
+
+/// How the connection hides: the protocol, transport and security, then the
+/// browser its handshake imitates, when it imitates one.
+fn server_detail(flow: &str, fingerprint: &str) -> String {
+    match fingerprint {
+        "" | "-" => flow.to_owned(),
+        fingerprint if flow.is_empty() => fingerprint.to_owned(),
+        fingerprint => format!("{flow} · {fingerprint}"),
     }
 }
 
@@ -2524,7 +2610,7 @@ fn TabBar(mut tab: Signal<Tab>, meta: Element) -> Element {
         div {
             style: "flex:none;height:30px;overflow:hidden;display:flex;flex-wrap:wrap;\
                     align-items:center;align-content:flex-start;gap:6px",
-            for one in [Tab::Traffic, Tab::Servers, Tab::Actions] {
+            for one in [Tab::Traffic, Tab::Actions] {
                 div {
                     key: "{one.key()}",
                     class: if tab() == one { "tab active" } else { "tab" },
@@ -2627,13 +2713,50 @@ fn TrafficTab(frame: Frame) -> Element {
     }
 }
 
+/// The servers' screen: the list and nothing over it.
+///
+/// It was a tab of the connection screen, under the status cards, which took
+/// a third of the window from a list of dozens; the user asked for the list
+/// alone. The connection screen keeps its traffic and its actions.
+#[component]
+fn Servers(frame: Frame) -> Element {
+    rsx! {
+        div {
+            style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
+                    padding:18px 20px 18px 12px",
+            div { style: "{SCREEN_HEAD}",
+                h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Серверы" }
+                span {
+                    style: "font-size:13.5px;color:var(--color-neutral-500);white-space:nowrap;flex:none",
+                    "{plural(frame.servers.len() as u64, \"сервер\", \"сервера\", \"серверов\")}"
+                }
+                // Says what the number is before anyone reads it as a promise
+                // the tunnel will be this fast. `.head-hint`: hidden in a
+                // narrow window, where it would be cut mid-word.
+                span {
+                    class: "head-hint",
+                    style: "margin-left:auto;font-size:13px;color:var(--color-neutral-600);\
+                            min-width:0;overflow:hidden;white-space:nowrap",
+                    "отклик — TCP-рукопожатие до сервера, мимо туннеля"
+                }
+            }
+            div {
+                style: "flex:1;min-height:0;display:flex;flex-direction:column;\
+                        padding:16px;background-color:var(--color-surface);\
+                        border-radius:8px;box-shadow:var(--shadow-sm)",
+                ServerList { frame: frame.clone() }
+            }
+        }
+    }
+}
+
 /// Every server in the profile, with the one in use marked and the rest a
 /// click away.
 ///
 /// Switching restarts the engine, because its config names one server and
 /// there is nothing to reload — so the row does not pretend to be instant.
 #[component]
-fn ServersTab(frame: Frame) -> Element {
+fn ServerList(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
     let probing = sweeping(&frame);
     // A delete clicked once, by the row's place in the list; the second deletes.
@@ -3183,10 +3306,16 @@ fn Connections(frame: Frame) -> Element {
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Логи и трафик" }
                 // Clipped rather than wrapped: the heading and the buttons beside
                 // it keep one line, and this is the part that can give way.
-                span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
+                // `flex:1`, so the button stays at the right end when the
+                // rates beside it are hidden.
+                span { style: "flex:1;font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
                     "{plural(frame.active, \"соединение\", \"соединения\", \"соединений\")} сейчас · {frame.opened} за сессию"
                 }
+                // `.head-hint`: hidden in a narrow window, where the heading,
+                // the rates and the button no longer fit beside the window's
+                // buttons; the main screen's numbers have the rates too.
                 span {
+                    class: "head-hint",
                     style: "margin-left:auto;font-size:13.5px;color:var(--color-neutral-500);\
                             font-variant-numeric:tabular-nums;white-space:nowrap;flex:none",
                     "↓ {rate(frame.down_rate)}   ↑ {rate(frame.up_rate)}"
@@ -3438,17 +3567,18 @@ fn Routing(frame: Frame) -> Element {
                 }
             }
 
-            div { style: "flex:1;min-height:0;display:flex;gap:13px;align-items:stretch",
+            Checker {
+                query,
+                result: frame.check.clone(),
+                suggested,
+                onask: {
+                    let controller = controller.clone();
+                    move |text: String| controller.send(Command::Check(text))
+                },
+            }
+
+            div { style: "flex:1;min-height:0;display:flex;align-items:stretch",
                 RuleList { view: view.clone(), vpn: frame.vpn.name.is_some() }
-                Checker {
-                    query,
-                    result: frame.check.clone(),
-                    suggested,
-                    onask: {
-                        let controller = controller.clone();
-                        move |text: String| controller.send(Command::Check(text))
-                    },
-                }
             }
         }
         if let Some(draft) = DRAFT() {
@@ -3908,6 +4038,10 @@ fn RuleList(view: crate::engine::RoutingView, vpn: bool) -> Element {
 
 /// "What happens to this?" — the same question `bliss route` answers, in the
 /// window, and without connecting to anything.
+///
+/// One line over the rule list, the box the connections screen searches with
+/// and the answer beside it. It was a card 288px wide and the screen's height,
+/// which took a third of the screen from the rules for a box and two lines.
 #[component]
 fn Checker(
     query: Signal<String>,
@@ -3919,85 +4053,91 @@ fn Checker(
     // `geoip:ru` is a condition for a rule, not an address to check — and it
     // is exactly what someone looking for a rule editor typed into this box.
     let condition = crate::rule_text::looks_like_condition(&query());
+    let note = result
+        .as_ref()
+        .and_then(|answer| answer.note.clone())
+        .filter(|_| !condition);
     rsx! {
-        div {
-            style: "width:288px;flex:none;display:flex;flex-direction:column;gap:11px;\
-                    padding:16px;background-color:var(--color-surface);\
-                    border-radius:8px;box-shadow:var(--shadow-sm)",
-            span { style: "font:700 16px/1 var(--font-heading)", "Проверить адрес" }
-            span {
-                style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
-                "Имя сайта, или адрес, или host:port. Никуда не подключается — \
-                 только прогоняет по правилам."
-            }
-
-            input {
-                class: "field",
-                r#type: "text",
-                value: "{query}",
-                placeholder: "youtube.com",
-                autocomplete: "off",
-                spellcheck: "false",
-                style: "padding:8px 10px;border-radius:4px;border:none;\
-                        color:var(--color-text);font-size:14px;\
-                        font-family:ui-monospace,Consolas,monospace",
-                // The text lives here rather than in the frame: a controlled
-                // input fed from a value that is republished twice a second
-                // fights whoever is typing into it.
-                oninput: move |e| {
-                    let text = e.value();
-                    query.set(text.clone());
-                    onask.call(text);
-                },
-                onkeydown: move |e: KeyboardEvent| {
-                    if e.key() == Key::Enter && condition {
-                        new_rule(suggested, &query());
-                    }
-                },
-            }
-
-            if condition {
+        div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+            div { style: "display:flex;align-items:center;gap:12px;min-height:34px",
                 div {
-                    style: "display:flex;flex-direction:column;align-items:flex-start;gap:9px;\
-                            padding:12px;border-radius:4px;background-color:rgba(238,130,196,.07);\
-                            box-shadow:inset 0 0 0 1px rgba(238,130,196,.22)",
-                    span { style: "font-size:13px;line-height:1.45;color:var(--color-neutral-300)",
-                        "Это условие для правила, а здесь проверяется адрес сайта. \
-                         Правило с этим условием можно создать сразу."
+                    class: "search",
+                    style: "flex:0 1 340px;min-width:220px",
+                    title: "Имя сайта, адрес или host:port. Никуда не подключается — \
+                            только прогоняет по правилам",
+                    crate::icons::Search { size: 15, color: MUTED }
+                    input {
+                        class: "field bare",
+                        r#type: "text",
+                        value: "{query}",
+                        placeholder: "Проверить адрес: youtube.com",
+                        autocomplete: "off",
+                        spellcheck: "false",
+                        style: "flex:1;min-width:0;padding:7px 0;border:none;\
+                                color:var(--color-text);font-size:14px",
+                        // The text lives here rather than in the frame: a
+                        // controlled input fed from a value that is republished
+                        // twice a second fights whoever is typing into it.
+                        oninput: move |e| {
+                            let text = e.value();
+                            query.set(text.clone());
+                            onask.call(text);
+                        },
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter && condition {
+                                new_rule(suggested, &query());
+                            }
+                        },
                     }
-                    Button {
-                        label: "Создать правило",
-                        enabled: true,
-                        onclick: move |_| new_rule(suggested, &query()),
-                        icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                    if !query().is_empty() {
+                        IconButton {
+                            title: "Очистить",
+                            enabled: true,
+                            onclick: move |_| {
+                                query.set(String::new());
+                                onask.call(String::new());
+                            },
+                            icon: rsx! { crate::icons::Close { size: 14, color: MUTED } },
+                        }
                     }
                 }
-            } else if let Some(answer) = result {
-                div {
-                    style: "display:flex;flex-direction:column;gap:7px;padding:11px;\
-                            border-radius:4px;background-color:rgba(239,232,245,.03)",
-                    span {
-                        style: "font-size:13px;color:var(--color-neutral-400);\
-                                font-family:ui-monospace,Consolas,monospace;word-break:break-all",
-                        "{answer.target}"
-                    }
-                    div { style: "display:flex;align-items:center;gap:9px",
+                div { style: "flex:1;min-width:0;display:flex;align-items:center;gap:10px;\
+                              overflow:hidden;white-space:nowrap",
+                    if condition {
+                        span { style: "font-size:13px;color:var(--color-neutral-400);min-width:0;overflow:hidden",
+                            "это условие для правила, а не адрес"
+                        }
+                        div { style: "flex:none",
+                            Button {
+                                label: "Создать правило",
+                                enabled: true,
+                                onclick: move |_| new_rule(suggested, &query()),
+                                icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
+                            }
+                        }
+                    } else if let Some(answer) = result.filter(|_| !query().trim().is_empty()) {
                         ActionPill { action: answer.action }
-                        span {
-                            style: "font-size:12.5px;color:var(--color-neutral-500);min-width:0",
-                            "{elide(&answer.rule, 24)}"
+                        span { style: "flex:none;font-size:13px;color:var(--color-neutral-400)",
+                            "{elide(&answer.rule, 28)}"
                         }
-                    }
-                    // A site that walked past a rule with a country: why it did.
-                    if let Some(note) = &answer.note {
                         span {
-                            style: "font-size:12.5px;line-height:1.45;color:#cbbaf4",
-                            "{note}"
+                            style: "min-width:0;overflow:hidden;font-size:13px;color:var(--color-neutral-600);\
+                                    font-family:ui-monospace,Consolas,monospace",
+                            "{elide(&answer.target, 40)}"
+                        }
+                    } else {
+                        span { style: "min-width:0;overflow:hidden;font-size:13px;color:var(--color-neutral-600)",
+                            "куда пойдёт адрес, без подключения"
                         }
                     }
                 }
-            } else {
-                span { style: "font-size:13px;color:var(--color-neutral-700)", "—" }
+            }
+            // A site that walked past a rule with a country: why it did.
+            if let Some(note) = note {
+                span {
+                    style: "font-size:12.5px;line-height:1.45;color:#cbbaf4;padding:0 2px",
+                    "{note}"
+                }
             }
         }
     }
@@ -4653,6 +4793,73 @@ mod tests {
         assert_eq!(ServerColumns::new(300.0, None, None), None);
     }
 
+    /// The address line says a name once. The card read `host · host:443`
+    /// for every server whose TLS name is its own host.
+    #[test]
+    fn the_address_line_says_a_name_once() {
+        assert_eq!(address_line("a.example", "a.example:443"), "a.example:443");
+        assert_eq!(address_line("A.Example", "a.example:443"), "a.example:443");
+        assert_eq!(address_line("", "203.0.113.10:443"), "203.0.113.10:443");
+        // REALITY borrows another site's name: that is worth saying.
+        assert_eq!(
+            address_line("www.example.net", "203.0.113.10:443"),
+            "www.example.net · 203.0.113.10:443"
+        );
+        assert_eq!(
+            address_line("a.example", "[2001:db8::1]:443"),
+            "a.example · [2001:db8::1]:443"
+        );
+    }
+
+    /// The fingerprint joins the line that says how the connection hides,
+    /// and a server whose handshake imitates no browser says nothing of one.
+    #[test]
+    fn the_fingerprint_joins_the_servers_detail() {
+        assert_eq!(
+            server_detail("VLESS · xhttp · reality", "firefox"),
+            "VLESS · xhttp · reality · firefox"
+        );
+        assert_eq!(server_detail("Hysteria2", "-"), "Hysteria2");
+        assert_eq!(server_detail("VLESS", ""), "VLESS");
+    }
+
+    /// A line answering a click in the program is the program's: the tray's
+    /// menu, the same window in a small shape, does not show it.
+    #[test]
+    fn the_trays_menu_shows_no_line_meant_for_the_program() {
+        let toast = crate::engine::Toast {
+            id: 1,
+            text: "TUN не поднялся: адаптеру нужны права администратора".to_owned(),
+            bad: true,
+        };
+        assert_eq!(toast_shown(Some(toast.clone()), true), None);
+        assert_eq!(toast_shown(Some(toast.clone()), false), Some(toast));
+        // And the App draws the line through it, not past it.
+        let app = SOURCE
+            .split("fn App()")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("App in ui.rs");
+        assert!(
+            app.contains("ToastLine { toast: toast_shown("),
+            "App draws the line unfiltered"
+        );
+    }
+
+    /// The mark at the head of the rail ships inside the binary, in the
+    /// stylesheet, as the other pictures do.
+    #[test]
+    fn the_rail_mark_is_inlined() {
+        assert_eq!(
+            APP_CSS.matches(MARK_URL).count(),
+            1,
+            "app.css names the mark once"
+        );
+        assert!(!STYLES.contains(MARK_URL), "the mark was not inlined");
+        // base64 of a PNG's signature, 89 50 4E 47.
+        assert!(STYLES.contains("url(data:image/png;base64,iVBORw"));
+    }
+
     /// A wider column shows more of a name, and a name that fits is whole.
     #[test]
     fn a_wider_column_cuts_a_name_later() {
@@ -4790,17 +4997,18 @@ mod tests {
 
     /// Clickable things take their pointer from app.css, and an inline cursor
     /// outranks any class: a `cursor:default` left inline on the action cards
-    /// is why hovering them changed nothing. Only the window's own chrome, the
-    /// drag strip and its three buttons, keeps the arrow inline.
+    /// is why hovering them changed nothing. The window's own chrome — the
+    /// drag strip, the head of the rail, the three buttons — takes its arrow
+    /// from app.css too, since the title bar went, so nothing sets one inline.
     #[test]
-    fn only_the_window_chrome_sets_a_cursor_inline() {
+    fn no_cursor_is_set_inline() {
         let marker = ["cursor", ":"].concat();
         let inline: Vec<&str> = SOURCE
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .filter(|line| line.contains(&marker))
             .collect();
-        assert_eq!(inline.len(), 2, "{inline:#?}");
+        assert!(inline.is_empty(), "{inline:#?}");
     }
 
     #[test]
@@ -5381,6 +5589,14 @@ fn viewport() -> (f64, f64) {
 
 /// The line about what the last action did. Keyed by its id, so a new line
 /// fades in even when it replaces one still showing.
+/// The line, unless the window is the tray's menu. A line answers a click in
+/// the program, and the menu is the same window in a small shape: switching
+/// TUN on without administrator rights and closing the window to the tray
+/// left the refusal standing across the menu, which has no TUN switch at all.
+fn toast_shown(toast: Option<crate::engine::Toast>, in_menu: bool) -> Option<crate::engine::Toast> {
+    toast.filter(|_| !in_menu)
+}
+
 #[component]
 fn ToastLine(toast: Option<crate::engine::Toast>) -> Element {
     let Some(toast) = toast else {

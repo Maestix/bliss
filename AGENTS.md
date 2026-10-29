@@ -885,9 +885,9 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     them changed nothing, and an inline `cursor:default` kept the arrow over
     them; the text boxes carried their hairline inline, so `.field:focus` never
     showed. A look that a state changes lives in a class (`.act-card`, `.field`,
-    `.search`), and clickable things get `cursor: pointer` from `app.css`:
-    `only_the_window_chrome_sets_a_cursor_inline` allows the two inline cursors
-    of the title bar and its buttons, and nothing else.
+    `.search`), and clickable things get `cursor: pointer` from `app.css`,
+    and nothing sets one inline (`no_cursor_is_set_inline`) — not even the
+    window's own chrome, since the title bar went (rule 31).
 13. **rsx builds handlers in its own order, not the order they are written.** A
     closure cloned inside one handler's block can be cloned after another
     handler has already moved it (E0382). Clone before `rsx!` (`save_on_key` in
@@ -1059,6 +1059,11 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
       numbers). The click handler that opens it is made once, so it reads the
       frame's signal when clicked; a count captured when it was made would be
       the count at launch.
+    - **The menu shows no line meant for the program** (`toast_shown`). The
+      line at the foot of the window is drawn over everything, and the menu
+      is that window: TUN switched on without administrator rights, the
+      window closed to the tray, and the menu opened over the refusal
+      (`the_trays_menu_shows_no_line_meant_for_the_program`).
     - The close button and Alt+F4 hide the window
       (`WindowCloseBehaviour::WindowHides`), so bliss goes on serving; leaving
       is "Выход" in the menu, which sets `WindowCloses` first and then closes
@@ -1245,6 +1250,43 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     once dragged wide, a drag far past a limit with no dead stretch on the
     way back, the reset. Widths last until bliss closes, as the log's height
     does.
+30. **One thing is said in one place.** The program's name and mark head the
+    rail (`.rail-brand`, the mark inlined like the pictures), and the
+    engine's version is in the rail's card alone — the title bar said both,
+    and then went (rule 31). The main screen has no heading: its two cards stand level
+    with the top of the rail, and a failure's red note goes under them. The
+    connection is one card: the server's name (cut in code to the room the
+    page leaves it, `viewport()`, less an estimate for what shares its
+    line) with the presets and the VPN's chip beside it, which give way to
+    the name and hide what no longer fits; the state; the address; and how
+    it hides with the fingerprint at the end (`server_detail`) — the name,
+    the presets and the chip had stood in the screen's heading, and the
+    fingerprint among the numbers. Measured in the window at 1040 and 880px:
+    the cards' tops on the rail's, the name never clipped mid-letter.
+    The address says a name once (`address_line`): it read `host ·
+    host:443` whenever the TLS name was the server's own host. The numbers'
+    card has the current rates where the fingerprint was. The listening
+    ports sit in the card's lower corner, absolutely, so the name's line
+    has the width. **The server list is a screen of its own** (`Servers`,
+    `ServerList`), with nothing over it: it was a tab under the status cards,
+    which took a third of the window from a list of dozens, and the rail's
+    «Серверы» was a shortcut to that tab. The connection screen's tabs are
+    «Трафик» and «Действия».
+31. **There is no title bar.** The rail and the cards reach the window's top
+    with the 18px they keep at its foot. The window's buttons are small
+    rounded plates floating in the top-right corner (`WindowControls`,
+    `.wctl`: 98×24, 24px down and 26px in), level with the screens'
+    headings; `SCREEN_HEAD` keeps its contents 116px clear of them, and on
+    the main screen they sit inside the numbers' card, whose rows start 38px
+    down. The window is dragged by `DragStrip`, the 18px along its top edge,
+    and by the head of the rail; a double click on either maximizes. What a
+    heading cannot fit beside them in a narrow window is `.head-hint`,
+    hidden under 980px. Measured on every screen at 1040 and 880px: 12px
+    from the nearest thing in a heading to the buttons, none over a row.
+32. **The address check is one line over the rule list** (`Checker`): the
+    connections screen's search box, and the answer beside it — the action,
+    the rule, the target — with a country's note on a second line. It was a
+    card 288px wide and the screen's height; the rules have that width now.
 
 ## 7. Verifying a UI change: look at the real window
 
