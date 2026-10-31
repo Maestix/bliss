@@ -1933,6 +1933,13 @@ real download from GitHub through it has not been made.
 
 **Linux, ported on 9 October:** see §12.
 
+**Android, designed on 31 October — a design, no code:**
+`docs/android-design.md`, beside a canvas of clickable mockups on claude.ai.
+Before it can be built it needs names for domain rules under a VPN service
+(fake-IP through the service's own DNS), OpenVPN inside bliss's service
+(Android runs one VPN at a time, and the libraries are AGPL or GPL), and
+`app:` rules by package name.
+
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes
 on WebView2), idle CPU ≤ 1% with the tunnel up, RSS growth ≤ 5% over a 12-hour
