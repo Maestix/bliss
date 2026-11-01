@@ -48,6 +48,8 @@ data class Numbers(
 data class ServerRow(
     val name: String, val kind: String, val detail: String, val address: String,
     val group: String?, val ping: String, val ms: Int?,
+    /** The real check: a page fetched through the server ("ok", "down", "probing", "unknown"). */
+    val check: String = "unknown", val checkMs: Int? = null,
 )
 data class GroupRow(
     val id: String, val name: String, val host: String, val updated: Long?, val used: Long?,
@@ -75,7 +77,8 @@ fun parseFrame(text: String): Frame {
         current = o.int("current"),
         servers = o.optJSONArray("servers").map {
             ServerRow(it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
-                it.str("group"), it.getString("ping"), it.int("ms"))
+                it.str("group"), it.getString("ping"), it.int("ms"),
+                it.optString("check", "unknown"), it.int("check_ms"))
         },
         groups = o.optJSONArray("groups").map {
             GroupRow(it.getString("id"), it.getString("name"), it.getString("host"), it.long("updated"), it.long("used"),

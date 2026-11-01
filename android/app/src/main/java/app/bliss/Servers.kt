@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun Servers(frame: Frame, c: Commands, add: () -> Unit, menu: (Int) -> Unit, group: (String) -> Unit) {
     val probing = frame.servers.any { it.ping == "probing" }
+    val checking = frame.servers.any { it.check == "probing" }
     val own = frame.servers.withIndex().filter { it.value.group == null }
     Box(Modifier.fillMaxSize().statusBarsPadding()) {
         PullToRefreshBox(isRefreshing = probing, onRefresh = { c("ping") }, modifier = Modifier.fillMaxSize()) {
@@ -63,6 +64,8 @@ fun Servers(frame: Frame, c: Commands, add: () -> Unit, menu: (Int) -> Unit, gro
                                 style = T.small)
                         }
                         IconBtn(Icons.Pulse, C.Accent, "Проверить отклик всех") { c("ping") }
+                        // The real check: a page loaded through each server, not a handshake.
+                        IconBtn(Icons.Shield, if (checking) C.Violet else C.Accent, "Проверить доступ через все") { c("check", "index" to null) }
                     }
                 }
                 if (frame.servers.isEmpty() && frame.groups.isEmpty()) item { Empty(add) }
@@ -121,7 +124,15 @@ fun ServerLine(s: ServerRow, current: Boolean, onClick: () -> Unit, onMore: (() 
             }
             Text(listOf(s.kind, s.address).filter { it.isNotEmpty() }.joinToString(" · "), style = T.tiny.copy(fontSize = 12.5.sp), maxLines = 1)
         }
-        Text(pingText(s), style = T.small.copy(color = pingColor(s)), modifier = Modifier.padding(horizontal = 8.dp))
+        // The real check above the handshake's delay when there is one: the
+        // first says the server takes you somewhere, the second only that it answers.
+        Column(Modifier.padding(horizontal = 8.dp), horizontalAlignment = Alignment.End) {
+            val check = checkText(s)
+            if (check.isNotEmpty()) {
+                Text(check, style = T.small.copy(color = checkColor(s)))
+                Text("отклик ${pingText(s)}", style = T.tiny.copy(fontSize = 11.5.sp, color = pingColor(s).copy(alpha = 0.8f)))
+            } else Text(pingText(s), style = T.small.copy(color = pingColor(s)))
+        }
         if (onMore != null) IconBtn(Icons.More, C.N500, "Действия с сервером", onMore)
     }
 }
@@ -208,7 +219,8 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
         }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Btn("Отклик", accent = false, icon = Icons.Pulse, modifier = Modifier.weight(1f)) { c("ping") }
-            Btn("Все серверы", modifier = Modifier.weight(1.2f), onClick = all)
+            Btn("Доступ", accent = false, icon = Icons.Shield, modifier = Modifier.weight(1f)) { c("check", "index" to null) }
+            Btn("Все", modifier = Modifier.weight(0.8f), onClick = all)
         }
     }
 }
@@ -290,6 +302,7 @@ fun ServerMenu(frame: Frame, index: Int, c: Commands, close: () -> Unit) {
             Text(listOf(s.detail, s.address).filter { it.isNotEmpty() }.joinToString(" · "), style = T.small, maxLines = 2)
         }
         MenuRow(Icons.Check, "Подключаться через него", C.N300) { c("select", "index" to index); close() }
+        MenuRow(Icons.Shield, "Проверить доступ через него", C.N300) { c("check", "index" to index); close() }
         MenuRow(Icons.Trash, "Удалить", C.BadText) { c("delete", "index" to index); close() }
     }
 }

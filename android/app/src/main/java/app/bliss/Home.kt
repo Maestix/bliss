@@ -1,13 +1,10 @@
 package app.bliss
 
-import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -67,21 +64,25 @@ fun Home(frame: Frame, heart: () -> Unit, openServer: () -> Unit, openTraffic: (
                 Spacer(Modifier.size(10.dp))
                 Text("bliss", style = T.body.copy(fontWeight = FontWeight.Bold, fontSize = 22.sp))
             }
+            TrafficCard(frame, openTraffic)
             Spacer(Modifier.weight(1f))
 
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Ring(frame.state, 156.dp, heart)
                 Spacer(Modifier.height(16.dp))
-                AnimatedContent(
-                    frame.state, label = "word",
-                    transitionSpec = { (fadeIn(tween(220)) + slideInVertically { it / 4 }) togetherWith fadeOut(tween(150)) },
-                ) { state ->
-                    Text(
-                        when (state) { "on" -> "Подключено"; "busy" -> "Подключение"; "failed" -> "Ошибка"; else -> "Отключено" },
-                        style = T.state.copy(color = when (state) {
-                            "on" -> C.Accent; "busy" -> C.Violet; "failed" -> C.BlockText; else -> C.N500
-                        }),
-                    )
+                // The word keeps its place: a box of one height, the whole
+                // width, and only a crossfade between words. It slid in from
+                // below and resized with each word, which read as a jump.
+                Crossfade(frame.state, animationSpec = tween(220), label = "word",
+                    modifier = Modifier.fillMaxWidth().height(36.dp)) { state ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            when (state) { "on" -> "Подключено"; "busy" -> "Подключение"; "failed" -> "Ошибка"; else -> "Отключено" },
+                            style = T.state.copy(color = when (state) {
+                                "on" -> C.Accent; "busy" -> C.Violet; "failed" -> C.BlockText; else -> C.N500
+                            }),
+                        )
+                    }
                 }
                 Box(Modifier.heightIn(min = 26.dp).padding(top = 4.dp), contentAlignment = Alignment.Center) {
                     when (frame.state) {
@@ -95,16 +96,6 @@ fun Home(frame: Frame, heart: () -> Unit, openServer: () -> Unit, openTraffic: (
                 Box(Modifier.heightIn(min = 44.dp).padding(top = 2.dp), contentAlignment = Alignment.Center) {
                     val s = frame.suggest
                     when {
-                        frame.state == "on" -> Row(
-                            Modifier.clip(RoundedCornerShape(22.dp)).clickable(onClick = openTraffic)
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("↓ ${rate(frame.numbers.downRate)}", style = T.small.copy(color = C.Accent300, fontSize = 13.5.sp))
-                            Text(" · ↑ ${rate(frame.numbers.upRate)} · ${frame.numbers.active} соед.",
-                                style = T.small.copy(color = C.N400, fontSize = 13.5.sp))
-                            Ico(Icons.Right, C.N500, 16.dp)
-                        }
                         frame.state == "failed" && s != null ->
                             Btn("Подключить ${s.name} · ${s.ping} мс") { c("select", "index" to s.index); heart() }
                         frame.servers.isEmpty() -> Btn("Добавить сервер", icon = Icons.Plus, onClick = add)
@@ -124,12 +115,47 @@ fun Home(frame: Frame, heart: () -> Unit, openServer: () -> Unit, openTraffic: (
                 }
             }
 
+            Spacer(Modifier.weight(0.35f))
             ServerCard(frame, openServer)
         }
     }
 }
 
 private val BiasAlignment71 = androidx.compose.ui.BiasAlignment(0.42f, -1f)
+
+/**
+ * The top of the screen: what the tunnel is carrying, over the sky. The
+ * rates, the chart of the last seconds, the delay and the session's totals;
+ * a tap opens Трафик. Off, it says so quietly rather than showing zeros.
+ */
+@Composable
+private fun TrafficCard(frame: Frame, open: () -> Unit) {
+    val on = frame.state == "on"
+    Column(
+        Modifier.padding(top = 10.dp).fillMaxWidth().clip(S.card)
+            .background(C.Surface.copy(alpha = 0.72f))
+            .border(1.dp, Color(0x14EFE8F5), S.card)
+            .clickable(onClick = open).padding(horizontal = 16.dp, vertical = 14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                Text(if (on) "↓ ${rate(frame.numbers.downRate)}" else "Туннель выключен",
+                    style = T.body.copy(fontWeight = FontWeight.Bold, fontSize = 20.sp, color = if (on) C.Accent300 else C.N400))
+                Text(if (on) "↑ ${rate(frame.numbers.upRate)} · ${plural(frame.numbers.active.toLong(), "соединение", "соединения", "соединений")}"
+                    else "скорость и соединения появятся здесь", style = T.small)
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("задержка", style = T.tiny)
+                Text(frame.numbers.latency?.let { "$it мс" } ?: "—", style = T.body)
+            }
+        }
+        RateChart(frame.history, active = on, modifier = Modifier.padding(top = 10.dp, bottom = 8.dp).fillMaxWidth().height(44.dp))
+        Row {
+            Text("за сессию ↓ ${bytes(frame.numbers.downTotal)} · ↑ ${bytes(frame.numbers.upTotal)}", style = T.tiny, modifier = Modifier.weight(1f))
+            Ico(Icons.Right, C.N500, 16.dp)
+        }
+    }
+}
 
 @Composable
 private fun ServerCard(frame: Frame, open: () -> Unit) {
@@ -146,7 +172,8 @@ private fun ServerCard(frame: Frame, open: () -> Unit) {
         Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
             Text(server?.name ?: "Сервер не выбран", style = T.card, maxLines = 1)
             if (server != null) Row {
-                Text(pingText(server), style = T.small.copy(color = pingColor(server)))
+                if (checkText(server).isNotEmpty()) Text("доступ ${checkText(server)}", style = T.small.copy(color = checkColor(server)))
+                else Text(pingText(server), style = T.small.copy(color = pingColor(server)))
                 Text(" · ${server.detail}", style = T.small, maxLines = 1)
             } else Text("нажмите, чтобы выбрать или добавить", style = T.small)
         }
