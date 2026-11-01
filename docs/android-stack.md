@@ -414,5 +414,30 @@ decides by name and address together. `a_site_by_name_meets_a_rule_by_address`
 holds the stack to it; on both real rule sets an address in Russia meets
 `geoip:ru`.
 
+## 0.2.4: a rule that seemed not to work
+
+The user's `geosite:reddit` → direct rule left Reddit going through the
+server. The rule itself was right — run against Loyalsoldier's real
+geosite with the phone's first rules, every Reddit host decided direct
+(`an_editor_rule_decides_by_real_rule_sets`, ignored, `BLISS_GEO_DIR`) — so
+the connections never met it as names, or never met the new table:
+
+- **Open connections kept their way.** Rules apply to the next connection,
+  and Reddit's app and the browser hold theirs for minutes. On the phone a
+  rule change now ends the open connections the new table would send
+  elsewhere, with a FIN, and the app reconnects the new way.
+- **A name bliss never answered.** With Android's «Частный DNS» set to a
+  server, or a browser's own DNS over HTTPS, a connection arrives as a bare
+  address. Its name is read out of its first bytes now (TLS SNI, HTTP
+  `Host:`), and QUIC to a bare address is refused so the program falls back
+  to TCP, where the name can be read.
+
+`a_bare_address_is_decided_by_the_name_it_says` carries a hand-made TCP
+connection through the real stack: a ClientHello for `www.reddit.com` to a
+bare loopback address, decided by a `reddit.com` rule, every byte echoed
+back from the direct far end, and a FIN to the app once the rule goes. Its
+first run failed on the test itself — the pipe standing in for the TUN
+joined two packets into one read, which a TUN never does.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

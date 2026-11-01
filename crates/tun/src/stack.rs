@@ -25,6 +25,7 @@ use tokio::net::TcpSocket;
 use crate::device::MTU;
 use crate::names::{Addresses, Answer, FakeNames};
 use crate::net::{self, Gateway};
+use crate::sniff::{self, Sniffed};
 
 /// How long a connection may sit idle before the stack forgets it.
 ///
@@ -127,8 +128,18 @@ async fn ask_owner(
 impl Carrying {
     /// The rules' answer, by the site's real address too where a rule that
     /// looks at addresses comes before the decision.
-    async fn decide(&self, target: &Target, process: Option<&str>) -> Decision {
+    async fn decide(
+        &self,
+        target: &Target,
+        known: Option<IpAddr>,
+        process: Option<&str>,
+    ) -> Decision {
         let router = self.serving.router();
+        if let Some(ip) = known
+            && !is_vpn_program(process)
+        {
+            return router.decide_with(target, Some(ip), process);
+        }
         if self.names.is_some()
             && let Target::Domain { host, .. } = target
             && !is_vpn_program(process)
@@ -138,6 +149,67 @@ impl Carrying {
             return router.decide_with(target, ip, process);
         }
         decide(&self.serving, target, process)
+    }
+
+    /// Carry a connection until it ends — or, where bliss names sites (the
+    /// phone), until the rules change so that it would go another way: then
+    /// it is ended, and the program's next connection takes the new way. An
+    /// app keeps its connections for minutes, and a rule that did nothing
+    /// until then was taken for one that does not work (the user's Reddit
+    /// rule, 1 November).
+    async fn until_rerouted(
+        &self,
+        relayed: impl std::future::Future<Output = io::Result<()>>,
+        target: &Target,
+        seen: Option<IpAddr>,
+        process: Option<&str>,
+        route: Route,
+        id: bliss_core::ConnectionId,
+    ) -> Carried {
+        if self.names.is_none() {
+            return Carried::Ended(relayed.await);
+        }
+        let mut changes = self.serving.router_changes();
+        tokio::pin!(relayed);
+        loop {
+            tokio::select! {
+                result = &mut relayed => return Carried::Ended(result),
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return Carried::Ended(relayed.await);
+                    }
+                    if self.reconsidered(target, seen, process) != route {
+                        tracing::info!("tun #{id} {target}: the rules send it elsewhere now; closed");
+                        return Carried::Rerouted;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How a connection's carrying ended.
+enum Carried {
+    Ended(io::Result<()>),
+    /// The rules changed under it: the program is to be told it is over.
+    Rerouted,
+}
+
+impl Carrying {
+    /// The route the table in force now gives a connection already open,
+    /// without asking the network anything.
+    fn reconsidered(&self, target: &Target, seen: Option<IpAddr>, process: Option<&str>) -> Route {
+        if is_vpn_program(process) {
+            return Route::Direct;
+        }
+        let known = seen.or(match target {
+            Target::Domain { host, .. } => self.addresses.get(host).flatten().map(IpAddr::V4),
+            Target::Socket(_) => None,
+        });
+        self.serving
+            .router()
+            .decide_with(target, known, process)
+            .route
     }
 
     /// A site's IPv4 address, asked of 1.1.1.1 through the tunnel — never of
@@ -320,16 +392,34 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     // An address, unless bliss answered the lookup itself (`names`): a TUN
     // sees what the program put in the packet, and the name it looked up
     // first is gone by then.
-    let Ok(target) = carrying.target(client.peer_addr()) else {
+    let Ok(mut target) = carrying.target(client.peer_addr()) else {
         tracing::debug!("tun: {} is a name no longer known", client.peer_addr());
         let _ = client.shutdown().await;
         return Ok(());
     };
+    // A bare address where bliss names sites: the program found it some
+    // other way (a «Частный DNS», its own DNS over HTTPS, an address it
+    // kept), and its first bytes are asked for the name instead.
+    let mut first = Vec::new();
+    let mut seen = None;
+    if carrying.names.is_some()
+        && let Target::Socket(addr) = target
+        && SNIFFED_PORTS.contains(&addr.port())
+    {
+        first = read_first(&mut client).await;
+        if let Sniffed::Name(host) = sniff::name(&first) {
+            seen = Some(addr.ip());
+            target = Target::Domain {
+                host,
+                port: addr.port(),
+            };
+        }
+    }
     let process = carrying
         .program(true, client.local_addr(), client.peer_addr())
         .await;
     // One table decides this connection, whatever changes while it is open.
-    let decision = carrying.decide(&target, process.as_deref()).await;
+    let decision = carrying.decide(&target, seen, process.as_deref()).await;
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: {target} blocked by {}", decision.rule);
@@ -344,14 +434,19 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
         return Ok(());
     }
 
-    let upstream = match decision.route {
-        Route::Direct => match resolve(&target).await {
+    let upstream = match (decision.route, seen) {
+        // Straight to the address the program chose, which a name read out
+        // of its connection only explains.
+        (Route::Direct, Some(ip)) => {
+            dial_direct(SocketAddr::new(ip, target.port()), *gateway).await
+        }
+        (Route::Direct, None) => match resolve(&target).await {
             Ok(addr) => dial_direct(addr, *gateway).await,
             Err(e) => Err(e),
         },
-        route => serving.dial_tunnelled(route, &target).await,
+        (route, _) => serving.dial_tunnelled(route, &target).await,
     };
-    let upstream = match upstream {
+    let mut upstream = match upstream {
         Ok(upstream) => upstream,
         Err(e) => {
             tracing::info!("tun: {target} refused — {e}");
@@ -359,6 +454,13 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
             return Err(e);
         }
     };
+    // What was read to find the name goes first, as it came.
+    if !first.is_empty()
+        && let Err(e) = upstream.write_all(&first).await
+    {
+        let _ = client.shutdown().await;
+        return Err(e);
+    }
 
     let route = decision.route;
     let conn = serving
@@ -372,9 +474,49 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
         conn.rule
     );
 
-    let result = relay(client, upstream, Arc::clone(&conn)).await;
+    conn.add_up(first.len() as u64);
+
+    let relayed = relay(&mut client, upstream, Arc::clone(&conn));
+    let carried = carrying
+        .until_rerouted(relayed, &conn.target, seen, process.as_deref(), route, id)
+        .await;
     serving.tracker.close(id);
-    result
+    match carried {
+        Carried::Ended(result) => result,
+        // Said to the program: a stream merely dropped tells it nothing, and
+        // it would wait on the old way for good.
+        Carried::Rerouted => {
+            let _ = client.shutdown().await;
+            Ok(())
+        }
+    }
+}
+
+/// Ports whose clients speak first, with a name in what they say: HTTPS and
+/// HTTP and their usual others. A server that speaks first (SSH, mail) is
+/// never waited on.
+const SNIFFED_PORTS: [u16; 4] = [443, 80, 8443, 8080];
+/// How long a connection's first bytes are waited for.
+const SNIFF_WAIT: Duration = Duration::from_millis(400);
+
+/// The first bytes of a connection, until they name a site, say they will
+/// not, reach `MAX_SNIFF`, or `SNIFF_WAIT` passes.
+async fn read_first(client: &mut IpStackTcpStream) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut first = Vec::new();
+    let deadline = tokio::time::Instant::now() + SNIFF_WAIT;
+    let mut buf = vec![0u8; 4096];
+    while first.len() < sniff::MAX_SNIFF {
+        let n = match tokio::time::timeout_at(deadline, client.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => n,
+            _ => break,
+        };
+        first.extend_from_slice(&buf[..n]);
+        if sniff::name(&first) != Sniffed::More {
+            break;
+        }
+    }
+    first
 }
 
 /// One flow of datagrams: a call, a QUIC request, a name being looked up.
@@ -397,10 +539,29 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
         tracing::debug!("tun: udp {} is a name no longer known", client.peer_addr());
         return Ok(());
     };
+    let mut client = client;
+    let mut first = Vec::new();
+    if carrying.names.is_some()
+        && let Target::Socket(addr) = target
+        && addr.port() == 443
+    {
+        // QUIC to a bare address: its name is sealed, so the rules could see
+        // only the address. Refused, the program falls back to TCP, whose
+        // name `carry` reads.
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 2048];
+        if let Ok(n) = client.read(&mut buf).await {
+            first.extend_from_slice(&buf[..n]);
+        }
+        if sniff::is_quic_initial(&first) {
+            tracing::debug!("tun: QUIC to bare {addr} refused, for TCP to name the site");
+            return Ok(());
+        }
+    }
     let process = carrying
         .program(false, client.local_addr(), client.peer_addr())
         .await;
-    let decision = carrying.decide(&target, process.as_deref()).await;
+    let decision = carrying.decide(&target, None, process.as_deref()).await;
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: udp {target} blocked by {}", decision.rule);
@@ -441,9 +602,20 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
         conn.rule
     );
 
-    let result = bliss_core::relay_datagrams(client, upstream, Arc::clone(&conn)).await;
+    if !first.is_empty() {
+        upstream.send(&first).await?;
+        conn.add_up(first.len() as u64);
+    }
+    let relayed = bliss_core::relay_datagrams(client, upstream, Arc::clone(&conn));
+    let carried = carrying
+        .until_rerouted(relayed, &conn.target, None, process.as_deref(), route, id)
+        .await;
     serving.tracker.close(id);
-    result
+    match carried {
+        Carried::Ended(result) => result,
+        // A flow has nothing to close: its next datagram starts a new one.
+        Carried::Rerouted => Ok(()),
+    }
 }
 
 /// Where the lookups `names` does not answer itself go: through the tunnel.
@@ -712,6 +884,239 @@ mod tests {
     /// OpenVPN's own connection to its server leaves the ordinary way, whatever
     /// the rules say: through the tunnel it would reach the work network by way
     /// of the proxy server, if at all.
+    /// An IPv4 packet carrying one TCP segment, both checksums right.
+    #[cfg(target_os = "linux")]
+    fn tcp_packet(
+        src: SocketAddr,
+        dst: SocketAddr,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let (SocketAddr::V4(src), SocketAddr::V4(dst)) = (src, dst) else {
+            panic!("IPv4 only");
+        };
+        let fold = |mut sum: u32| {
+            while sum >> 16 != 0 {
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+            !(sum as u16)
+        };
+        let words = |bytes: &[u8]| -> u32 {
+            bytes
+                .chunks(2)
+                .map(|c| u32::from(u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])))
+                .sum()
+        };
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&src.port().to_be_bytes());
+        tcp.extend_from_slice(&dst.port().to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&ack.to_be_bytes());
+        tcp.extend_from_slice(&[5 << 4, flags, 0xff, 0xff, 0, 0, 0, 0]);
+        tcp.extend_from_slice(payload);
+        let mut pseudo = Vec::new();
+        pseudo.extend_from_slice(&src.ip().octets());
+        pseudo.extend_from_slice(&dst.ip().octets());
+        pseudo.extend_from_slice(&[0, 6]);
+        pseudo.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
+        let sum = fold(words(&pseudo) + words(&tcp));
+        tcp[16..18].copy_from_slice(&sum.to_be_bytes());
+        let total = 20 + tcp.len();
+        let mut p = vec![
+            0x45,
+            0,
+            (total >> 8) as u8,
+            total as u8,
+            0,
+            1,
+            0x40,
+            0,
+            64,
+            6,
+            0,
+            0,
+        ];
+        p.extend_from_slice(&src.ip().octets());
+        p.extend_from_slice(&dst.ip().octets());
+        let sum = fold(words(&p));
+        p[10..12].copy_from_slice(&sum.to_be_bytes());
+        p.extend_from_slice(&tcp);
+        p
+    }
+
+    /// The packets the stack writes to the phone, one at a time, however
+    /// the pipe joins them.
+    #[cfg(target_os = "linux")]
+    struct Packets {
+        pipe: tokio::io::DuplexStream,
+        held: Vec<u8>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Packets {
+        async fn next(&mut self) -> Vec<u8> {
+            use tokio::io::AsyncReadExt;
+            loop {
+                if self.held.len() >= 4 {
+                    let len = usize::from(u16::from_be_bytes([self.held[2], self.held[3]]));
+                    if self.held.len() >= len {
+                        return self.held.drain(..len).collect();
+                    }
+                }
+                let mut buf = vec![0u8; 65536];
+                let n = tokio::time::timeout(Duration::from_secs(3), self.pipe.read(&mut buf))
+                    .await
+                    .expect("the stack wrote a packet")
+                    .unwrap();
+                assert!(n > 0, "the stack ended");
+                self.held.extend_from_slice(&buf[..n]);
+            }
+        }
+
+        /// One packet to the stack, alone: a TUN hands over one packet a
+        /// read, and the pipe would join two written back to back.
+        async fn send(&mut self, packet: &[u8]) {
+            use tokio::io::AsyncWriteExt;
+            self.pipe.write_all(packet).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+
+        /// The next TCP segment: its flags, sequence number and payload.
+        async fn segment(&mut self) -> (u8, u32, Vec<u8>) {
+            let p = self.next().await;
+            assert_eq!(p[9], 6, "TCP");
+            let tcp = &p[20..];
+            let header = usize::from(tcp[12] >> 4) * 4;
+            let seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+            (tcp[13], seq, tcp[header..].to_vec())
+        }
+    }
+
+    /// A connection to a bare address — a program that found it without
+    /// asking bliss — whose ClientHello names `www.reddit.com`: a rule for
+    /// that name sends it straight to the address the program chose, with
+    /// every byte it sent. And when the rules change to send it elsewhere,
+    /// the open connection is ended rather than carried on the old way. Both
+    /// were the user's Reddit rule that "did not work", 1 November.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bare_address_is_decided_by_the_name_it_says() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The far end: an echo on loopback, at a port whose clients speak first.
+        let Ok(echo) = tokio::net::TcpListener::bind("127.0.0.1:8443").await else {
+            eprintln!("127.0.0.1:8443 is taken here; not run");
+            return;
+        };
+        let echoed = tokio::spawn(async move {
+            let (mut socket, _) = echo.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut got = Vec::new();
+            while let Ok(n) = socket.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                socket.write_all(&buf[..n]).await.unwrap();
+            }
+            got
+        });
+
+        let mut reddit = bliss_proto::Rule {
+            name: Some("Reddit".to_owned()),
+            action: bliss_proto::Action::Direct,
+            ..bliss_proto::Rule::default()
+        };
+        reddit.domain = vec!["reddit.com".to_owned()];
+        let routing = bliss_proto::Routing {
+            fallback: bliss_proto::Action::Proxy,
+            rules: vec![reddit],
+            ..bliss_proto::Routing::default()
+        };
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().expect("an address"),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::build_resolving(
+                &routing,
+                std::path::Path::new("/nonexistent"),
+            )),
+        ));
+        let mut carrying = Carrying::new(Arc::clone(&serving), Gateway::for_tests());
+        carrying.names = Some(("172.19.0.2:53".parse().unwrap(), Arc::new(FakeNames::new())));
+        let (phone, device) = tokio::io::duplex(256 * 1024);
+        let stack = tokio::spawn(serve(device, Arc::new(carrying)));
+        let mut phone = Packets {
+            pipe: phone,
+            held: Vec::new(),
+        };
+
+        let app: SocketAddr = "172.19.0.1:40001".parse().unwrap();
+        let far: SocketAddr = "127.0.0.1:8443".parse().unwrap();
+        const SYN: u8 = 0x02;
+        const ACK: u8 = 0x10;
+        const PSH: u8 = 0x08;
+        const FIN: u8 = 0x01;
+        const RST: u8 = 0x04;
+        phone.send(&tcp_packet(app, far, 1000, 0, SYN, &[])).await;
+        let (flags, theirs, _) = phone.segment().await;
+        assert_eq!(flags & (SYN | ACK), SYN | ACK);
+        let mut ours = 1001;
+        let mut acked = theirs.wrapping_add(1);
+        phone
+            .send(&tcp_packet(app, far, ours, acked, ACK, &[]))
+            .await;
+
+        let hello = crate::sniff::tests::client_hello("www.reddit.com");
+        phone
+            .send(&tcp_packet(app, far, ours, acked, PSH | ACK, &hello))
+            .await;
+        ours += hello.len() as u32;
+
+        // The echo comes back through the stack: the bytes went straight.
+        let mut back = Vec::new();
+        while back.len() < hello.len() {
+            let (flags, seq, payload) = phone.segment().await;
+            assert_eq!(
+                flags & (FIN | RST),
+                0,
+                "closed before the echo: {:?}",
+                serving.tracker.table()
+            );
+            if !payload.is_empty() {
+                acked = seq.wrapping_add(payload.len() as u32);
+                back.extend_from_slice(&payload);
+                phone
+                    .send(&tcp_packet(app, far, ours, acked, ACK, &[]))
+                    .await;
+            }
+        }
+        assert_eq!(back, hello);
+        let rows = serving.tracker.table();
+        assert_eq!(rows[0].target, "www.reddit.com:8443");
+        assert_eq!(rows[0].route, Route::Direct);
+        assert_eq!(rows[0].rule, "Reddit");
+
+        // The rule goes: the open connection is ended, not left on its way.
+        serving.set_router(Arc::new(Router::proxy_everything()));
+        loop {
+            let (flags, _, _) = phone.segment().await;
+            if flags & (FIN | RST) != 0 {
+                break;
+            }
+        }
+        assert_eq!(echoed.await.unwrap(), hello);
+        stack.abort();
+    }
+
     /// An IPv4 packet carrying one UDP datagram, checksum left out (allowed
     /// for UDP over IPv4).
     #[cfg(target_os = "linux")]
@@ -795,17 +1200,26 @@ mod tests {
             port: 443,
         };
         assert_eq!(
-            carrying.decide(&site("nas.example"), None).await.route,
+            carrying
+                .decide(&site("nas.example"), None, None)
+                .await
+                .route,
             Route::Direct
         );
         assert_eq!(
-            carrying.decide(&site("far.example"), None).await.route,
+            carrying
+                .decide(&site("far.example"), None, None)
+                .await
+                .route,
             Route::Proxy
         );
         // Without names (the desktop), a name is never resolved for a rule.
         carrying.names = None;
         assert_eq!(
-            carrying.decide(&site("nas.example"), None).await.route,
+            carrying
+                .decide(&site("nas.example"), None, None)
+                .await
+                .route,
             Route::Proxy
         );
     }

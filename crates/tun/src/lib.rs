@@ -38,6 +38,7 @@ mod net;
 #[cfg(target_os = "android")]
 #[path = "android_net.rs"]
 mod net;
+pub mod sniff;
 #[cfg(any(windows, target_os = "linux", target_os = "android"))]
 mod stack;
 
