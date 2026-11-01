@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun Traffic(frame: Frame, c: Commands, back: () -> Unit) {
     var tab by remember { mutableStateOf("conns") }
+    val context = androidx.compose.ui.platform.LocalContext.current
     // The table and the log cross the socket only while this screen asks.
     DisposableEffect(tab) {
         c("table", "open" to (tab == "conns"))
@@ -95,7 +96,9 @@ fun Traffic(frame: Frame, c: Commands, back: () -> Unit) {
                     ) {
                         Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
                             Text(r.target, style = T.body.copy(color = if (r.closed) C.N500 else C.Text), maxLines = 1)
-                            Text("↓ ${bytes(r.down)} · ↑ ${bytes(r.up)} · ${r.rule}", style = T.tiny.copy(fontSize = 12.5.sp), maxLines = 1)
+                            val app = r.app?.let { Apps.label(context, it) }
+                            Text(listOfNotNull(app, "↓ ${bytes(r.down)} · ↑ ${bytes(r.up)}", r.rule).joinToString(" · "),
+                                style = T.tiny.copy(fontSize = 12.5.sp), maxLines = 1)
                         }
                         Pill(r.route, r.closed)
                     }

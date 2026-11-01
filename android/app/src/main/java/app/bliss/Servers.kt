@@ -321,7 +321,7 @@ fun GroupMenu(frame: Frame, id: String, c: Commands, close: () -> Unit) {
 }
 
 @Composable
-private fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, color: Color, onClick: () -> Unit) {
+fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, color: Color, onClick: () -> Unit) {
     Row(
         Modifier.padding(horizontal = 8.dp).fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick).padding(horizontal = 12.dp),

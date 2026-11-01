@@ -36,8 +36,18 @@ data class Frame(
     val canRestore: Boolean = false,
     val ticket: Long = 0,
     val holding: Boolean = false,
+    val geo: GeoView = GeoView(),
+    /** Every geosite:/geoip: category, only while the rule editor asks. */
+    val categories: List<String>? = null,
     /** Not from the engine: whether the socket is up at all. */
     val connected: Boolean = false,
+)
+
+data class GeoSource(val key: String, val name: String, val about: String)
+data class GeoView(
+    val source: String = "", val sources: List<GeoSource> = emptyList(), val auto: Boolean = true,
+    val ip: Long? = null, val site: Long? = null, val updated: Long? = null,
+    val fetching: Long? = null, val problem: String? = null,
 )
 
 data class Suggest(val index: Int, val name: String, val ping: Int)
@@ -55,8 +65,19 @@ data class GroupRow(
     val id: String, val name: String, val host: String, val updated: Long?, val used: Long?,
     val total: Long?, val expire: Long?, val fetching: Boolean, val problem: String?,
 )
-data class RuleRow(val name: String, val conditions: String, val action: String, val enabled: Boolean)
-data class ConnRow(val target: String, val route: String, val rule: String, val up: Long, val down: Long, val closed: Boolean)
+data class RuleRow(
+    val name: String, val conditions: String, val action: String, val enabled: Boolean,
+    /** Whether the name was given rather than made up from the conditions. */
+    val named: Boolean = false,
+    /** The conditions one to a line, as the editor shows them. */
+    val text: String = "",
+    /** The package, for a rule about one app and nothing else. */
+    val app: String? = null,
+)
+data class ConnRow(
+    val target: String, val route: String, val rule: String, val up: Long, val down: Long, val closed: Boolean,
+    val app: String? = null,
+)
 data class Toast(val id: Long, val text: String, val bad: Boolean, val undo: Boolean)
 
 private fun JSONObject.str(key: String): String? = if (isNull(key)) null else optString(key)
@@ -85,7 +106,8 @@ fun parseFrame(text: String): Frame {
                 it.long("total"), it.long("expire"), it.optBoolean("fetching"), it.str("problem"))
         },
         rules = o.optJSONArray("rules").map {
-            RuleRow(it.getString("name"), it.getString("conditions"), it.getString("action"), it.optBoolean("enabled"))
+            RuleRow(it.getString("name"), it.getString("conditions"), it.getString("action"), it.optBoolean("enabled"),
+                it.optBoolean("named"), it.optString("text"), it.str("app"))
         },
         fallback = o.optString("fallback", "proxy"),
         presets = o.optJSONArray("presets")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
@@ -96,7 +118,8 @@ fun parseFrame(text: String): Frame {
             n.optInt("active"), n.optLong("opened"), n.int("latency")),
         history = o.optJSONArray("history")?.let { a -> (0 until a.length()).map { a.getLong(it) } } ?: emptyList(),
         table = if (o.isNull("table")) null else o.optJSONArray("table").map {
-            ConnRow(it.getString("target"), it.getString("route"), it.getString("rule"), it.optLong("up"), it.optLong("down"), it.optBoolean("closed"))
+            ConnRow(it.getString("target"), it.getString("route"), it.getString("rule"), it.optLong("up"), it.optLong("down"),
+                it.optBoolean("closed"), it.str("app"))
         },
         log = if (o.isNull("log")) null else o.optJSONArray("log")?.let { a -> (0 until a.length()).map { a.getString(it) } },
         toast = o.optJSONObject("toast")?.let { Toast(it.getLong("id"), it.getString("text"), it.optBoolean("bad"), it.optBoolean("undo")) },
@@ -104,6 +127,15 @@ fun parseFrame(text: String): Frame {
         canRestore = o.optBoolean("can_restore"),
         ticket = o.optLong("ticket"),
         holding = o.optBoolean("holding"),
+        geo = o.optJSONObject("geo")?.let { g ->
+            GeoView(
+                g.optString("source"),
+                g.optJSONArray("sources").map { GeoSource(it.getString("key"), it.getString("name"), it.getString("about")) },
+                g.optBoolean("auto", true), g.long("ip"), g.long("site"), g.long("updated"), g.long("fetching"), g.str("problem"),
+            )
+        } ?: GeoView(),
+        categories = if (o.isNull("categories") || !o.has("categories")) null
+            else o.optJSONArray("categories")?.let { a -> (0 until a.length()).map { a.getString(it) } },
         connected = true,
     )
 }

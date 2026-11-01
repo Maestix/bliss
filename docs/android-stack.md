@@ -294,7 +294,8 @@ What exists, and where it left the plan above:
 - **IPv6 is routed in and refused** (an extra rule built in, not saved), so a
   program falls back to IPv4 instead of leaking around the tunnel. DNS goes
   to 1.1.1.1 inside the tunnel, through the server.
-- **Not in it yet:** fake-IP (so domain and geosite rules see nothing),
+- **Not in it yet** (then; the second build added the first four): fake-IP
+  (so domain and geosite rules see nothing),
   app rules and «мимо VPN», the rule editor, networks and presets by network,
   Автовыбор, the QR scanner, widgets, the work VPN, and «Только прокси». The
   tile and the notification with «Отключить» are in.
@@ -314,6 +315,60 @@ What exists, and where it left the plan above:
   (above); and the empty top of Главная, which now holds the traffic card —
   rates, the chart, the delay, the session's totals — that sat as one line
   under the heart.
+
+## The second build, 0.2.0, 1 November
+
+Asked for after the first ran on the phone: the rules, the rule sets, and a
+notification of bliss's own.
+
+- **Sites by name: fake-IP** (`crates/tun/src/names.rs`). The service names
+  `172.19.0.2` as the phone's DNS server, inside the TUN's /30; the stack
+  answers there itself. An `A` query for a name with a dot gets an address
+  from 198.18.0.0/15 (a pool of 16 384, the oldest name giving its address
+  up past that), and a connection to it is decided and dialled by the name —
+  so `domain` and `geosite` rules work through the TUN. Names of the local
+  network (no dot, `.local`, `.lan`, `.home.arpa`…) are resolved for real on
+  the phone's network; `AAAA`, `HTTPS` and `SVCB` get no records (IPv6 is
+  not carried, and an `HTTPS` record's address hints would go around the
+  name); anything else goes through the tunnel to 1.1.1.1. A direct route
+  for a name resolves it on the real network, as direct routes always do.
+  Android's «Частный DNS» set to a server's name bypasses all of this, and
+  the rules then see addresses only: the screen says so.
+- **Apps by package**: for each connection the stack asks
+  `ConnectivityManager.getConnectionOwnerUid` through JNI
+  (`android::owner_of` → `Native.ownerOf`, kept by name in
+  proguard-rules.pro), off the runtime's threads, attached for the call and
+  detached after. `app:`/`process:` rules match the package.
+- **Правила**: «Приложения» — the launcher's apps (`<queries>` in the
+  manifest), those with a way of their own first, a tap applying at once
+  (`AppRoute`: the app's rule is made first in the list, changed, or taken
+  away) — and «Список правил» with an editor sheet: a name, the action,
+  conditions as chips added by kind (a site, an app from the list, a
+  category from the rule sets, an address or port) or as the desktop's
+  text, one to a line; up, down, delete with «Вернуть».
+- **«Полностью мимо VPN»** is the service's list (`bypass.txt`, written by
+  the screens): `addDisallowedApplication` for each, the interface built
+  again when it changes.
+- **Rule sets** (`geo.rs`): none ship in the APK. Three sources —
+  Loyalsoldier (the default, ~28 MB), runetfreedom's lists for Russia
+  (~100 MB: its geosite alone was 86 MB, which is why a file's cap is
+  160 MB) and v2fly (~25 MB) — fetched through the tunnel when it is up,
+  both files read as rule sets before either replaces what is there, then
+  every rule compiled again. Fetched again by the week once here, when the
+  tunnel comes up. The editor's category list is read from them only while
+  it is open. `fetched_rule_sets_read_and_decide` read both real sources'
+  files (1 807 and 1 830 categories) and decided `mail.google.com` by
+  `geosite:google`; the fetch itself was not run here, since reqwest does
+  not trust this machine's proxy.
+- **The notification is a card of bliss's own** (`res/layout/note_*.xml`,
+  `DecoratedCustomViewStyle`): the heart and the state in the accent, the
+  server and its delay, a clock Android ticks by itself, and pills —
+  «Пауза 5 мин», «Сервер», «Отключить». Opened, it shows the status card's
+  night scene; paused, the bunny asleep in its cup and a count down.
+  System fonts only: an app font that failed to load in SystemUI would be a
+  bad notification and take the service with it. The pause is not offered
+  under «Постоянный VPN» with its block, where it would mean no network.
+- Not run on a phone before it was handed over: no emulator here.
 
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

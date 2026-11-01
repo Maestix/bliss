@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The notification folded: the heart, the state, the server, the clock;
+     under 48dp, which is what Android 12 and later leave a folded custom view.
+     Only views RemoteViews inflates, and system fonts: a font of the app's
+     that failed to load in the system's process would take the service with
+     it ("bad notification posted"). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/note_card"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="12dp"
+    android:paddingTop="6dp"
+    android:paddingEnd="14dp"
+    android:paddingBottom="6dp">
+
+    <ImageView
+        android:id="@+id/heart"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:background="@drawable/note_dot"
+        android:contentDescription="@null"
+        android:padding="7dp"
+        android:src="@drawable/ic_heart_pink" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif-medium"
+            android:singleLine="true"
+            android:textColor="#EE82C4"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/detail"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:textColor="#B5A9C4"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <Chronometer
+        android:id="@+id/clock"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:fontFamily="sans-serif-medium"
+        android:textColor="#D3C9DD"
+        android:textSize="13sp" />
+</LinearLayout>
