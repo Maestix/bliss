@@ -26,16 +26,30 @@ mod device;
 #[cfg(target_os = "linux")]
 #[path = "linux_device.rs"]
 mod device;
+#[cfg(target_os = "android")]
+#[path = "android_device.rs"]
+mod device;
 #[cfg(windows)]
 mod net;
 #[cfg(target_os = "linux")]
 #[path = "linux_net.rs"]
 mod net;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(target_os = "android")]
+#[path = "android_net.rs"]
+mod net;
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
 mod stack;
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
 pub use device::MTU;
+/// On Android the system makes the device and bliss is handed its
+/// descriptor, so the stack is driven from outside rather than by `Tun::up`.
+#[cfg(target_os = "android")]
+pub use device::Packets;
+#[cfg(target_os = "android")]
+pub use net::Gateway;
+#[cfg(target_os = "android")]
+pub use stack::{Carrying, serve};
 
 /// The signed library, carried inside bliss.exe.
 ///

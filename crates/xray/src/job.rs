@@ -120,7 +120,7 @@ mod imp {
 /// - **It is set after the fork**, so a bliss that died in between has already
 ///   gone and the signal will never come: the child checks its parent is
 ///   still the one that forked it, and refuses to start otherwise.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
     use std::os::unix::process::CommandExt;
     use std::sync::OnceLock;
@@ -190,7 +190,7 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 mod imp {
     use tokio::process::{Child, Command};
 
