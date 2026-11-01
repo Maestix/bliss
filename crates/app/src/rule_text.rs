@@ -19,13 +19,13 @@ pub enum List {
     Geoip,
     Port,
     Process,
-    Protocol,
+    Network,
 }
 
 /// Every prefix `condition` reads, the ones it refuses included.
 const PREFIXES: [&str; 15] = [
     "geosite", "geoip", "domain", "suffix", "full", "keyword", "ip", "cidr", "port", "process",
-    "app", "protocol", "regexp", "regex", "ext",
+    "app", "network", "regexp", "regex", "ext",
 ];
 
 /// A rule's conditions, one to a line, the way the editor shows them.
@@ -44,7 +44,7 @@ pub fn to_text(rule: &Rule) -> String {
     lines.extend(prefixed("geoip", &rule.geoip));
     lines.extend(prefixed("port", &rule.port));
     lines.extend(prefixed("process", &rule.process));
-    lines.extend(prefixed("protocol", &rule.protocol));
+    lines.extend(prefixed("network", &rule.network));
     lines.join("\n")
 }
 
@@ -73,7 +73,7 @@ pub fn parse(name: &str, action: Action, text: &str) -> Result<Rule, String> {
             List::Geoip => &mut rule.geoip,
             List::Port => &mut rule.port,
             List::Process => &mut rule.process,
-            List::Protocol => &mut rule.protocol,
+            List::Network => &mut rule.network,
         };
         if !list.contains(&value) {
             list.push(value);
@@ -111,10 +111,12 @@ pub fn condition(entry: &str) -> Result<(List, String), String> {
             "ip" | "cidr" => return address(value).map(|v| (List::Ip, v)),
             "port" => return port(value).map(|v| (List::Port, v)),
             "process" | "app" => return program(value).map(|v| (List::Process, v)),
-            "protocol" => {
+            // Not a condition but a limit on the rule's others, as in xray:
+            // network:udp with port:443 is QUIC.
+            "network" => {
                 return match value.to_ascii_lowercase().as_str() {
-                    "quic" => Ok((List::Protocol, "quic".to_owned())),
-                    _ => Err("из протоколов bliss различает только quic".to_owned()),
+                    v @ ("tcp" | "udp") => Ok((List::Network, v.to_owned())),
+                    _ => Err("сеть бывает tcp или udp".to_owned()),
                 };
             }
             "regexp" | "regex" => {
@@ -128,7 +130,7 @@ pub fn condition(entry: &str) -> Result<(List, String), String> {
             {
                 return Err(format!(
                     "не знаю приставки {other}: — есть domain, full, keyword, geosite, geoip, \
-                     ip, port, process и protocol"
+                     ip, port, process и network"
                 ));
             }
             // Not a prefix: an IPv6 address, or a name with a port after it.

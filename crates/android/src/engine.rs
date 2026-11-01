@@ -356,6 +356,7 @@ impl Engine {
             geo_problem: None,
             categories: None,
         };
+        engine.settle_protocols();
         engine.offer_quic_rule();
         engine.reparse();
         engine
@@ -1276,6 +1277,18 @@ impl Engine {
         }
     }
 
+    /// Rewrite 0.2.6's `protocol = ["quic"]` as UDP to port 443, and save,
+    /// so the profile says what it means.
+    fn settle_protocols(&mut self) {
+        let rules = &mut self.profile.routing.rules;
+        if rules.iter().any(|r| !r.protocol.is_empty()) {
+            for rule in rules.iter_mut() {
+                rule.settle_protocol();
+            }
+            self.save();
+        }
+    }
+
     /// Give a profile made before it the built-in «QUIC» rule, once: under
     /// «Локальная сеть» when that leads, else first, and switched as 0.2.5's
     /// switch stood. A rule of the person's own about QUIC is left alone.
@@ -1284,7 +1297,10 @@ impl Engine {
             return;
         }
         let rules = &mut self.profile.routing.rules;
-        if !rules.iter().any(|r| !r.protocol.is_empty()) {
+        if !rules
+            .iter()
+            .any(|r| !r.network.is_empty() || !r.protocol.is_empty())
+        {
             let at = usize::from(
                 rules
                     .first()
@@ -1611,7 +1627,8 @@ fn quic_rule() -> Rule {
     Rule {
         name: Some("QUIC — открывать по TCP".to_owned()),
         action: Action::Block,
-        protocol: vec!["quic".to_owned()],
+        network: vec!["udp".to_owned()],
+        port: vec!["443".to_owned()],
         ..Rule::default()
     }
 }
@@ -2042,7 +2059,8 @@ mod tests {
         let rules = &engine.profile.routing.rules;
         assert_eq!(rules.len(), 3);
         assert_eq!(rules[0].name.as_deref(), Some(LOCAL_RULE));
-        assert_eq!(rules[1].protocol, ["quic"]);
+        assert_eq!(rules[1].network, ["udp"]);
+        assert_eq!(rules[1].port, ["443"]);
         assert!(!rules[1].enabled, "as the switch stood");
         assert_eq!(rules[2].name.as_deref(), Some("Reddit"));
 
@@ -2056,18 +2074,46 @@ mod tests {
                 .routing
                 .rules
                 .iter()
-                .all(|r| r.protocol.is_empty())
+                .all(|r| r.network.is_empty())
         );
 
         // A new profile has it, on.
         let new = first_profile();
-        assert_eq!(new.routing.rules[1].protocol, ["quic"]);
+        assert_eq!(new.routing.rules[1].network, ["udp"]);
         assert!(new.routing.rules[1].enabled);
 
-        let typed = rule_text::parse("QUIC", Action::Block, "protocol:QUIC").unwrap();
-        assert_eq!(typed.protocol, ["quic"]);
-        assert_eq!(rule_text::to_text(&typed), "protocol:quic");
-        assert!(rule_text::parse("x", Action::Block, "protocol:http").is_err());
+        let typed = rule_text::parse("QUIC", Action::Block, "network:UDP\nport:443").unwrap();
+        assert_eq!(
+            (typed.network.as_slice(), typed.port.as_slice()),
+            (&["udp".to_owned()][..], &["443".to_owned()][..])
+        );
+        assert_eq!(rule_text::to_text(&typed), "port:443\nnetwork:udp");
+        assert!(rule_text::parse("x", Action::Block, "network:icmp").is_err());
+
+        // 0.2.6 wrote protocol = ["quic"]: read, rewritten, saved.
+        let dir2 = dir.join("026");
+        std::fs::create_dir_all(&dir2).unwrap();
+        let paths2 = Paths {
+            files: dir2.clone(),
+            libs: dir2.clone(),
+            socket: dir2.join("s"),
+        };
+        std::fs::write(
+            paths2.profile(),
+            "[[routing.rule]]\nname = \"QUIC\"\naction = \"block\"\nprotocol = [\"quic\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir2.join("android.json"), r#"{"quic_rule":true}"#).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let engine = Engine::load(paths2.clone(), tx.downgrade(), frames);
+        let rule = &engine.profile.routing.rules[0];
+        assert_eq!(
+            (rule.network.as_slice(), rule.port.as_slice()),
+            (&["udp".to_owned()][..], &["443".to_owned()][..])
+        );
+        let saved = std::fs::read_to_string(paths2.profile()).unwrap();
+        assert!(!saved.contains("protocol"), "{saved}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

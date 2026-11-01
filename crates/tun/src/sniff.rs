@@ -152,6 +152,17 @@ fn host(raw: &[u8]) -> Option<String> {
     valid.then_some(name)
 }
 
+/// Whether a datagram is QUIC at all, of any packet type: QUIC v1 and v2 set
+/// the fixed bit (0x40) in every packet's first byte, long header or short,
+/// where STUN and TURN start with 0x00 or 0x01 and DTLS with 0x14 to 0x17.
+/// A connection is more than its Initial: Chrome sends 0-RTT and later
+/// packets after it, and refusing the Initial alone let those through as
+/// flows of their own — Google answered a handshake it never saw, and the
+/// user got ERR_QUIC_PROTOCOL_ERROR.
+pub fn looks_like_quic(datagram: &[u8]) -> bool {
+    datagram.first().is_some_and(|b| b & 0x40 != 0)
+}
+
 /// Whether a datagram opens a QUIC connection: a long header, the Initial
 /// type, version 1 or 2. Its name is encrypted (with a key anyone can derive,
 /// but not read here), so a QUIC connection to a bare address is refused and
@@ -246,5 +257,12 @@ pub(crate) mod tests {
         assert!(!is_quic_initial(&short));
         assert!(!is_quic_initial(&initial[..100]));
         assert!(!is_quic_initial(&[0x17; 1300]));
+        // Any QUIC packet, the ones after the Initial included, is QUIC.
+        assert!(looks_like_quic(&initial));
+        assert!(looks_like_quic(&handshake));
+        assert!(looks_like_quic(&short));
+        assert!(!looks_like_quic(&[0x00, 0x01, 0x00, 0x00])); // STUN
+        assert!(!looks_like_quic(&[0x16, 0xfe, 0xfd])); // DTLS
+        assert!(!looks_like_quic(&[]));
     }
 }

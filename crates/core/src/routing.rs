@@ -210,8 +210,10 @@ struct Compiled {
     /// ranges. «Локальная сеть» and the IPv6 refusal cannot, and are no
     /// reason to look a site's address up (`Router::wants_address`).
     sees_sites: bool,
-    /// Protocols read off the connection (`quic`).
-    protocols: Vec<String>,
+    /// For UDP flows only (`Some(true)`), TCP only (`Some(false)`), or both.
+    udp_only: Option<bool>,
+    /// Nothing but the network was written: every flow of it matches.
+    network_alone: bool,
 }
 
 impl Compiled {
@@ -221,14 +223,13 @@ impl Compiled {
         ip: Option<IpAddr>,
         port: u16,
         process: Option<&str>,
-        protocol: Option<&str>,
+        udp: bool,
     ) -> bool {
-        if let Some(protocol) = protocol
-            && self
-                .protocols
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(protocol))
-        {
+        // The network limits every other condition, as in xray.
+        if self.udp_only.is_some_and(|only| only != udp) {
+            return false;
+        }
+        if self.network_alone {
             return true;
         }
         if self.domains.iter().any(|p| p.matches(host)) {
@@ -350,6 +351,16 @@ impl Router {
         // Numbered by place in the whole list, switched-off rules counted, so
         // "#3" in a warning is the third row on the screen.
         for (index, rule) in config.rules.iter().enumerate() {
+            // A 0.2.6 rule's `protocol = ["quic"]`, read as UDP to port 443.
+            let settled;
+            let rule = if rule.protocol.is_empty() {
+                rule
+            } else {
+                let mut copy = rule.clone();
+                copy.settle_protocol();
+                settled = copy;
+                &settled
+            };
             if !rule.enabled {
                 continue;
             }
@@ -379,11 +390,18 @@ impl Router {
                     .cloned()
                     .collect(),
                 sees_sites: false,
-                protocols: rule
-                    .protocol
-                    .iter()
-                    .map(|p| p.to_ascii_lowercase())
-                    .collect(),
+                udp_only: {
+                    let udp = rule.network.iter().any(|n| n.eq_ignore_ascii_case("udp"));
+                    let tcp = rule.network.iter().any(|n| n.eq_ignore_ascii_case("tcp"));
+                    (udp != tcp).then_some(udp)
+                },
+                network_alone: !rule.network.is_empty()
+                    && rule.domain.is_empty()
+                    && rule.ip.is_empty()
+                    && rule.port.is_empty()
+                    && rule.process.is_empty()
+                    && rule.geosite.is_empty()
+                    && rule.geoip.is_empty(),
             };
 
             for raw in &rule.ip {
@@ -464,17 +482,18 @@ impl Router {
         resolved: Option<IpAddr>,
         process: Option<&str>,
     ) -> Decision {
-        self.decide_flow(target, resolved, process, None)
+        self.decide_flow(target, resolved, process, false)
     }
 
-    /// `decide_with`, for a connection whose protocol was read off its first
-    /// bytes (`quic`), which `protocol:` conditions look at.
+    /// `decide_with`, for a TCP connection or (`udp`) a flow of datagrams,
+    /// which a rule's `network` tells apart. `decide` and `decide_with` are
+    /// for TCP: the SOCKS and HTTP ports carry nothing else.
     pub fn decide_flow(
         &self,
         target: &Target,
         resolved: Option<IpAddr>,
         process: Option<&str>,
-        protocol: Option<&str>,
+        udp: bool,
     ) -> Decision {
         let host = normalise(&target.host());
         let ip = match target {
@@ -494,7 +513,7 @@ impl Router {
         let port = target.port();
 
         for rule in &self.rules {
-            if rule.matches(&host, ip, port, process, protocol) {
+            if rule.matches(&host, ip, port, process, udp) {
                 return Decision {
                     route: rule.route,
                     rule: rule.name.clone(),
@@ -512,7 +531,7 @@ impl Router {
     /// that matches. False for an address, which is its own answer, and for a
     /// name decided before any such rule — so a name is resolved only when an
     /// answer depends on it, as xray's `IPIfNonMatch` does.
-    pub fn wants_address(&self, target: &Target, process: Option<&str>) -> bool {
+    pub fn wants_address(&self, target: &Target, process: Option<&str>, udp: bool) -> bool {
         let Target::Domain { host, .. } = target else {
             return false;
         };
@@ -522,10 +541,10 @@ impl Router {
         let host = normalise(host);
         let port = target.port();
         for rule in &self.rules {
-            if rule.matches(&host, None, port, process, None) {
+            if rule.matches(&host, None, port, process, udp) {
                 return false;
             }
-            if rule.sees_sites {
+            if rule.sees_sites && rule.udp_only.is_none_or(|only| only == udp) {
                 return true;
             }
         }
@@ -583,7 +602,7 @@ impl Router {
         let port = target.port();
         self.rules
             .iter()
-            .take_while(|rule| !rule.matches(&host, None, port, process, None))
+            .take_while(|rule| !rule.matches(&host, None, port, process, false))
             .filter(|rule| !rule.countries.is_empty())
             .map(|rule| rule.name.clone())
             .collect()
@@ -688,16 +707,14 @@ mod tests {
         }
     }
 
-    /// A site's address, learnt by the caller, decides the address rules a
-    /// name alone went past — and is asked for only when one comes before
-    /// the decision. On Android every site arrives by name, and without this
-    /// no `geoip:` rule ever matched a page there.
+    /// `network` limits a rule rather than adding to its conditions, as in
+    /// xray: UDP and port 443 is QUIC, never HTTPS on the same port. The
+    /// phone's built-in rule, and how the user asked for it.
     #[test]
-    fn quic_is_a_protocol_not_a_port() {
-        // The phone's built-in rule: QUIC refused, so pages open over TCP.
-        // It is told by the flow's first packet, never by UDP and 443.
+    fn udp_and_443_is_quic_not_https() {
         let mut quic = rule(Action::Block, "QUIC");
-        quic.protocol = vec!["quic".into()];
+        quic.network = vec!["udp".into()];
+        quic.port = vec!["443".into()];
         let mut site = rule(Action::Direct, "Reddit");
         site.domain = vec!["reddit.com".into()];
         let r = router(vec![site, quic], Action::Proxy);
@@ -705,22 +722,43 @@ mod tests {
             host: "github.com".into(),
             port: 443,
         };
-        assert_eq!(
-            r.decide_flow(&page, None, None, Some("quic")).route,
-            Route::Blocked
-        );
-        // HTTPS to the same place is not QUIC.
-        assert_eq!(r.decide_flow(&page, None, None, None).route, Route::Proxy);
+        assert_eq!(r.decide_flow(&page, None, None, true).route, Route::Blocked);
+        // HTTPS to the same place is TCP.
+        assert_eq!(r.decide_flow(&page, None, None, false).route, Route::Proxy);
+        assert_eq!(r.decide(&page, None).route, Route::Proxy);
+        // UDP to another port is not QUIC.
+        let call = Target::Socket("203.0.113.9:3478".parse().unwrap());
+        assert_eq!(r.decide_flow(&call, None, None, true).route, Route::Proxy);
         // A rule above it decides first: the user's own site keeps its way.
         let reddit = Target::Domain {
             host: "www.reddit.com".into(),
             port: 443,
         };
         assert_eq!(
-            r.decide_flow(&reddit, None, None, Some("quic")).route,
+            r.decide_flow(&reddit, None, None, true).route,
             Route::Direct
         );
+        // A network alone is every flow of it.
+        let mut all_udp = rule(Action::Block, "UDP");
+        all_udp.network = vec!["udp".into()];
+        let r = router(vec![all_udp], Action::Proxy);
+        assert_eq!(r.decide_flow(&call, None, None, true).route, Route::Blocked);
+        assert_eq!(r.decide_flow(&page, None, None, false).route, Route::Proxy);
+        // 0.2.6's protocol = ["quic"] is read as the same rule.
+        let mut old = rule(Action::Block, "QUIC");
+        old.protocol = vec!["quic".into()];
+        old.settle_protocol();
+        assert_eq!(
+            (old.network.as_slice(), old.port.as_slice()),
+            (&["udp".to_owned()][..], &["443".to_owned()][..])
+        );
+        assert!(old.protocol.is_empty());
     }
+
+    /// A site's address, learnt by the caller, decides the address rules a
+    /// name alone went past — and is asked for only when one comes before
+    /// the decision. On Android every site arrives by name, and without this
+    /// no `geoip:` rule ever matched a page there.
 
     #[test]
     fn the_local_network_and_ipv6_are_no_reason_to_look_a_site_up() {
@@ -745,13 +783,13 @@ mod tests {
             host: "github.githubassets.com".into(),
             port: 443,
         };
-        assert!(!r.wants_address(&site, None));
+        assert!(!r.wants_address(&site, None, false));
         assert!(!r.has_address_rules());
         // A public block still asks.
         let mut far = rule(Action::Direct, "Сеть");
         far.ip = vec!["203.0.113.0/24".into()];
         let r = router(vec![far], Action::Proxy);
-        assert!(r.wants_address(&site, None));
+        assert!(r.wants_address(&site, None, false));
     }
 
     #[test]
@@ -767,7 +805,7 @@ mod tests {
         };
         let inside: IpAddr = "203.0.113.7".parse().unwrap();
         let outside: IpAddr = "198.51.100.5".parse().unwrap();
-        assert!(r.wants_address(&site, None));
+        assert!(r.wants_address(&site, None, false));
         assert_eq!(
             r.decide_with(&site, Some(inside), None).route,
             Route::Direct
@@ -782,10 +820,10 @@ mod tests {
             host: "kept.example".into(),
             port: 443,
         };
-        assert!(!r.wants_address(&kept, None));
+        assert!(!r.wants_address(&kept, None, false));
         assert_eq!(r.decide_with(&kept, Some(inside), None).route, Route::Proxy);
         // An address is its own answer.
-        assert!(!r.wants_address(&Target::Socket("10.1.2.3:80".parse().unwrap()), None));
+        assert!(!r.wants_address(&Target::Socket("10.1.2.3:80".parse().unwrap()), None, false));
         assert!(r.has_address_rules());
     }
 

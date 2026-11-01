@@ -468,5 +468,23 @@ desktop reads and writes the condition too (rule_text.rs, the table's
 words), and its TUN tells QUIC the same way; the desktop window was
 type-checked against stand-in libraries here, not run.
 
+## 0.2.7: UDP and 443, as other clients write it
+
+The user preferred the rule other clients use to `protocol:quic`: UDP and
+port 443 → block. Rules here match on any one condition, so the network
+became a limit rather than a condition, as in xray: a rule with `network`
+decides only flows of that network, and its other conditions as before.
+The editor chooses it apart from the conditions («Сеть: любая, TCP, UDP»),
+the built-in rule is UDP with port 443, and 0.2.6's `protocol = ["quic"]`
+is read as exactly that and rewritten on the phone's next start.
+
+It also ends an error the user met on 0.2.6: ERR_QUIC_PROTOCOL_ERROR on
+Google. QUIC was told by the Initial packet alone; a refused Initial ended
+its flow, and the 0-RTT and later packets Chrome sent after it came in as
+flows of their own, not Initials, and went through the server — Google
+answered a handshake it never saw. UDP to 443 is refused whatever the
+packet, and the bare-address refusal now knows any QUIC packet by its fixed
+bit (`sniff::looks_like_quic`).
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

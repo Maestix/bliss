@@ -274,7 +274,7 @@ pub fn app_of(rule: &bliss_proto::Rule) -> Option<String> {
         && rule.ip.is_empty()
         && rule.geoip.is_empty()
         && rule.port.is_empty()
-        && rule.protocol.is_empty();
+        && rule.network.is_empty();
     only_app.then(|| rule.process[0].clone())
 }
 
@@ -338,7 +338,12 @@ pub fn conditions(rule: &bliss_proto::Rule) -> String {
     parts.extend(rule.geoip.iter().map(|g| format!("geoip:{g}")));
     parts.extend(rule.port.iter().map(|p| format!("port:{p}")));
     parts.extend(rule.process.iter().map(|p| format!("app:{p}")));
-    parts.extend(rule.protocol.iter().map(|p| p.to_ascii_uppercase()));
+    // The limit last, as «только UDP».
+    parts.extend(
+        rule.network
+            .iter()
+            .map(|n| format!("только {}", n.to_ascii_uppercase())),
+    );
     parts.join(" · ")
 }
 
