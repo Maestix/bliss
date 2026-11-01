@@ -1977,6 +1977,20 @@ aws-lc-rs's `prebuilt-nasm` covers NASM), run it with the config `bliss-xray`
 generates against the user's server, and compare memory and throughput with
 xray.exe. Downloading it needs the user's go-ahead.
 
+Its ClientHello was read on 1 November (v0.8.1, at the user's ask; source
+only, nothing built or run). It matches Go uTLS byte for byte by its own
+oracle, and the JA4 computed from its committed `chrome` hello is
+`t13d1516h2_8daaf6152771_d8a2da3f94cd`, xray's own for Chrome 133. But
+every profile pins one extension order and one pair of GREASE values
+(`0x0a0a`, `0x1a1a`) for every connection — the draw uTLS makes from a
+zeroed random source, which its oracle uses — where Chrome and uTLS
+(`ShuffleChromeTLSExtensions`, a GREASE seed per connection) draw anew
+each time. JA4 cannot see that; JA3 and anyone watching a few
+connections can, and every install shares the one draw. Its test
+`every_fingerprint_emits_a_stable_extension_order` holds the wrong belief
+that no real client reorders. Until that changes, xray stays: the user is
+glad bliss runs the original rather than a reimplementation.
+
 **Stage 3 (native stack) — set up before writing code.** A REALITY
 authentication failure is silent: the server just serves the real site. Stand up
 a private Xray server with `show: true` and `loglevel: debug` first. Use the
