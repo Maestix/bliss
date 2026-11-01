@@ -54,6 +54,11 @@ pub struct Carrying {
     /// Sites' real addresses, learnt through the tunnel where `names` hands
     /// out the pool's: what `geoip:` and subnet rules decide a site by.
     pub addresses: Arc<Addresses>,
+    /// Refuse QUIC that would go through the server, so programs use TCP:
+    /// QUIC through a proxy is UDP inside the tunnel, which some servers
+    /// drop (Vision rejects UDP to 443) and some carry badly, and a page
+    /// waits on it. Switched while traffic runs.
+    pub block_quic: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long a connection waits to learn its program from the system.
@@ -70,6 +75,7 @@ impl Carrying {
             names: None,
             owner: None,
             addresses: Arc::new(Addresses::new()),
+            block_quic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -221,12 +227,15 @@ impl Carrying {
         }
         static IDS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0x5a17);
         let id = IDS.fetch_add(0x9e37, std::sync::atomic::Ordering::Relaxed);
-        let asked = async {
+        let query = crate::names::query_a(id, name);
+        // Over UDP first, the cheap way; over TCP when the server carries no
+        // UDP or loses it, which a server with Vision does for some ports.
+        let over_udp = async {
             let upstream = self
                 .serving
                 .bind_tunnelled(Route::Proxy, &Target::Socket(UPSTREAM_DNS))
                 .await?;
-            upstream.send(&crate::names::query_a(id, name)).await?;
+            upstream.send(&query).await?;
             let mut back = vec![0u8; 1500];
             loop {
                 let got = upstream.recv(&mut back).await?;
@@ -237,13 +246,38 @@ impl Carrying {
                 }
             }
         };
-        match tokio::time::timeout(LOOKUP_WAIT, asked).await {
-            Ok(Ok(ip)) => {
+        let over_tcp = async {
+            use tokio::io::AsyncReadExt;
+            let mut upstream = self
+                .serving
+                .dial_tunnelled(Route::Proxy, &Target::Socket(UPSTREAM_DNS))
+                .await?;
+            let mut framed = (query.len() as u16).to_be_bytes().to_vec();
+            framed.extend_from_slice(&query);
+            upstream.write_all(&framed).await?;
+            let mut len = [0u8; 2];
+            upstream.read_exact(&mut len).await?;
+            let mut back = vec![0u8; usize::from(u16::from_be_bytes(len))];
+            upstream.read_exact(&mut back).await?;
+            io::Result::Ok(crate::names::first_a(&back, id))
+        };
+        let found = match tokio::time::timeout(ADDRESS_WAIT, over_udp).await {
+            Ok(Ok(ip)) => Some(ip),
+            _ => tokio::time::timeout(ADDRESS_WAIT, over_tcp)
+                .await
+                .ok()
+                .and_then(Result::ok),
+        };
+        match found {
+            Some(ip) => {
                 self.addresses.put(name, ip);
                 ip
             }
-            // Not remembered: the next connection asks again.
-            _ => None,
+            None => {
+                tracing::debug!("tun: no address learnt for {name}; deciding by its name");
+                self.addresses.failed(name);
+                None
+            }
         }
     }
 }
@@ -444,7 +478,14 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
             Ok(addr) => dial_direct(addr, *gateway).await,
             Err(e) => Err(e),
         },
-        (route, _) => serving.dial_tunnelled(route, &target).await,
+        // Through the tunnel to the very address too: the name only explains
+        // it, and a name read out of a ClientHello can be an outer one (ECH)
+        // that resolves elsewhere.
+        (route, Some(ip)) => {
+            let at = Target::Socket(SocketAddr::new(ip, target.port()));
+            serving.dial_tunnelled(route, &at).await
+        }
+        (route, None) => serving.dial_tunnelled(route, &target).await,
     };
     let mut upstream = match upstream {
         Ok(upstream) => upstream,
@@ -541,19 +582,18 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     };
     let mut client = client;
     let mut first = Vec::new();
-    if carrying.names.is_some()
-        && let Target::Socket(addr) = target
-        && addr.port() == 443
-    {
-        // QUIC to a bare address: its name is sealed, so the rules could see
-        // only the address. Refused, the program falls back to TCP, whose
-        // name `carry` reads.
+    let mut quic = false;
+    if carrying.names.is_some() && target.port() == 443 {
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 2048];
         if let Ok(n) = client.read(&mut buf).await {
             first.extend_from_slice(&buf[..n]);
         }
-        if sniff::is_quic_initial(&first) {
+        quic = sniff::is_quic_initial(&first);
+        // QUIC to a bare address: its name is sealed, so the rules could see
+        // only the address. Refused, the program falls back to TCP, whose
+        // name `carry` reads.
+        if quic && let Target::Socket(addr) = target {
             tracing::debug!("tun: QUIC to bare {addr} refused, for TCP to name the site");
             return Ok(());
         }
@@ -561,7 +601,18 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let process = carrying
         .program(false, client.local_addr(), client.peer_addr())
         .await;
-    let decision = carrying.decide(&target, None, process.as_deref()).await;
+    let mut decision = carrying.decide(&target, None, process.as_deref()).await;
+    if quic
+        && decision.route == Route::Proxy
+        && carrying
+            .block_quic
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        decision = Decision {
+            route: Route::Blocked,
+            rule: "QUIC через сервер — открыть по TCP".to_owned(),
+        };
+    }
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: udp {target} blocked by {}", decision.rule);
@@ -621,6 +672,8 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
 /// Where the lookups `names` does not answer itself go: through the tunnel.
 const UPSTREAM_DNS: SocketAddr =
     SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53);
+/// How long each way of learning a site's address is waited on.
+const ADDRESS_WAIT: Duration = Duration::from_millis(1500);
 /// How long a flow of lookups may stay quiet, and one lookup may take.
 const LOOKUP_IDLE: Duration = Duration::from_secs(30);
 const LOOKUP_WAIT: Duration = Duration::from_secs(5);
@@ -1167,7 +1220,7 @@ mod tests {
             action: bliss_proto::Action::Direct,
             ..bliss_proto::Rule::default()
         };
-        lan.ip = vec!["10.0.0.0/8".to_owned()];
+        lan.ip = vec!["203.0.113.0/24".to_owned()];
         let routing = bliss_proto::Routing {
             fallback: bliss_proto::Action::Proxy,
             rules: vec![lan],
@@ -1191,10 +1244,11 @@ mod tests {
         // As if learnt through the tunnel already.
         carrying
             .addresses
-            .put("nas.example", Some(std::net::Ipv4Addr::new(10, 1, 2, 3)));
-        carrying
-            .addresses
-            .put("far.example", Some(std::net::Ipv4Addr::new(203, 0, 113, 5)));
+            .put("nas.example", Some(std::net::Ipv4Addr::new(203, 0, 113, 7)));
+        carrying.addresses.put(
+            "far.example",
+            Some(std::net::Ipv4Addr::new(198, 51, 100, 5)),
+        );
         let site = |host: &str| Target::Domain {
             host: host.to_owned(),
             port: 443,
@@ -1222,6 +1276,67 @@ mod tests {
                 .route,
             Route::Proxy
         );
+    }
+
+    /// QUIC that would go through the server is refused while the switch is
+    /// on — and shown so in the table — so the program opens the page over
+    /// TCP; off, it is carried. The user found parts of GitHub not loading.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quic_through_the_server_is_refused_when_asked() {
+        use tokio::io::AsyncWriteExt;
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().expect("an address"),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::proxy_everything()),
+        ));
+        let names = Arc::new(FakeNames::new());
+        let mut carrying = Carrying::new(Arc::clone(&serving), Gateway::for_tests());
+        carrying.names = Some(("172.19.0.2:53".parse().unwrap(), Arc::clone(&names)));
+        let block = Arc::clone(&carrying.block_quic);
+        block.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (mut phone, device) = tokio::io::duplex(256 * 1024);
+        let stack = tokio::spawn(serve(device, Arc::new(carrying)));
+
+        // An address from the pool, as the phone's lookup would get it.
+        let site = SocketAddr::new(
+            IpAddr::V4(names.address_for("github.githubassets.com")),
+            443,
+        );
+        let mut initial = vec![0u8; 1200];
+        initial[0] = 0xc3;
+        initial[1..5].copy_from_slice(&1u32.to_be_bytes());
+
+        let app: SocketAddr = "172.19.0.1:41000".parse().unwrap();
+        phone
+            .write_all(&udp_packet(app, site, &initial))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let rows = serving.tracker.table();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].target, "github.githubassets.com:443");
+        assert_eq!(rows[0].route, Route::Blocked);
+
+        // Off: carried towards the server, which here refuses the association.
+        block.store(false, std::sync::atomic::Ordering::Relaxed);
+        let app: SocketAddr = "172.19.0.1:41001".parse().unwrap();
+        phone
+            .write_all(&udp_packet(app, site, &initial))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let rows = serving.tracker.table();
+        assert!(rows.iter().all(|r| r.route == Route::Blocked), "{rows:?}");
+        assert_eq!(rows.len(), 1, "the second flow was not refused as QUIC");
+        stack.abort();
     }
 
     #[cfg(target_os = "linux")]

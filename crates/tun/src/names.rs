@@ -240,12 +240,17 @@ impl Query {
 /// the oldest is forgotten first.
 pub const ADDRESSES: usize = 4_096;
 const ADDRESS_LIFE: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a name nothing could be learnt about is left alone: long enough
+/// that a page's many connections to it do not each wait on the tunnel's DNS
+/// again, short enough that a hiccup does not last.
+const FAILURE_LIFE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Sites' real addresses, learnt through the tunnel for the rules that look
 /// at addresses (`geoip:`, a subnet): the pool's address says nothing about
 /// a site's country. `None` remembers a name that has no IPv4 address.
 #[derive(Default)]
 pub struct Addresses {
+    /// The address, and until when it is good.
     known: Mutex<HashMap<String, (Option<Ipv4Addr>, std::time::Instant)>>,
 }
 
@@ -260,14 +265,24 @@ impl Addresses {
         let known = self.known.lock().expect("addresses lock");
         known
             .get(name)
-            .filter(|(_, at)| at.elapsed() < ADDRESS_LIFE)
+            .filter(|(_, until)| std::time::Instant::now() < *until)
             .map(|(ip, _)| *ip)
     }
 
     pub fn put(&self, name: &str, ip: Option<Ipv4Addr>) {
+        self.keep(name, ip, ADDRESS_LIFE);
+    }
+
+    /// Nothing could be learnt about the name: asked again only after a minute.
+    pub fn failed(&self, name: &str) {
+        self.keep(name, None, FAILURE_LIFE);
+    }
+
+    fn keep(&self, name: &str, ip: Option<Ipv4Addr>, life: std::time::Duration) {
+        let now = std::time::Instant::now();
         let mut known = self.known.lock().expect("addresses lock");
         if known.len() >= ADDRESSES && !known.contains_key(name) {
-            known.retain(|_, (_, at)| at.elapsed() < ADDRESS_LIFE);
+            known.retain(|_, (_, until)| now < *until);
             if known.len() >= ADDRESSES
                 && let Some(oldest) = known
                     .iter()
@@ -277,7 +292,7 @@ impl Addresses {
                 known.remove(&oldest);
             }
         }
-        known.insert(name.to_owned(), (ip, std::time::Instant::now()));
+        known.insert(name.to_owned(), (ip, now + life));
     }
 
     pub fn len(&self) -> usize {

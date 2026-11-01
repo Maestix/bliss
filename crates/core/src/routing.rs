@@ -138,6 +138,30 @@ impl Cidr {
         (prefix <= width).then_some(Self { net, prefix })
     }
 
+    /// Whether a public IPv4 address could fall in this block: false for a
+    /// v6 block (a site's address is looked up as IPv4 only) and for one
+    /// wholly inside the private and special ranges, where public DNS sends
+    /// no site.
+    fn may_hold_a_site(&self) -> bool {
+        const PRIVATE: [(u32, u8); 8] = [
+            (0x0000_0000, 8),  // 0.0.0.0/8
+            (0x0a00_0000, 8),  // 10.0.0.0/8
+            (0x6440_0000, 10), // 100.64.0.0/10
+            (0x7f00_0000, 8),  // 127.0.0.0/8
+            (0xa9fe_0000, 16), // 169.254.0.0/16
+            (0xac10_0000, 12), // 172.16.0.0/12
+            (0xc0a8_0000, 16), // 192.168.0.0/16
+            (0xe000_0000, 3),  // multicast and reserved, 224.0.0.0/3
+        ];
+        let IpAddr::V4(net) = self.net else {
+            return false;
+        };
+        let net = u32::from(net);
+        !PRIVATE
+            .iter()
+            .any(|&(range, prefix)| self.prefix >= prefix && masked_v4(net, prefix) == range)
+    }
+
     fn contains(&self, ip: IpAddr) -> bool {
         match (self.net, ip) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
@@ -181,6 +205,11 @@ struct Compiled {
     /// The geoip countries it names, as written, apart from `private`: for
     /// saying why a site went past it, never for deciding.
     countries: Vec<String>,
+    /// Whether a site's public IPv4 address could meet one of its address
+    /// conditions: a country, or a block outside the private and special
+    /// ranges. «Локальная сеть» and the IPv6 refusal cannot, and are no
+    /// reason to look a site's address up (`Router::wants_address`).
+    sees_sites: bool,
 }
 
 impl Compiled {
@@ -332,6 +361,7 @@ impl Router {
                     .filter(|country| !country.eq_ignore_ascii_case("private"))
                     .cloned()
                     .collect(),
+                sees_sites: false,
             };
 
             for raw in &rule.ip {
@@ -385,6 +415,8 @@ impl Router {
                 warnings.push(blind_warning(&where_, &blind, names.as_ref()));
             }
 
+            compiled.sees_sites = !compiled.countries.is_empty()
+                || compiled.cidrs.iter().any(|cidr| cidr.may_hold_a_site());
             rules.push(compiled);
         }
 
@@ -459,18 +491,16 @@ impl Router {
             if rule.matches(&host, None, port, process) {
                 return false;
             }
-            if !rule.cidrs.is_empty() || !rule.ips.is_empty() {
+            if rule.sees_sites {
                 return true;
             }
         }
         false
     }
 
-    /// Whether any rule looks at addresses at all.
+    /// Whether any rule could decide a site by its public address.
     pub fn has_address_rules(&self) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| !rule.cidrs.is_empty() || !rule.ips.is_empty())
+        self.rules.iter().any(|rule| rule.sees_sites)
     }
 
     pub fn rule_count(&self) -> usize {
@@ -629,18 +659,50 @@ mod tests {
     /// the decision. On Android every site arrives by name, and without this
     /// no `geoip:` rule ever matched a page there.
     #[test]
+    fn the_local_network_and_ipv6_are_no_reason_to_look_a_site_up() {
+        // The phone's first rule, a user's site rule, and the IPv6 refusal
+        // the phone adds last: none of them can meet a site's public IPv4
+        // address, so no site is looked up for them. 0.2.3 looked every
+        // site up, and each new name waited on it (GitHub's assets, the user's
+        // report).
+        let mut lan = rule(Action::Direct, "Локальная сеть");
+        lan.ip = vec![
+            "10.0.0.0/8".into(),
+            "192.168.0.0/16".into(),
+            "fe80::/10".into(),
+        ];
+        lan.geoip = vec!["private".into()];
+        let mut sites = rule(Action::Direct, "Reddit");
+        sites.domain = vec!["reddit.com".into()];
+        let mut v6 = rule(Action::Block, "IPv6");
+        v6.ip = vec!["::/0".into()];
+        let r = router(vec![lan, sites, v6], Action::Proxy);
+        let site = Target::Domain {
+            host: "github.githubassets.com".into(),
+            port: 443,
+        };
+        assert!(!r.wants_address(&site, None));
+        assert!(!r.has_address_rules());
+        // A public block still asks.
+        let mut far = rule(Action::Direct, "Сеть");
+        far.ip = vec!["203.0.113.0/24".into()];
+        let r = router(vec![far], Action::Proxy);
+        assert!(r.wants_address(&site, None));
+    }
+
+    #[test]
     fn a_resolved_site_meets_the_address_rules() {
         let mut named = rule(Action::Proxy, "Сайт");
         named.domain = vec!["kept.example".into()];
         let mut lan = rule(Action::Direct, "Сеть");
-        lan.ip = vec!["10.0.0.0/8".into()];
+        lan.ip = vec!["203.0.113.0/24".into()];
         let r = router(vec![named, lan], Action::Proxy);
         let site = Target::Domain {
             host: "shop.example".into(),
             port: 443,
         };
-        let inside: IpAddr = "10.1.2.3".parse().unwrap();
-        let outside: IpAddr = "203.0.113.5".parse().unwrap();
+        let inside: IpAddr = "203.0.113.7".parse().unwrap();
+        let outside: IpAddr = "198.51.100.5".parse().unwrap();
         assert!(r.wants_address(&site, None));
         assert_eq!(
             r.decide_with(&site, Some(inside), None).route,

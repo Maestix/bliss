@@ -1536,7 +1536,14 @@ table.
   such a rule comes before the decision (`Router::wants_address`), the
   stack asks 1.1.1.1 through the tunnel for the site's address — never the
   phone's network — keeps it ten minutes (`names::Addresses`, 4 096 at
-  most), and decides by both (`decide_with`); a table built with
+  most; a name nothing could be learnt about, a minute), and decides by both
+  (`decide_with`). Only a rule that could meet a site's public IPv4
+  address counts (`sees_sites`): a country, or a block outside the private
+  and special ranges. 0.2.3 counted «Локальная сеть» and the IPv6 refusal
+  too, so nearly every site was looked up and, on a server that lost the
+  UDP, waited five seconds for it — the user found parts of GitHub not
+  loading (`the_local_network_and_ipv6_are_no_reason_to_look_a_site_up`).
+  The lookup goes over UDP, then TCP, 1.5 s each. A table built with
   `build_resolving` gives no warning that a country rule cannot see sites.
   A connection that still arrives as a bare address there — a «Частный
   DNS», a browser's own DNS over HTTPS, an address the app kept — is asked
@@ -1544,7 +1551,11 @@ table.
   and 8080, up to 16 KB and 400 ms, for a ClientHello's `server_name` or a
   request's `Host:`, then dialled straight to the address it chose or by the
   name through the tunnel, the bytes read passed on first. QUIC to a bare
-  address is refused, so the program falls back to that TCP. And there,
+  address is refused, so the program falls back to that TCP. So is QUIC that
+  would go through the server, while «Блокировать QUIC через сервер» is on
+  (the default, `Carrying::block_quic`): QUIC is UDP inside the tunnel,
+  which Vision drops on 443 and other servers carry badly
+  (`quic_through_the_server_is_refused_when_asked`). And there,
   unlike the desktop, a rule change ends the open connections the new table
   sends elsewhere (`until_rerouted`, `Serving::router_changes`): an app
   keeps its connections for minutes, and the user's `geosite:reddit` rule
