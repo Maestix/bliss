@@ -291,7 +291,7 @@ private fun RuleList(frame: Frame, c: Commands, open: (Sheet) -> Unit) {
 // --- the editor ----------------------------------------------------------------
 
 /** What kind of condition the add row is asking for. */
-private enum class Adding { None, Site, App, Sites, Country, Address }
+private enum class Adding { None, Site, App, Sites, Country, Address, Quic }
 
 /**
  * A rule's editor: a name, where it sends, and its conditions as chips
@@ -357,15 +357,21 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                     Row(Modifier.padding(top = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for ((kind, word) in listOf(Adding.Site to "+ Сайт", Adding.App to "+ Приложение",
                             Adding.Sites to "+ Список сайтов", Adding.Country to "+ Страна",
-                            Adding.Address to "+ Адрес или порт")) {
-                            Chip(word, adding == kind) { adding = if (adding == kind) Adding.None else kind }
+                            Adding.Address to "+ Адрес или порт", Adding.Quic to "+ QUIC")) {
+                            Chip(word, adding == kind) {
+                                // QUIC has one value and nothing to choose: added on the tap.
+                                if (kind == Adding.Quic) {
+                                    if ("protocol:quic" !in lines) lines.add("protocol:quic")
+                                    adding = Adding.None
+                                } else adding = if (adding == kind) Adding.None else kind
+                            }
                         }
                     }
                 }
                 item {
                     val add = { value: String -> if (value.isNotBlank() && value !in lines) lines.add(value.trim()); adding = Adding.None }
                     when (adding) {
-                        Adding.None -> {}
+                        Adding.None, Adding.Quic -> {}
                         Adding.Site -> Entry("example.com — и всё под ним", add)
                         Adding.Address -> Entry("1.2.3.4, 10.0.0.0/8 или port:443", add)
                         Adding.App -> AppPicker { add("app:$it") }
@@ -393,6 +399,7 @@ private fun Condition(line: String, remove: () -> Unit) {
         line.startsWith("app:") -> "📱 " + Apps.label(context, line.removePrefix("app:"))
         line.startsWith("process:") -> "📱 " + Apps.label(context, line.removePrefix("process:"))
         line.startsWith("geoip:") -> geoipLabel(line.removePrefix("geoip:"))
+        line.equals("protocol:quic", ignoreCase = true) -> "⚡ QUIC"
         line.startsWith("geosite:") -> "🗂 " + line.removePrefix("geosite:")
         else -> line
     }
