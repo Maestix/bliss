@@ -1537,7 +1537,19 @@ table.
   stack asks 1.1.1.1 through the tunnel for the site's address — never the
   phone's network — keeps it ten minutes (`names::Addresses`, 4 096 at
   most), and decides by both (`decide_with`); a table built with
-  `build_resolving` gives no warning that a country rule cannot see sites. While the adapter is on, the routing screen names the rules this silences
+  `build_resolving` gives no warning that a country rule cannot see sites.
+  A connection that still arrives as a bare address there — a «Частный
+  DNS», a browser's own DNS over HTTPS, an address the app kept — is asked
+  for its name instead (`sniff.rs`): the first bytes on ports 443, 80, 8443
+  and 8080, up to 16 KB and 400 ms, for a ClientHello's `server_name` or a
+  request's `Host:`, then dialled straight to the address it chose or by the
+  name through the tunnel, the bytes read passed on first. QUIC to a bare
+  address is refused, so the program falls back to that TCP. And there,
+  unlike the desktop, a rule change ends the open connections the new table
+  sends elsewhere (`until_rerouted`, `Serving::router_changes`): an app
+  keeps its connections for minutes, and the user's `geosite:reddit` rule
+  read as one that did not work (`a_bare_address_is_decided_by_the_name_it_says`,
+  seen failing with the reroute taken out). While the adapter is on, the routing screen names the rules this silences
   (`blind_under_tun`): the ones whose only conditions are domains and geosite
   sets. A rule that also has an address, a port or a program still decides
   with those, so it is left out rather than buried in the list. The user's own

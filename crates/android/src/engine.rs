@@ -1898,6 +1898,69 @@ mod tests {
         assert_eq!(decision.route, Route::Proxy);
     }
 
+    /// A rule made in the editor, as the user made it, against real rule
+    /// sets (`BLISS_GEO_DIR`): `geosite:reddit` sends Reddit's names
+    /// straight, through the phone's own table with its first rules.
+    #[test]
+    #[ignore]
+    fn an_editor_rule_decides_by_real_rule_sets() {
+        let geo = PathBuf::from(std::env::var("BLISS_GEO_DIR").expect("BLISS_GEO_DIR"));
+        let dir = std::env::temp_dir().join(format!("bliss-android-geo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["geoip.dat", "geosite.dat"] {
+            std::fs::copy(geo.join(name), dir.join(name)).unwrap();
+        }
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        engine.ui(UiCommand::SaveRule {
+            index: None,
+            name: "Reddit".to_owned(),
+            action: "direct".to_owned(),
+            text: "geosite:reddit".to_owned(),
+        });
+        eprintln!(
+            "rules: {:?}",
+            engine
+                .profile
+                .routing
+                .rules
+                .iter()
+                .map(|r| (&r.name, r.action, &r.geosite))
+                .collect::<Vec<_>>()
+        );
+        eprintln!("warnings: {:?}", engine.warnings);
+        let router = engine.router();
+        for host in [
+            "www.reddit.com",
+            "reddit.com",
+            "i.redd.it",
+            "www.redditstatic.com",
+            "gql.reddit.com",
+            "v.redd.it",
+            "preview.redd.it",
+            "external-preview.redd.it",
+            "styles.redditmedia.com",
+        ] {
+            let target = Target::Domain {
+                host: host.to_owned(),
+                port: 443,
+            };
+            let d = router.decide_with(&target, Some("151.101.1.140".parse().unwrap()), None);
+            eprintln!("{host}: {:?} by {}", d.route, d.rule);
+            assert_eq!(d.route, Route::Direct, "{host}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn ipv6_is_refused_rather_than_leaked() {
         let (tx, _rx) = mpsc::unbounded_channel();

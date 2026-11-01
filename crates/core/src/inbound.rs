@@ -60,6 +60,9 @@ pub struct Serving {
     /// Behind a lock so the rules can change under live traffic; see
     /// `set_router`.
     router: RwLock<Arc<Router>>,
+    /// Counts the tables handed over, for an inbound that reconsiders the
+    /// connections it holds when the rules change (`router_changes`).
+    changes: tokio::sync::watch::Sender<u64>,
     /// Where `Route::Vpn` goes: set while the VPN is connected and cleared
     /// when it is not, so a connection meant for it is refused rather than
     /// sent some other way.
@@ -72,6 +75,7 @@ impl Serving {
             outbound,
             tracker,
             router: RwLock::new(router),
+            changes: tokio::sync::watch::Sender::new(0),
             vpn: RwLock::new(None),
         }
     }
@@ -135,6 +139,15 @@ impl Serving {
     /// not per packet, for as long as cloning an `Arc` takes.
     pub fn set_router(&self, router: Arc<Router>) {
         *self.router.write().expect("router lock") = router;
+        self.changes.send_modify(|n| *n += 1);
+    }
+
+    /// Hears every `set_router`. The desktop's inbounds leave open
+    /// connections as they were; Android's TUN ends those the new table would
+    /// send elsewhere, since an app keeps its connections for minutes and a
+    /// rule that changed nothing until then reads as a rule that does not work.
+    pub fn router_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 }
 
