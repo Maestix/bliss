@@ -7,6 +7,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,9 +33,11 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -256,6 +259,55 @@ fun pingText(row: ServerRow): String = when (row.ping) {
     "udp" -> "UDP"
     "probing" -> "…"
     else -> "—"
+}
+
+/**
+ * Whether a server takes you somewhere: a page fetched through it, timed.
+ * Under half a second is good, under one and a half usable.
+ */
+fun checkColor(row: ServerRow): Color = when (row.check) {
+    "ok" -> when {
+        (row.checkMs ?: 0) < 500 -> C.Good
+        (row.checkMs ?: 0) < 1500 -> C.Violet300
+        else -> C.N400
+    }
+    "down" -> C.BlockText
+    else -> C.N500
+}
+
+fun checkText(row: ServerRow): String = when (row.check) {
+    "ok" -> "${row.checkMs} мс"
+    "down" -> "нет доступа"
+    "probing" -> "проверка…"
+    else -> ""
+}
+
+/** The download rate over the last seconds: a line and a soft fill; flat and dim while off. */
+@Composable
+fun RateChart(history: List<Long>, active: Boolean, modifier: Modifier) {
+    Canvas(modifier) {
+        val tone = if (active) C.Accent else C.N700
+        if (history.size < 2 || !active) {
+            drawLine(tone, Offset(0f, size.height - 1f), Offset(size.width, size.height - 1f), strokeWidth = 1.5.dp.toPx())
+            return@Canvas
+        }
+        val top = (history.maxOrNull() ?: 1L).coerceAtLeast(1L).toFloat()
+        val step = size.width / (history.size - 1)
+        val points = history.mapIndexed { i, v -> Offset(i * step, size.height - v / top * size.height * 0.9f - 1f) }
+        val line = Path().apply {
+            moveTo(points[0].x, points[0].y)
+            for (i in 1 until points.size) {
+                val a = points[i - 1]; val b = points[i]
+                // Control points at the samples' own heights: the curve never
+                // overshoots, so it never dips below zero beside a burst.
+                val mid = (a.x + b.x) / 2
+                cubicTo(mid, a.y, mid, b.y, b.x, b.y)
+            }
+        }
+        val fill = Path().apply { addPath(line); lineTo(size.width, size.height); lineTo(0f, size.height); close() }
+        drawPath(fill, Brush.verticalGradient(listOf(tone.copy(alpha = 0.30f), tone.copy(alpha = 0.02f))))
+        drawPath(line, tone, style = Stroke(width = 1.8.dp.toPx()))
+    }
 }
 
 fun bytes(n: Long): String = when {

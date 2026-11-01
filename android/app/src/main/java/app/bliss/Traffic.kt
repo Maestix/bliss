@@ -64,7 +64,7 @@ fun Traffic(frame: Frame, c: Commands, back: () -> Unit) {
                 Spacer(Modifier.width(14.dp))
                 Text("↑ ${rate(frame.numbers.upRate)}", style = T.body.copy(color = C.N400))
             }
-            Chart(frame.history, Modifier.padding(vertical = 10.dp).fillMaxWidth().height(56.dp))
+            RateChart(frame.history, active = true, modifier = Modifier.padding(vertical = 10.dp).fillMaxWidth().height(56.dp))
             Text("за сессию ↓ ${bytes(frame.numbers.downTotal)} · ↑ ${bytes(frame.numbers.upTotal)}" +
                 (frame.numbers.latency?.let { " · задержка $it мс" } ?: ""), style = T.tiny.copy(fontSize = 12.5.sp))
         }
@@ -118,24 +118,3 @@ fun Traffic(frame: Frame, c: Commands, back: () -> Unit) {
     }
 }
 
-/** The download rate over the last seconds: a line and a soft fill. */
-@Composable
-private fun Chart(history: List<Long>, modifier: Modifier) {
-    Canvas(modifier) {
-        if (history.size < 2) return@Canvas
-        val top = (history.maxOrNull() ?: 1L).coerceAtLeast(1L).toFloat()
-        val step = size.width / (history.size - 1)
-        val points = history.mapIndexed { i, v -> Offset(i * step, size.height - v / top * size.height * 0.9f - 1f) }
-        val line = Path().apply {
-            moveTo(points[0].x, points[0].y)
-            for (i in 1 until points.size) {
-                val a = points[i - 1]; val b = points[i]
-                val mid = (a.x + b.x) / 2
-                cubicTo(mid, a.y, mid, b.y, b.x, b.y)
-            }
-        }
-        val fill = Path().apply { addPath(line); lineTo(size.width, size.height); lineTo(0f, size.height); close() }
-        drawPath(fill, Brush.verticalGradient(listOf(C.Accent.copy(alpha = 0.30f), C.Accent.copy(alpha = 0.02f))))
-        drawPath(line, C.Accent, style = Stroke(width = 1.8.dp.toPx()))
-    }
-}
