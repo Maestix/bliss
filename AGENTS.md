@@ -91,9 +91,9 @@ The long-form plan, in Russian, lives outside the repo at
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`); leaving by one interface (`interface.rs`), dialling through one — the VPN's — with its own DNS servers (`through.rs`, `dns.rs`) |
 | `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service and, on Linux, `pkexec` (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision tied to bliss's life — a Job Object, on Linux the parent-death signal (`job.rs`) — GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
-| `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`; Linux's own TUN device, `linux_device.rs`), the machine's addresses and routes (`net.rs`; over netlink, `linux_net.rs`), and packets turned into connections and flows (`stack.rs`); `tests/netns.rs` carries a connection and a datagram through Linux's device in a namespace of its own (§2) |
+| `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`; Linux's own TUN device, `linux_device.rs`), the machine's addresses and routes (`net.rs`; over netlink, `linux_net.rs`), packets turned into connections and flows (`stack.rs`), and the lookups answered with addresses read back as names, where bliss is the DNS server (`names.rs`, Android's only so far); `tests/netns.rs` carries a connection and a datagram through Linux's device in a namespace of its own (§2) |
 | `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), Linux's tray (`tray_linux.rs`) and single window (`instance.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with the session (`startup.rs`), log ring buffer (`logs.rs`), clipboard, the stand-ins that keep libxdo out of Linux's binary (`no_xdo.rs`, guarded by `tests/libraries.rs`) |
-| `crates/android` | `bliss-android` | the tunnel's engine on Android, `libbliss.so`: its own loop (`engine.rs`), the JSON-lines socket the screens use (`protocol.rs`, `tests/socket.rs`), the three JNI calls (`android.rs`); the app around it is the Gradle project in `android/` (docs/android-stack.md) |
+| `crates/android` | `bliss-android` | the tunnel's engine on Android, `libbliss.so`: its own loop (`engine.rs`), the JSON-lines socket the screens use (`protocol.rs`, `tests/socket.rs`), the three JNI calls and the one back, `ownerOf` (`android.rs`), the rule sets fetched from GitHub (`geo.rs`), and the desktop's `subscription.rs` and `rule_text.rs` by `#[path]`; the app around it is the Gradle project in `android/` (docs/android-stack.md) |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
@@ -1529,8 +1529,10 @@ table.
   is gone by the time a packet exists, so `domain` and `geosite` rules do not
   match TUN traffic at all; `ip`, `geoip`, `port` and `process` do. Answering
   the DNS query and handing out an address bliss can recognise again — fake-IP
-  — is what makes the rest of the rules work, and it is not written yet.
-  While the adapter is on, the routing screen names the rules this silences
+  — is what makes the rest of the rules work. It exists on Android only
+  (`names.rs`, given to the stack as `Carrying::names`), where the VPN
+  service names bliss's own DNS address; the desktop's adapter does not
+  answer DNS yet. While the adapter is on, the routing screen names the rules this silences
   (`blind_under_tun`): the ones whose only conditions are domains and geosite
   sets. A rule that also has an address, a port or a program still decides
   with those, so it is left out rather than buried in the list. The user's own
@@ -1934,7 +1936,8 @@ real download from GitHub through it has not been made.
 
 **Linux, ported on 9 October:** see §12.
 
-**Android, designed on 31 October — a design, no code:**
+**Android, designed on 31 October, built from 1 November** (the history
+is in docs/android-stack.md; what follows is the plan as it stood):
 `docs/android-design.md`, beside a canvas of clickable mockups on claude.ai.
 Before it can be built it needs names for domain rules under a VPN service
 (fake-IP through the service's own DNS), OpenVPN inside bliss's service

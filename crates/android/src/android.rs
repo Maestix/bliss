@@ -1,14 +1,17 @@
 //! The calls the Kotlin side makes into the engine (`app.bliss.Native`).
 //!
-//! Three, and nothing else crosses JNI: everything the screens need goes over
-//! the engine's socket instead (engine.rs), so the screens' process never
-//! loads this library at all.
+//! Three, and one call back: everything the screens need goes over the
+//! engine's socket instead (engine.rs), so the screens' process never loads
+//! this library at all. The call back is `Native.ownerOf`, which asks Android
+//! whose a connection is (`owner_of`).
 
+use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-use jni::JNIEnv;
-use jni::objects::{JClass, JString};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::{JNIEnv, JavaVM};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use jni::sys::{jboolean, jint, jlong};
@@ -24,7 +27,7 @@ fn string(env: &mut JNIEnv, value: &JString) -> Option<String> {
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_bliss_Native_start(
     mut env: JNIEnv,
-    _class: JClass,
+    class: JClass,
     files: JString,
     libs: JString,
     socket: JString,
@@ -36,6 +39,11 @@ pub extern "system" fn Java_app_bliss_Native_start(
     ) else {
         return 0;
     };
+    // Kept for the call back: a thread the engine made finds no app class by
+    // name, so the class is held from here, where the app called in.
+    if let (Ok(vm), Ok(class)) = (env.get_java_vm(), env.new_global_ref(&class)) {
+        let _ = JAVA.set((vm, class));
+    }
     let paths = Paths {
         files: PathBuf::from(files),
         libs: PathBuf::from(libs),
@@ -83,4 +91,43 @@ pub extern "system" fn Java_app_bliss_Native_disconnect(_env: JNIEnv, _class: JC
             .commands
             .send(Cmd::Ui(crate::protocol::UiCommand::Disconnect));
     }
+}
+
+static JAVA: OnceLock<(JavaVM, GlobalRef)> = OnceLock::new();
+
+/// The package behind a connection through the TUN, asked of Android
+/// (`ConnectivityManager.getConnectionOwnerUid`, which answers only the
+/// VPN's own app — the service). Blocking: a call into the system.
+pub fn owner_of(tcp: bool, local: SocketAddr, remote: SocketAddr) -> Option<String> {
+    let (vm, class) = JAVA.get()?;
+    // Attached for this call and detached after: the threads asking come
+    // and go, and one that ended attached would take the process with it.
+    let mut env = vm.attach_current_thread().ok()?;
+    let local_ip = env.new_string(local.ip().to_string()).ok()?;
+    let remote_ip = env.new_string(remote.ip().to_string()).ok()?;
+    let class: &JClass = class.as_obj().into();
+    let answer = env.call_static_method(
+        class,
+        "ownerOf",
+        "(ZLjava/lang/String;ILjava/lang/String;I)Ljava/lang/String;",
+        &[
+            JValue::Bool(u8::from(tcp)),
+            JValue::Object(&local_ip),
+            JValue::Int(i32::from(local.port())),
+            JValue::Object(&remote_ip),
+            JValue::Int(i32::from(remote.port())),
+        ],
+    );
+    let object: JObject = match answer.and_then(|value| value.l()) {
+        Ok(object) => object,
+        Err(_) => {
+            let _ = env.exception_clear();
+            return None;
+        }
+    };
+    if object.is_null() {
+        return None;
+    }
+    let name: String = env.get_string(&JString::from(object)).ok()?.into();
+    Some(name)
 }

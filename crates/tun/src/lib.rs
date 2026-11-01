@@ -29,6 +29,7 @@ mod device;
 #[cfg(target_os = "android")]
 #[path = "android_device.rs"]
 mod device;
+pub mod names;
 #[cfg(windows)]
 mod net;
 #[cfg(target_os = "linux")]
@@ -49,7 +50,7 @@ pub use device::Packets;
 #[cfg(target_os = "android")]
 pub use net::Gateway;
 #[cfg(target_os = "android")]
-pub use stack::{Carrying, serve};
+pub use stack::{Carrying, Owner, serve};
 
 /// The signed library, carried inside bliss.exe.
 ///
@@ -233,7 +234,7 @@ impl Tun {
             .packets()
             .ok_or_else(|| io::Error::other("the device's packets were taken already"))?;
         let carrying = tokio::spawn(async move {
-            let carrying = Arc::new(stack::Carrying { serving, gateway });
+            let carrying = Arc::new(stack::Carrying::new(serving, gateway));
             if let Err(e) = stack::serve(packets, carrying).await {
                 tracing::error!("tun: {e}");
             }

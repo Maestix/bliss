@@ -14,6 +14,7 @@
 //! names, still ahead.
 
 pub mod engine;
+pub mod geo;
 pub mod logs;
 pub mod protocol;
 pub mod ui;
@@ -23,6 +24,12 @@ pub mod ui;
 #[path = "../../app/src/subscription.rs"]
 #[allow(dead_code)]
 pub mod subscription;
+
+/// The desktop's reader of rule conditions as typed, one to a line: the
+/// editor's text box speaks the same words on both.
+#[path = "../../app/src/rule_text.rs"]
+#[allow(dead_code)]
+pub mod rule_text;
 
 #[cfg(target_os = "android")]
 mod android;

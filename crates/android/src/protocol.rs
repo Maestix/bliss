@@ -53,6 +53,32 @@ pub struct Frame {
     pub ticket: u64,
     /// Whether the engine holds a TUN: starting, switching or up.
     pub holding: bool,
+    pub geo: GeoView,
+    /// Every category in the rule sets, `geosite:…` then `geoip:…`, only
+    /// while the rule editor asks (`UiCommand::GeoNames`).
+    pub categories: Option<Vec<String>>,
+}
+
+/// The rule sets: where from, what is here, and a fetch under way.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GeoView {
+    pub source: String,
+    pub sources: Vec<GeoSource>,
+    pub auto: bool,
+    /// Sizes in bytes of the files on the phone.
+    pub ip: Option<u64>,
+    pub site: Option<u64>,
+    pub updated: Option<i64>,
+    /// Bytes so far, while fetching.
+    pub fetching: Option<u64>,
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeoSource {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub about: &'static str,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -111,7 +137,14 @@ pub struct GroupRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct RuleRow {
     pub name: String,
+    /// Whether `name` was given, rather than made up from the conditions.
+    pub named: bool,
     pub conditions: String,
+    /// The conditions one to a line, as the editor shows them (rule_text.rs).
+    pub text: String,
+    /// The package, for a rule whose one condition is an app: what the apps
+    /// view shows as that app's choice.
+    pub app: Option<String>,
     /// "proxy", "direct", "block" or "vpn".
     pub action: &'static str,
     pub enabled: bool,
@@ -120,6 +153,8 @@ pub struct RuleRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnRow {
     pub target: String,
+    /// The package that opened it, when Android said.
+    pub app: Option<String>,
     pub route: &'static str,
     pub rule: String,
     pub up: u64,
@@ -188,6 +223,58 @@ pub enum UiCommand {
     Log {
         open: bool,
     },
+    /// A rule from the editor: a new one (`index` none) or one replaced.
+    /// The conditions are the editor's text, one to a line.
+    SaveRule {
+        index: Option<usize>,
+        name: String,
+        action: String,
+        text: String,
+    },
+    DeleteRule {
+        index: usize,
+    },
+    MoveRule {
+        from: usize,
+        to: usize,
+    },
+    /// An app's own way: `action` none hands it back to the other rules.
+    AppRoute {
+        package: String,
+        label: String,
+        action: Option<String>,
+    },
+    /// Fetch the rule sets, from another source when one is named.
+    GeoUpdate {
+        source: Option<String>,
+    },
+    GeoAuto {
+        on: bool,
+    },
+    /// The editor is open and wants the categories, or is closed.
+    GeoNames {
+        open: bool,
+    },
+}
+
+/// The action a word names; anything unknown goes through the tunnel.
+pub fn action_of(word: &str) -> bliss_proto::Action {
+    match word {
+        "direct" => bliss_proto::Action::Direct,
+        "block" => bliss_proto::Action::Block,
+        _ => bliss_proto::Action::Proxy,
+    }
+}
+
+/// The package a rule is about, when that is all it is about.
+pub fn app_of(rule: &bliss_proto::Rule) -> Option<String> {
+    let only_app = rule.process.len() == 1
+        && rule.domain.is_empty()
+        && rule.geosite.is_empty()
+        && rule.ip.is_empty()
+        && rule.geoip.is_empty()
+        && rule.port.is_empty();
+    only_app.then(|| rule.process[0].clone())
 }
 
 /// What a server is, in the fewest words the list has room for. The same
