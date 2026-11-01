@@ -57,6 +57,8 @@ pub struct Frame {
     /// Every category in the rule sets, `geosite:…` then `geoip:…`, only
     /// while the rule editor asks (`UiCommand::GeoNames`).
     pub categories: Option<Vec<String>>,
+    /// Whether QUIC through the server is refused.
+    pub block_quic: bool,
 }
 
 /// The rule sets: where from, what is here, and a fetch under way.
@@ -252,6 +254,9 @@ pub enum UiCommand {
         on: bool,
     },
     /// The editor is open and wants the categories, or is closed.
+    BlockQuic {
+        on: bool,
+    },
     GeoNames {
         open: bool,
     },

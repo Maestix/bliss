@@ -273,6 +273,8 @@ struct Engine {
     /// programs keep the answers for a minute.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     names: Arc<bliss_tun::names::FakeNames>,
+    /// The switch the stack reads for each QUIC flow; set from the settings.
+    block_quic: Arc<std::sync::atomic::AtomicBool>,
     version: Option<bliss_xray::Version>,
     pings: HashMap<String, Option<u32>>,
     probing: bool,
@@ -335,6 +337,7 @@ impl Engine {
             running: None,
             tracker: Arc::new(Tracker::new()),
             names: Arc::new(bliss_tun::names::FakeNames::new()),
+            block_quic: Arc::new(std::sync::atomic::AtomicBool::new(settings.block_quic)),
             version: None,
             pings: HashMap::new(),
             probing: false,
@@ -578,6 +581,12 @@ impl Engine {
                 self.settings.geo_auto = on;
                 self.settings.save(&self.paths.files);
             }
+            UiCommand::BlockQuic { on } => {
+                self.settings.block_quic = on;
+                self.settings.save(&self.paths.files);
+                self.block_quic
+                    .store(on, std::sync::atomic::Ordering::Relaxed);
+            }
             UiCommand::GeoNames { open } => {
                 self.categories = open.then(|| geo::names(&self.paths.files));
             }
@@ -641,6 +650,7 @@ impl Engine {
         let port = self.profile.engine.bridge_port;
         let version = self.version;
         let names = Arc::clone(&self.names);
+        let block_quic = Arc::clone(&self.block_quic);
         tracing::info!("tunnel: starting through «{}»", server.tag);
         tokio::spawn(async move {
             let result = bring_up(
@@ -652,6 +662,7 @@ impl Engine {
                 router,
                 packets,
                 names,
+                block_quic,
                 epoch,
                 own.clone(),
             )
@@ -1567,6 +1578,7 @@ impl Engine {
                 problem: self.geo_problem.clone(),
             },
             categories: self.categories.clone(),
+            block_quic: self.settings.block_quic,
         };
         let _ = self.frames.send(frame);
     }
@@ -1661,6 +1673,7 @@ async fn bring_up(
     router: Arc<Router>,
     packets: bliss_tun::Packets,
     names: Arc<bliss_tun::names::FakeNames>,
+    block_quic: Arc<std::sync::atomic::AtomicBool>,
     epoch: u64,
     own: mpsc::WeakUnboundedSender<Cmd>,
 ) -> Result<Running, String> {
@@ -1680,6 +1693,7 @@ async fn bring_up(
     // there are what lets domain and geosite rules see TUN connections.
     carrying.names = Some((DNS_ADDRESS, names));
     carrying.owner = Some(Arc::new(crate::android::owner_of));
+    carrying.block_quic = block_quic;
     let carrying = Arc::new(carrying);
     let ended = own.clone();
     let stack = tokio::spawn(async move {

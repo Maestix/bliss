@@ -439,5 +439,22 @@ back from the direct far end, and a FIN to the app once the rule goes. Its
 first run failed on the test itself — the pipe standing in for the TUN
 joined two packets into one read, which a TUN never does.
 
+## 0.2.5: GitHub half loaded
+
+Parts of GitHub's pages did not load with bliss on. The cause was 0.2.3's:
+to let `geoip:` see sites, a site's real address was looked up through the
+tunnel whenever an address rule came before the decision — and the phone's
+first rule, «Локальная сеть», is one, as is the IPv6 refusal added last. So
+nearly every new name waited on a DNS query through the server, up to five
+seconds where the server lost the UDP. Now only a rule that could meet a
+site's public IPv4 address counts; a failed lookup tries TCP, then is left
+alone for a minute.
+
+And «Блокировать QUIC через сервер», on by default, in Настройки: QUIC to
+the server is refused so pages open over TCP — the user's own guess. A
+connection whose name was read out of its own bytes now goes through the
+server to the address the app chose, not by the name: an outer ECH name
+resolves elsewhere.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

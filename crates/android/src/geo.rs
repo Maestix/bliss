@@ -73,6 +73,8 @@ pub struct Settings {
     pub geo_auto: bool,
     /// When the files were last fetched, in seconds since 1970.
     pub geo_updated: Option<i64>,
+    /// Refuse QUIC that would go through the server (`Carrying::block_quic`).
+    pub block_quic: bool,
 }
 
 impl Default for Settings {
@@ -81,6 +83,7 @@ impl Default for Settings {
             geo_source: SOURCES[0].key.to_owned(),
             geo_auto: true,
             geo_updated: None,
+            block_quic: true,
         }
     }
 }
@@ -256,13 +259,18 @@ mod tests {
             geo_source: "v2fly".to_owned(),
             geo_auto: false,
             geo_updated: Some(42),
+            block_quic: false,
         };
         settings.save(&dir);
         let back = Settings::load(&dir);
         assert_eq!(back.geo_source, "v2fly");
+        assert!(!back.block_quic);
         assert!(!back.geo_auto);
         assert_eq!(back.geo_updated, Some(42));
         assert_eq!(source("nonsense").key, "loyalsoldier");
+        // A file from before the QUIC switch reads with it on.
+        std::fs::write(dir.join("android.json"), r#"{"geo_source":"v2fly"}"#).unwrap();
+        assert!(Settings::load(&dir).block_quic);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
