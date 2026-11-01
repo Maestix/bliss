@@ -769,6 +769,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bliss-android"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bliss-core",
+ "bliss-proto",
+ "bliss-tun",
+ "bliss-xray",
+ "futures-util",
+ "jiff",
+ "jni 0.21.1",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bliss-core"
 version = "0.1.0"
 dependencies = [

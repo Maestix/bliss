@@ -1,0 +1,33 @@
+[package]
+name = "bliss-android"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "bliss's tunnel on Android: the core, the engine and a socket for the screens"
+
+# libbliss.so for the app, and an rlib so the engine's logic is tested on the
+# machine that builds it (`cargo test -p bliss-android`).
+[lib]
+name = "bliss"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64.workspace = true
+bliss-core = { path = "../core" }
+bliss-proto = { path = "../proto" }
+bliss-tun = { path = "../tun" }
+bliss-xray = { path = "../xray" }
+futures-util.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The four calls the Kotlin side makes into the engine (android.rs).
+jni = "0.21"
+libc.workspace = true
