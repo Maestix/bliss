@@ -59,7 +59,12 @@ sealed interface Sheet {
     data class ServerMenu(val index: Int) : Sheet
     data class Group(val id: String) : Sheet
     data object Permission : Sheet
+    data class App(val pkg: String, val label: String) : Sheet
+    data class RuleEdit(val index: Int?) : Sheet
 }
+
+/** Opens the quick server sheet: the notification's «Сервер». */
+const val OPEN_SERVERS = "app.bliss.SERVERS"
 
 /** The engine's commands, as the screens call them: `c("select", "index" to 3)`. */
 class Commands(private val send: (String, Array<out Pair<String, Any?>>) -> Unit) {
@@ -73,7 +78,8 @@ class MainActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {}
         override fun onServiceDisconnected(name: ComponentName?) {}
     }
-    private var shared by mutableStateOf<String?>(null)
+    /** A sheet something outside asked for: a shared link, the notification. */
+    private var pending by mutableStateOf<Sheet?>(null)
 
     private val consent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (VpnService.prepare(this) == null) {
@@ -90,7 +96,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         client = EngineClient(java.io.File(filesDir, "engine.sock").path, full = true)
-        shared = linkFrom(intent)
+        pending = sheetFor(intent)
         setContent {
             BlissTheme {
                 val frame by client.frames.collectAsStateWithLifecycle()
@@ -98,8 +104,8 @@ class MainActivity : ComponentActivity() {
                     frame = frame,
                     send = client::command,
                     connect = ::connect,
-                    shared = shared,
-                    consumeShared = { shared = null },
+                    pending = pending,
+                    consumePending = { pending = null },
                 )
             }
         }
@@ -107,12 +113,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        linkFrom(intent)?.let { shared = it }
+        sheetFor(intent)?.let { pending = it }
     }
 
-    private fun linkFrom(intent: Intent?): String? = when (intent?.action) {
-        Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
-        Intent.ACTION_VIEW -> intent.dataString
+    private fun sheetFor(intent: Intent?): Sheet? = when (intent?.action) {
+        Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)?.let { Sheet.Add(it) }
+        Intent.ACTION_VIEW -> intent.dataString?.let { Sheet.Add(it) }
+        OPEN_SERVERS -> Sheet.Server
         else -> null
     }
 
@@ -158,18 +165,19 @@ fun App(
     frame: Frame,
     send: (String, Array<out Pair<String, Any?>>) -> Unit,
     connect: (Boolean) -> Boolean,
-    shared: String?,
-    consumeShared: () -> Unit,
+    pending: Sheet?,
+    consumePending: () -> Unit,
 ) {
     val c = remember(send) { Commands(send) }
     var tab by remember { mutableStateOf(Tab.Home) }
     var traffic by remember { mutableStateOf(false) }
     var sheet by remember { mutableStateOf<Sheet?>(null) }
 
-    LaunchedEffect(shared) {
-        if (shared != null) {
-            sheet = Sheet.Add(shared)
-            consumeShared()
+    LaunchedEffect(pending) {
+        if (pending != null) {
+            sheet = pending
+            traffic = false
+            consumePending()
         }
     }
 
@@ -199,8 +207,8 @@ fun App(
                                 openTraffic = { traffic = true }, c = c, add = { sheet = Sheet.Add() })
                             Tab.Servers -> Servers(frame, c = c, add = { sheet = Sheet.Add() },
                                 menu = { sheet = Sheet.ServerMenu(it) }, group = { sheet = Sheet.Group(it) })
-                            Tab.Rules -> Rules(frame, c = c)
-                            Tab.Settings -> Settings(frame, openTraffic = { traffic = true })
+                            Tab.Rules -> Rules(frame, c = c, open = { sheet = it })
+                            Tab.Settings -> Settings(frame, c = c, openTraffic = { traffic = true })
                         }
                     }
                 }
@@ -217,6 +225,8 @@ fun App(
             is Sheet.ServerMenu -> ServerMenu(frame, s.index, c = c, close = { sheet = null })
             is Sheet.Group -> GroupMenu(frame, s.id, c = c, close = { sheet = null })
             Sheet.Permission -> PermissionSheet(close = { sheet = null }, go = { sheet = null; connect(true) })
+            is Sheet.App -> AppSheet(frame, s.pkg, s.label, c = c, close = { sheet = null })
+            is Sheet.RuleEdit -> RuleEditor(frame, s.index, c = c, close = { sheet = null })
         }
     }
 }
