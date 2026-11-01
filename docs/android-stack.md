@@ -389,5 +389,16 @@ The notification also stood as a dark box inside the system's card, its
 «Отключить» pushed past the edge: it is colorized in the surface colour
 now (a foreground service may), and its pills share the width.
 
+## 0.2.2: the icon
+
+0.2.1 worked on the phone. The launcher icon was a plain 96 px picture, which
+Android sets on a white disc — in the launcher and in the header Android 12
+and later put on every custom notification, which no app can take away. It
+is an adaptive icon now: the mark lifted off the desktop icon's plate by
+colour to alpha, inside the 66 dp safe circle, over a ground of the plate's
+colours, and a monochrome layer for themed icons
+(`android/make-icon.py`, from `crates/app/assets/bliss.ico`). The
+notification's off pill reads «Выкл.»: «Отключить» was cut to «Отключ…».
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
