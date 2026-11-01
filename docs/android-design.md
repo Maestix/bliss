@@ -145,8 +145,10 @@ does not exist on a phone. Its jobs go to:
   dozens with a search box was the first pass; nobody scrolls dozens to
   change servers on a bus. At the foot «Отклик» and «Переподключить» — the
   old «Перезапустить туннель». The bunny sits on the sheet's edge.
-- **The notification**, which Android requires of a running VPN service: a
-  silent, low-importance channel; state, server, rates, network and preset;
+- **The notification.** Android does not ask one of a VPN service — the key
+  in the status bar is the system's own — but it is where the tunnel is
+  switched from anywhere, so bliss keeps one: a silent, low-importance
+  channel; state, server, rates, network and preset;
   «Пауза 5 мин», «Отключить», «Сервер». The pause is for an app or a page
   that will not work through a tunnel for a moment; it brings the tunnel
   back by itself, which a «switch off and remember to switch on» never
@@ -213,6 +215,12 @@ wrong shape for it.
   that cannot be applied live — the interface has to be re-established,
   about a second — and the switch says so. bliss sees nothing of such an
   app afterwards, and its rows say «bliss его не видит» instead of bytes.
+  **Under Android's «Block connections without VPN» an excluded app has no
+  network at all** (Google's own documentation for always-on VPN): the
+  exemption that would let it out is a device administrator's, not an
+  app's. Found while choosing the stack on 1 November; the switch, the
+  editor's twin of it and «Не пускать трафик мимо» in Настройки now all say
+  so.
 - «Список правил» is the routing screen: preset chips (a violet dot and
   «Сохранить» once a switch moved since), the warnings with a button that
   fixes them where one can, the rules with their switches and grips, the
