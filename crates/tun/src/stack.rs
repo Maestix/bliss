@@ -489,11 +489,13 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     // An address, unless bliss answered the lookup itself (`names`): a TUN
     // sees what the program put in the packet, and the name it looked up
     // first is gone by then.
-    let Ok(mut target) = carrying.target(client.peer_addr()) else {
-        tracing::debug!("tun: {} is a name no longer known", client.peer_addr());
-        let _ = client.shutdown().await;
-        return Ok(());
-    };
+    // A pool address bliss no longer knows the name of — an answer a
+    // program kept from before the pool forgot it — is asked for its name,
+    // like a bare address; it must never be dialled as itself.
+    let forgotten = carrying.target(client.peer_addr()).is_err();
+    let mut target = carrying
+        .target(client.peer_addr())
+        .unwrap_or(Target::Socket(client.peer_addr()));
     // A bare address where bliss names sites: the program found it some
     // other way (a «Частный DNS», its own DNS over HTTPS, an address it
     // kept), and its first bytes are asked for the name instead.
@@ -501,16 +503,26 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     let mut seen = None;
     if carrying.names.is_some()
         && let Target::Socket(addr) = target
-        && SNIFFED_PORTS.contains(&addr.port())
+        && (forgotten || SNIFFED_PORTS.contains(&addr.port()))
     {
         first = read_first(&mut client).await;
         if let Sniffed::Name(host) = sniff::name(&first) {
-            seen = Some(addr.ip());
+            // The program's own address, unless it is the pool's: that one
+            // leads nowhere, and the name is dialled.
+            seen = (!forgotten).then_some(addr.ip());
             target = Target::Domain {
                 host,
                 port: addr.port(),
             };
         }
+    }
+    if forgotten && matches!(target, Target::Socket(_)) {
+        tracing::info!(
+            "tun: {} is a name no longer known, and said none",
+            client.peer_addr()
+        );
+        let _ = client.shutdown().await;
+        return Ok(());
     }
     let process = carrying
         .program(true, client.local_addr(), client.peer_addr())
@@ -641,6 +653,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     } = &*carrying;
     let Ok(target) = carrying.target(client.peer_addr()) else {
         tracing::debug!("tun: udp {} is a name no longer known", client.peer_addr());
+        carrying.refuse_datagrams(client.local_addr(), client.peer_addr(), &[]);
         return Ok(());
     };
     let mut client = client;
@@ -1278,6 +1291,99 @@ mod tests {
             }
         }
         assert_eq!(echoed.await.unwrap(), hello);
+        stack.abort();
+    }
+
+    /// A pool address bliss has forgotten — a browser's answer kept from
+    /// before the tunnel's process restarted — is not closed but asked for
+    /// its name, and the name is dialled through the server, never the pool
+    /// address. Closed, it was the user's ERR_CONNECTION_CLOSED on Google
+    /// after installing a new build.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forgotten_pool_address_is_dialled_by_the_name_it_says() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The engine: a SOCKS5 server that notes what it was asked for and
+        // echoes what follows.
+        let socks = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_addr = socks.local_addr().unwrap();
+        let asked = tokio::spawn(async move {
+            let (mut s, _) = socks.accept().await.unwrap();
+            let mut hello = [0u8; 3];
+            s.read_exact(&mut hello).await.unwrap();
+            s.write_all(&[5, 0]).await.unwrap();
+            let mut head = [0u8; 5];
+            s.read_exact(&mut head).await.unwrap();
+            assert_eq!(head[3], 3, "asked by name");
+            let mut name = vec![0u8; usize::from(head[4])];
+            s.read_exact(&mut name).await.unwrap();
+            let mut port = [0u8; 2];
+            s.read_exact(&mut port).await.unwrap();
+            s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            if let Ok(n) = s.read(&mut buf).await {
+                s.write_all(&buf[..n]).await.unwrap();
+            }
+            (String::from_utf8(name).unwrap(), u16::from_be_bytes(port))
+        });
+
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                socks_addr,
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::proxy_everything()),
+        ));
+        let mut carrying = Carrying::new(Arc::clone(&serving), Gateway::for_tests());
+        // A fresh pool: it has handed out nothing, so it knows no address.
+        carrying.names = Some(("172.19.0.2:53".parse().unwrap(), Arc::new(FakeNames::new())));
+        let (phone, device) = tokio::io::duplex(256 * 1024);
+        let stack = tokio::spawn(serve(device, Arc::new(carrying)));
+        let mut phone = Packets {
+            pipe: phone,
+            held: Vec::new(),
+        };
+
+        let app: SocketAddr = "172.19.0.1:40002".parse().unwrap();
+        let kept: SocketAddr = "198.18.4.77:443".parse().unwrap();
+        const SYN: u8 = 0x02;
+        const ACK: u8 = 0x10;
+        const PSH: u8 = 0x08;
+        const FIN: u8 = 0x01;
+        const RST: u8 = 0x04;
+        phone.send(&tcp_packet(app, kept, 5000, 0, SYN, &[])).await;
+        let (flags, theirs, _) = phone.segment().await;
+        assert_eq!(flags & (SYN | ACK), SYN | ACK);
+        let ours = 5001;
+        let acked = theirs.wrapping_add(1);
+        phone
+            .send(&tcp_packet(app, kept, ours, acked, ACK, &[]))
+            .await;
+        let hello = crate::sniff::tests::client_hello("www.google.com");
+        phone
+            .send(&tcp_packet(app, kept, ours, acked, PSH | ACK, &hello))
+            .await;
+
+        let mut back = Vec::new();
+        while back.len() < hello.len() {
+            let (flags, _, payload) = phone.segment().await;
+            assert_eq!(
+                flags & (FIN | RST),
+                0,
+                "closed: {:?}",
+                serving.tracker.table()
+            );
+            back.extend_from_slice(&payload);
+        }
+        assert_eq!(back, hello);
+        assert_eq!(asked.await.unwrap(), ("www.google.com".to_owned(), 443));
+        assert_eq!(serving.tracker.table()[0].target, "www.google.com:443");
         stack.abort();
     }
 

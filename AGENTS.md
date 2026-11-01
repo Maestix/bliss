@@ -1538,7 +1538,13 @@ table.
   — is what makes the rest of the rules work. It exists on Android only
   (`names.rs`, given to the stack as `Carrying::names`), where the VPN
   service names bliss's own DNS address; the desktop's adapter does not
-  answer DNS yet. There a name also meets `geoip:` and subnet rules: when
+  answer DNS yet. **A name's address comes from the name** (FNV-1a over
+  198.18.0.0/16, the next free on a clash): handed out in turn, the
+  addresses meant other names after the tunnel's process restarted while a
+  browser kept its answers, and Google closed on the user
+  (`a_name_keeps_its_address_across_a_restart`). A pool address that is
+  still forgotten is asked for its name like a bare address and dialled by
+  it, never as itself (`a_forgotten_pool_address_is_dialled_by_the_name_it_says`). There a name also meets `geoip:` and subnet rules: when
   such a rule comes before the decision (`Router::wants_address`), the
   stack asks 1.1.1.1 through the tunnel for the site's address — never the
   phone's network — keeps it ten minutes (`names::Addresses`, 4 096 at

@@ -25,10 +25,15 @@ use std::sync::Mutex;
 
 /// The first address of the pool: 198.18.0.0, never handed out itself.
 const BASE: u32 = u32::from_be_bytes([198, 18, 0, 0]);
-/// How many names are kept, each with an address of its own. A name past
-/// this many takes the address of the one handed out longest ago, which then
-/// reads as unknown: the cap the house rules ask of anything that grows.
+/// How many names are kept, each with an address of its own. Past this many
+/// the one handed out longest ago is forgotten: the cap the house rules ask
+/// of anything that grows.
 pub const POOL: u32 = 16_384;
+/// The addresses names are spread over: 198.18.0.1 to 198.18.255.255, four
+/// times the names kept, so that a name's own address is nearly always free.
+const SPACE: u32 = 65_535;
+/// How far past its own address a name looks for a free one.
+const PROBES: u32 = 64;
 /// How long a program may keep an answer. Short, so an address that is
 /// handed to another name has long been forgotten by the program that asked
 /// for it first.
@@ -44,8 +49,9 @@ pub struct FakeNames {
 struct Inner {
     by_name: HashMap<String, u32>,
     /// Slot `i` is the address `BASE + 1 + i`.
-    by_slot: Vec<Option<String>>,
-    next: u32,
+    by_slot: HashMap<u32, String>,
+    /// Slots in the order they were handed out, for forgetting the oldest.
+    order: std::collections::VecDeque<u32>,
 }
 
 impl Default for FakeNames {
@@ -59,8 +65,8 @@ impl FakeNames {
         Self {
             inner: Mutex::new(Inner {
                 by_name: HashMap::new(),
-                by_slot: Vec::new(),
-                next: 0,
+                by_slot: HashMap::new(),
+                order: std::collections::VecDeque::new(),
             }),
         }
     }
@@ -71,24 +77,40 @@ impl FakeNames {
         u32::from(ip) & 0xfffe_0000 == BASE
     }
 
-    /// The address for a name: the one it already has, or the next free.
+    /// The address for a name: the one it already has, or its own.
+    ///
+    /// A name's own address comes from the name itself (FNV-1a), the next
+    /// free one after it on a clash. Handed out in turn, as 0.2.x did, the
+    /// addresses meant other names after the tunnel's process restarted —
+    /// a new build installed — while a browser still held its answers: its
+    /// google.com went to an address bliss no longer knew, or knew as
+    /// another site's (the user's ERR_CONNECTION_CLOSED on Google, 2
+    /// November). Taken from the name, the address is the same after.
     pub fn address_for(&self, name: &str) -> Ipv4Addr {
         let name = name.to_ascii_lowercase();
         let mut inner = self.inner.lock().expect("names lock");
         if let Some(slot) = inner.by_name.get(&name) {
             return Ipv4Addr::from(BASE + 1 + slot);
         }
-        let slot = inner.next;
-        inner.next = (inner.next + 1) % POOL;
-        if (slot as usize) < inner.by_slot.len() {
-            if let Some(old) = inner.by_slot[slot as usize].take() {
+        while inner.by_name.len() >= POOL as usize {
+            let Some(oldest) = inner.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = inner.by_slot.remove(&oldest) {
                 inner.by_name.remove(&old);
             }
-            inner.by_slot[slot as usize] = Some(name.clone());
-        } else {
-            inner.by_slot.push(Some(name.clone()));
         }
+        let own = fnv1a(&name) % SPACE;
+        let slot = (0..PROBES)
+            .map(|step| (own + step) % SPACE)
+            .find(|slot| !inner.by_slot.contains_key(slot))
+            .unwrap_or(own);
+        if let Some(old) = inner.by_slot.remove(&slot) {
+            inner.by_name.remove(&old);
+        }
+        inner.by_slot.insert(slot, name.clone());
         inner.by_name.insert(name, slot);
+        inner.order.push_back(slot);
         Ipv4Addr::from(BASE + 1 + slot)
     }
 
@@ -96,7 +118,7 @@ impl FakeNames {
     pub fn name_of(&self, ip: Ipv4Addr) -> Option<String> {
         let offset = u32::from(ip).checked_sub(BASE + 1)?;
         let inner = self.inner.lock().expect("names lock");
-        inner.by_slot.get(offset as usize).cloned().flatten()
+        inner.by_slot.get(&offset).cloned()
     }
 
     /// How many names are held now.
@@ -362,6 +384,14 @@ pub fn first_a(answer: &[u8], id: u16) -> Option<Ipv4Addr> {
     None
 }
 
+/// FNV-1a over a name: the same number in every run, which the standard
+/// hasher, keyed afresh per process, is not.
+fn fnv1a(name: &str) -> u32 {
+    name.bytes().fold(0x811c_9dc5, |hash, b| {
+        (hash ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
 /// A name only the local network knows.
 fn is_local(name: &str) -> bool {
     !name.contains('.')
@@ -472,13 +502,35 @@ mod tests {
             names.address_for(&format!("a{i}.example"));
         }
         assert_eq!(names.len(), POOL as usize);
-        // The first name's address went to the name after the last slot.
-        assert_eq!(
-            names.name_of(first).as_deref(),
-            Some(format!("a{POOL}.example").as_str())
-        );
-        assert_ne!(names.address_for("a0.example"), first);
+        // The first name went to make room; its address may now be another's.
+        assert_ne!(names.name_of(first).as_deref(), Some("a0.example"));
+        names.address_for("a0.example");
         assert_eq!(names.len(), POOL as usize);
+        // Every name held still reads back from its own address.
+        let last = format!("a{POOL}.example");
+        assert_eq!(
+            names.name_of(names.address_for(&last)).as_deref(),
+            Some(last.as_str())
+        );
+    }
+
+    /// The tunnel's process restarts — a new build installed — while a
+    /// browser keeps the answers it was given: the same name must mean the
+    /// same address after, whatever was asked before it and in what order.
+    #[test]
+    fn a_name_keeps_its_address_across_a_restart() {
+        let before = FakeNames::new();
+        for site in ["a.example", "b.example", "www.google.com", "c.example"] {
+            before.address_for(site);
+        }
+        let after = FakeNames::new();
+        for site in ["c.example", "x.example", "www.google.com"] {
+            after.address_for(site);
+        }
+        let google = before.address_for("www.google.com");
+        assert_eq!(after.address_for("www.google.com"), google);
+        assert_eq!(after.name_of(google).as_deref(), Some("www.google.com"));
+        assert!(FakeNames::is_fake(google));
     }
 
     #[test]

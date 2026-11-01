@@ -497,5 +497,23 @@ does, so the browser's socket fails at once and it opens the page over TCP.
 ipstack owns the device and writes only TCP and UDP, so the answer goes out
 through the device wrapper while ipstack waits on its next read.
 
+## 0.2.9: Google closed on the user
+
+With 0.2.8 Google answered ERR_CONNECTION_CLOSED, the QUIC rule on or off —
+a TCP connection closed by bliss. Two ways it could, both mended without
+the phone's log to tell which:
+
+- **The pool's addresses were handed out in turn**, so after the tunnel's
+  process restarted — every new build installed — they meant other names,
+  while Brave still held its answers from before: google.com went to an
+  address bliss did not know, and was closed, or knew as another site's. A
+  name's address now comes from the name, the same after a restart, and a
+  forgotten one is asked for its name and dialled by it.
+- **IPv6 was routed in and refused by a rule**, and the stack accepts a
+  connection before it is decided, so a refused one is an accepted one
+  closed — which a browser takes as the site closing, without trying IPv4.
+  The TUN now has no IPv6 address or route, and Android itself answers an
+  app's IPv6 with "unreachable" at once (allowFamily's default).
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
