@@ -136,8 +136,12 @@ class TunnelService : VpnService() {
             .setMtu(1500)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
-            .addAddress("fdfe:dcba:9876::1", 126)
-            .addRoute("::", 0)
+            // No IPv6 address and no IPv6 route: Android then answers an
+            // app's IPv6 with "unreachable" at once (allowFamily's default),
+            // and it uses IPv4 — nothing leaks around the tunnel. Routed in
+            // and refused by a rule, an IPv6 connection was first accepted by
+            // the stack and then closed, which a browser takes as the site
+            // closing on it (ERR_CONNECTION_CLOSED) and does not retry on IPv4.
             // bliss answers the lookups itself (names.rs in crates/tun), and
             // what it does not answer goes through the server.
             .addDnsServer(DNS)
