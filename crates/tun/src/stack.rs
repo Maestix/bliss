@@ -9,7 +9,7 @@
 //! the real interface.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -54,6 +54,9 @@ pub struct Carrying {
     /// Sites' real addresses, learnt through the tunnel where `names` hands
     /// out the pool's: what `geoip:` and subnet rules decide a site by.
     pub addresses: Arc<Addresses>,
+    /// Packets bliss writes to the device itself (`Ended::answer`), set by
+    /// `serve`.
+    answers: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 /// How long a connection waits to learn its program from the system.
@@ -70,6 +73,7 @@ impl Carrying {
             names: None,
             owner: None,
             addresses: Arc::new(Addresses::new()),
+            answers: std::sync::OnceLock::new(),
         }
     }
 
@@ -151,6 +155,22 @@ impl Carrying {
             },
         };
         router.decide_flow(target, known, process, udp)
+    }
+
+    /// Tell the program its flow of datagrams is refused: ICMP "port
+    /// unreachable", as sing-box answers a rejected UDP flow. Its socket
+    /// then fails at once and it tries another way — a browser, TCP —
+    /// where a flow dropped in silence left Chromium waiting on QUIC it had
+    /// seen work, until it gave up with ERR_QUIC_PROTOCOL_ERROR (the user's
+    /// Google, 2 November). "Blocked is answered, not dropped" (AGENTS.md
+    /// §5), for datagrams too. IPv4 only: IPv6 is refused before it gets
+    /// this far.
+    fn refuse_datagrams(&self, app: SocketAddr, far: SocketAddr, first: &[u8]) {
+        if let (Some(answers), Some(packet)) =
+            (self.answers.get(), port_unreachable(app, far, first))
+        {
+            let _ = answers.send(packet);
+        }
     }
 
     /// Carry a connection until it ends — or, where bliss names sites (the
@@ -313,21 +333,55 @@ async fn resolve(target: &Target) -> io::Result<SocketAddr> {
 /// was nearly full. Here the first empty read or failure is the end: said
 /// once, and every read after it waits for good, which gives the stack's task
 /// the yield its abort needs (`an_ended_device_is_read_once`).
+///
+/// It also writes the packets bliss makes itself — an ICMP "port
+/// unreachable" for a refused flow of datagrams — which arrive on `answers`
+/// and go out while ipstack waits on the next read, since ipstack owns the
+/// device and offers no way to write a packet of another protocol.
 struct Ended<D> {
     device: D,
     ended: bool,
+    answers: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    waiting: Option<Vec<u8>>,
 }
 
 impl<D> Ended<D> {
-    fn new(device: D) -> Self {
+    fn new(device: D, answers: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Self {
         Self {
             device,
             ended: false,
+            answers,
+            waiting: None,
         }
     }
 }
 
-impl<D: AsyncRead + Unpin> AsyncRead for Ended<D> {
+impl<D: AsyncWrite + Unpin> Ended<D> {
+    /// Write what bliss has to say, as far as the device takes it now.
+    fn answer(&mut self, cx: &mut Context<'_>) {
+        loop {
+            if self.waiting.is_none() {
+                match self.answers.poll_recv(cx) {
+                    Poll::Ready(Some(packet)) => self.waiting = Some(packet),
+                    _ => return,
+                }
+            }
+            let Some(packet) = self.waiting.take() else {
+                return;
+            };
+            match Pin::new(&mut self.device).poll_write(cx, &packet) {
+                Poll::Pending => {
+                    self.waiting = Some(packet);
+                    return;
+                }
+                // Written, or not writable at all: either way it is done with.
+                Poll::Ready(_) => {}
+            }
+        }
+    }
+}
+
+impl<D: AsyncRead + AsyncWrite + Unpin> AsyncRead for Ended<D> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -336,6 +390,7 @@ impl<D: AsyncRead + Unpin> AsyncRead for Ended<D> {
         if self.ended {
             return Poll::Pending;
         }
+        self.answer(cx);
         let before = buf.filled().len();
         let room = buf.remaining();
         match Pin::new(&mut self.device).poll_read(cx, buf) {
@@ -386,7 +441,9 @@ where
     tcp.timeout = IDLE;
     config.with_tcp_config(tcp);
 
-    let mut stack = IpStack::new(config, Ended::new(packets));
+    let (answers, answered) = tokio::sync::mpsc::unbounded_channel();
+    let _ = carrying.answers.set(answers);
+    let mut stack = IpStack::new(config, Ended::new(packets, answered));
     loop {
         let stream = match stack.accept().await {
             Ok(stream) => stream,
@@ -604,6 +661,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
             && let Target::Socket(addr) = target
         {
             tracing::debug!("tun: QUIC to bare {addr} refused, for TCP to name the site");
+            carrying.refuse_datagrams(client.local_addr(), client.peer_addr(), &first);
             return Ok(());
         }
     }
@@ -616,9 +674,9 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: udp {target} blocked by {}", decision.rule);
-        // Nothing to refuse in: a datagram has no reply that means "no". The
-        // flow is recorded so the connections screen can show what was
-        // refused, and then dropped.
+        // Refused aloud, with ICMP, and recorded so the connections screen
+        // can show what was refused.
+        carrying.refuse_datagrams(client.local_addr(), client.peer_addr(), &first);
         let conn = serving
             .tracker
             .open(target, decision.route, decision.rule, process);
@@ -665,6 +723,60 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
         // A flow has nothing to close: its next datagram starts a new one.
         Carried::Rerouted => Ok(()),
     }
+}
+
+/// An ICMP "port unreachable" from `far` to `app` about the datagram `app`
+/// sent: the IPv4 header it would have had and the first eight bytes of it,
+/// its UDP header, which is all a program's socket matches it by.
+fn port_unreachable(app: SocketAddr, far: SocketAddr, payload: &[u8]) -> Option<Vec<u8>> {
+    let (SocketAddr::V4(app), SocketAddr::V4(far)) = (app, far) else {
+        return None;
+    };
+    let checksum = |bytes: &[u8]| -> [u8; 2] {
+        let mut sum: u32 = bytes
+            .chunks(2)
+            .map(|c| u32::from(u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])))
+            .sum();
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        (!(sum as u16)).to_be_bytes()
+    };
+    let ipv4 = |src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, total: usize| -> Vec<u8> {
+        let mut h = vec![
+            0x45,
+            0,
+            (total >> 8) as u8,
+            total as u8,
+            0,
+            0,
+            0x40,
+            0,
+            64,
+            protocol,
+            0,
+            0,
+        ];
+        h.extend_from_slice(&src.octets());
+        h.extend_from_slice(&dst.octets());
+        let sum = checksum(&h);
+        h[10..12].copy_from_slice(&sum);
+        h
+    };
+    // What the program sent, as it left: its header and its UDP header.
+    let udp_len = 8 + payload.len();
+    let mut quoted = ipv4(*app.ip(), *far.ip(), 17, 20 + udp_len);
+    quoted.extend_from_slice(&app.port().to_be_bytes());
+    quoted.extend_from_slice(&far.port().to_be_bytes());
+    quoted.extend_from_slice(&(udp_len.min(0xffff) as u16).to_be_bytes());
+    quoted.extend_from_slice(&[0, 0]);
+    let mut icmp = vec![3, 3, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&quoted);
+    let sum = checksum(&icmp);
+    icmp[2..4].copy_from_slice(&sum);
+    let mut packet = ipv4(*far.ip(), *app.ip(), 1, 20 + icmp.len());
+    packet.extend_from_slice(&icmp);
+    Some(packet)
 }
 
 /// Where the lookups `names` does not answer itself go: through the tunnel.
@@ -922,7 +1034,8 @@ mod tests {
             reads: Arc::clone(&reads),
         };
         runtime.block_on(async {
-            let stack = IpStack::new(IpStackConfig::default(), Ended::new(device));
+            let (_answers, answered) = tokio::sync::mpsc::unbounded_channel();
+            let stack = IpStack::new(IpStackConfig::default(), Ended::new(device, answered));
             tokio::time::sleep(Duration::from_millis(100)).await;
             drop(stack);
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1366,6 +1479,55 @@ mod tests {
         serving.set_router(routing(false));
         send(41002, site, &initial).await;
         assert_eq!(serving.tracker.table().len(), 2);
+
+        // Each refused flow was answered: ICMP "port unreachable" from the
+        // site to the app, naming the datagram — two refusals, two answers,
+        // and nothing for the flows carried. Dropped in silence, Chromium
+        // waited on QUIC it had seen work and gave the user
+        // ERR_QUIC_PROTOCOL_ERROR on Google.
+        use tokio::io::AsyncReadExt;
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 4096];
+        while let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(300), phone.read(&mut buf)).await
+        {
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        let mut answers = Vec::new();
+        while got.len() >= 20 {
+            let len = usize::from(u16::from_be_bytes([got[2], got[3]]));
+            answers.push(got.drain(..len).collect::<Vec<u8>>());
+        }
+        assert_eq!(answers.len(), 2, "{answers:?}");
+        let sum = |bytes: &[u8]| -> u16 {
+            let mut sum: u32 = bytes
+                .chunks(2)
+                .map(|c| u32::from(u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])))
+                .sum();
+            while sum >> 16 != 0 {
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+            sum as u16
+        };
+        for (answer, port) in answers.iter().zip([41000u16, 41003]) {
+            assert_eq!(answer[9], 1, "ICMP");
+            assert_eq!(
+                &answer[12..16],
+                &site.ip().to_string().parse::<Ipv4Addr>().unwrap().octets()
+            );
+            assert_eq!(&answer[16..20], &[172, 19, 0, 1]);
+            assert_eq!(sum(&answer[..20]), 0xffff, "IPv4 header checksum");
+            let icmp = &answer[20..];
+            assert_eq!((icmp[0], icmp[1]), (3, 3), "port unreachable");
+            assert_eq!(sum(icmp), 0xffff, "ICMP checksum");
+            // The quoted UDP header: the app's port and 443.
+            let udp = &icmp[8 + 20..];
+            assert_eq!(u16::from_be_bytes([udp[0], udp[1]]), port);
+            assert_eq!(u16::from_be_bytes([udp[2], udp[3]]), 443);
+        }
         stack.abort();
     }
 

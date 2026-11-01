@@ -542,7 +542,13 @@ These cost the most time on this project. None of them announce themselves.
   `Router::decide` parses such hosts and applies `ip`/`geoip` rules; otherwise an
   address rule is bypassed by how the client encoded its target.
 - **Blocked is answered, not dropped**: SOCKS5 reply 2, or HTTP `403 Forbidden`
-  naming the rule. A silent drop is an endless spinner.
+  naming the rule. A silent drop is an endless spinner. Through the TUN, a
+  connection is closed, and a flow of datagrams gets an ICMP "port
+  unreachable" from its far end (`port_unreachable`, written to the device
+  by `Ended::answer`, as sing-box answers a rejected UDP flow): dropped in
+  silence, Chromium waited on QUIC it had seen work and showed the user
+  ERR_QUIC_PROTOCOL_ERROR on Google instead of going to TCP
+  (`udp_to_443_meets_the_rule`, seen failing without the answer).
 - **Absolute-form HTTP requests are forwarded with `Connection: close`**, with
   `Proxy-*`, `Connection` and `Keep-Alive` stripped: the relay has dialled one
   host, and a kept-alive client could send its next request, for another host, to
