@@ -238,7 +238,7 @@ class TunnelService : VpnService() {
                 }
                 big.setTextViewText(R.id.clock_word, "")
                 big.setTextViewText(R.id.latency, "")
-                pill(0, "Отключить", service(DISCONNECT, 1))
+                pill(0, "Выкл.", service(DISCONNECT, 1))
             }
             is Note.On -> {
                 title = "Подключено"
@@ -255,7 +255,7 @@ class TunnelService : VpnService() {
                     this, 3, Intent(this, MainActivity::class.java).setAction(OPEN_SERVERS),
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 ))
-                pill(at, "Отключить", service(DISCONNECT, 1))
+                pill(at, "Выкл.", service(DISCONNECT, 1))
             }
             is Note.Paused -> {
                 title = "Пауза"
@@ -268,7 +268,7 @@ class TunnelService : VpnService() {
                 big.setTextViewText(R.id.latency, "")
                 clock(note.until, true)
                 pill(0, "Продолжить", service(RESUME, 4))
-                pill(1, "Отключить", service(DISCONNECT, 1))
+                pill(1, "Выкл.", service(DISCONNECT, 1))
             }
         }
         return Notification.Builder(this, CHANNEL)
