@@ -73,8 +73,12 @@ pub struct Settings {
     pub geo_auto: bool,
     /// When the files were last fetched, in seconds since 1970.
     pub geo_updated: Option<i64>,
-    /// Refuse QUIC that would go through the server (`Carrying::block_quic`).
+    /// The switch 0.2.5 had for refusing QUIC, read once to give the
+    /// built-in rule that replaced it the same position (`quic_rule`).
     pub block_quic: bool,
+    /// Whether the built-in «QUIC» rule has been offered to this profile:
+    /// once, so a person who deletes it is not given it back.
+    pub quic_rule: bool,
 }
 
 impl Default for Settings {
@@ -84,6 +88,7 @@ impl Default for Settings {
             geo_auto: true,
             geo_updated: None,
             block_quic: true,
+            quic_rule: false,
         }
     }
 }
@@ -260,6 +265,7 @@ mod tests {
             geo_auto: false,
             geo_updated: Some(42),
             block_quic: false,
+            quic_rule: true,
         };
         settings.save(&dir);
         let back = Settings::load(&dir);
