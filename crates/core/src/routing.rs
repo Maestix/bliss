@@ -210,10 +210,27 @@ struct Compiled {
     /// ranges. «Локальная сеть» and the IPv6 refusal cannot, and are no
     /// reason to look a site's address up (`Router::wants_address`).
     sees_sites: bool,
+    /// Protocols read off the connection (`quic`).
+    protocols: Vec<String>,
 }
 
 impl Compiled {
-    fn matches(&self, host: &str, ip: Option<IpAddr>, port: u16, process: Option<&str>) -> bool {
+    fn matches(
+        &self,
+        host: &str,
+        ip: Option<IpAddr>,
+        port: u16,
+        process: Option<&str>,
+        protocol: Option<&str>,
+    ) -> bool {
+        if let Some(protocol) = protocol
+            && self
+                .protocols
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(protocol))
+        {
+            return true;
+        }
         if self.domains.iter().any(|p| p.matches(host)) {
             return true;
         }
@@ -362,6 +379,11 @@ impl Router {
                     .cloned()
                     .collect(),
                 sees_sites: false,
+                protocols: rule
+                    .protocol
+                    .iter()
+                    .map(|p| p.to_ascii_lowercase())
+                    .collect(),
             };
 
             for raw in &rule.ip {
@@ -442,6 +464,18 @@ impl Router {
         resolved: Option<IpAddr>,
         process: Option<&str>,
     ) -> Decision {
+        self.decide_flow(target, resolved, process, None)
+    }
+
+    /// `decide_with`, for a connection whose protocol was read off its first
+    /// bytes (`quic`), which `protocol:` conditions look at.
+    pub fn decide_flow(
+        &self,
+        target: &Target,
+        resolved: Option<IpAddr>,
+        process: Option<&str>,
+        protocol: Option<&str>,
+    ) -> Decision {
         let host = normalise(&target.host());
         let ip = match target {
             Target::Socket(addr) => Some(addr.ip()),
@@ -460,7 +494,7 @@ impl Router {
         let port = target.port();
 
         for rule in &self.rules {
-            if rule.matches(&host, ip, port, process) {
+            if rule.matches(&host, ip, port, process, protocol) {
                 return Decision {
                     route: rule.route,
                     rule: rule.name.clone(),
@@ -488,7 +522,7 @@ impl Router {
         let host = normalise(host);
         let port = target.port();
         for rule in &self.rules {
-            if rule.matches(&host, None, port, process) {
+            if rule.matches(&host, None, port, process, None) {
                 return false;
             }
             if rule.sees_sites {
@@ -549,7 +583,7 @@ impl Router {
         let port = target.port();
         self.rules
             .iter()
-            .take_while(|rule| !rule.matches(&host, None, port, process))
+            .take_while(|rule| !rule.matches(&host, None, port, process, None))
             .filter(|rule| !rule.countries.is_empty())
             .map(|rule| rule.name.clone())
             .collect()
@@ -658,6 +692,36 @@ mod tests {
     /// name alone went past — and is asked for only when one comes before
     /// the decision. On Android every site arrives by name, and without this
     /// no `geoip:` rule ever matched a page there.
+    #[test]
+    fn quic_is_a_protocol_not_a_port() {
+        // The phone's built-in rule: QUIC refused, so pages open over TCP.
+        // It is told by the flow's first packet, never by UDP and 443.
+        let mut quic = rule(Action::Block, "QUIC");
+        quic.protocol = vec!["quic".into()];
+        let mut site = rule(Action::Direct, "Reddit");
+        site.domain = vec!["reddit.com".into()];
+        let r = router(vec![site, quic], Action::Proxy);
+        let page = Target::Domain {
+            host: "github.com".into(),
+            port: 443,
+        };
+        assert_eq!(
+            r.decide_flow(&page, None, None, Some("quic")).route,
+            Route::Blocked
+        );
+        // HTTPS to the same place is not QUIC.
+        assert_eq!(r.decide_flow(&page, None, None, None).route, Route::Proxy);
+        // A rule above it decides first: the user's own site keeps its way.
+        let reddit = Target::Domain {
+            host: "www.reddit.com".into(),
+            port: 443,
+        };
+        assert_eq!(
+            r.decide_flow(&reddit, None, None, Some("quic")).route,
+            Route::Direct
+        );
+    }
+
     #[test]
     fn the_local_network_and_ipv6_are_no_reason_to_look_a_site_up() {
         // The phone's first rule, a user's site rule, and the IPv6 refusal

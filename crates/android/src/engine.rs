@@ -273,8 +273,6 @@ struct Engine {
     /// programs keep the answers for a minute.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     names: Arc<bliss_tun::names::FakeNames>,
-    /// The switch the stack reads for each QUIC flow; set from the settings.
-    block_quic: Arc<std::sync::atomic::AtomicBool>,
     version: Option<bliss_xray::Version>,
     pings: HashMap<String, Option<u32>>,
     probing: bool,
@@ -337,7 +335,6 @@ impl Engine {
             running: None,
             tracker: Arc::new(Tracker::new()),
             names: Arc::new(bliss_tun::names::FakeNames::new()),
-            block_quic: Arc::new(std::sync::atomic::AtomicBool::new(settings.block_quic)),
             version: None,
             pings: HashMap::new(),
             probing: false,
@@ -359,6 +356,7 @@ impl Engine {
             geo_problem: None,
             categories: None,
         };
+        engine.offer_quic_rule();
         engine.reparse();
         engine
     }
@@ -581,12 +579,6 @@ impl Engine {
                 self.settings.geo_auto = on;
                 self.settings.save(&self.paths.files);
             }
-            UiCommand::BlockQuic { on } => {
-                self.settings.block_quic = on;
-                self.settings.save(&self.paths.files);
-                self.block_quic
-                    .store(on, std::sync::atomic::Ordering::Relaxed);
-            }
             UiCommand::GeoNames { open } => {
                 self.categories = open.then(|| geo::names(&self.paths.files));
             }
@@ -650,7 +642,6 @@ impl Engine {
         let port = self.profile.engine.bridge_port;
         let version = self.version;
         let names = Arc::clone(&self.names);
-        let block_quic = Arc::clone(&self.block_quic);
         tracing::info!("tunnel: starting through «{}»", server.tag);
         tokio::spawn(async move {
             let result = bring_up(
@@ -662,7 +653,6 @@ impl Engine {
                 router,
                 packets,
                 names,
-                block_quic,
                 epoch,
                 own.clone(),
             )
@@ -1286,6 +1276,30 @@ impl Engine {
         }
     }
 
+    /// Give a profile made before it the built-in «QUIC» rule, once: under
+    /// «Локальная сеть» when that leads, else first, and switched as 0.2.5's
+    /// switch stood. A rule of the person's own about QUIC is left alone.
+    fn offer_quic_rule(&mut self) {
+        if self.settings.quic_rule {
+            return;
+        }
+        let rules = &mut self.profile.routing.rules;
+        if !rules.iter().any(|r| !r.protocol.is_empty()) {
+            let at = usize::from(
+                rules
+                    .first()
+                    .is_some_and(|r| r.name.as_deref() == Some(LOCAL_RULE)),
+            );
+            let mut rule = quic_rule();
+            rule.enabled = self.settings.block_quic;
+            rules.insert(at, rule);
+            self.profile.routing.ensure_ids();
+            self.save();
+        }
+        self.settings.quic_rule = true;
+        self.settings.save(&self.paths.files);
+    }
+
     fn commit_routing(&mut self) {
         self.profile.routing.ensure_ids();
         self.save();
@@ -1578,7 +1592,6 @@ impl Engine {
                 problem: self.geo_problem.clone(),
             },
             categories: self.categories.clone(),
-            block_quic: self.settings.block_quic,
         };
         let _ = self.frames.send(frame);
     }
@@ -1586,10 +1599,27 @@ impl Engine {
 
 /// A new profile: no servers, and the one rule every phone wants — its own
 /// network straight, so a printer or a router's page is not sent abroad.
+/// The first rule of a new profile.
+const LOCAL_RULE: &str = "Локальная сеть";
+
+/// The built-in rule against QUIC, the second of a new profile: QUIC is UDP
+/// inside the tunnel, which Vision drops on 443 and other servers carry
+/// badly, and a page waits on it — the user found parts of GitHub not
+/// loading. Refused, the browser opens the page over TCP at once. A rule
+/// above it decides first, so a site sent direct can keep its QUIC.
+fn quic_rule() -> Rule {
+    Rule {
+        name: Some("QUIC — открывать по TCP".to_owned()),
+        action: Action::Block,
+        protocol: vec!["quic".to_owned()],
+        ..Rule::default()
+    }
+}
+
 fn first_profile() -> Profile {
     let mut profile = Profile::default();
     profile.routing.rules.push(Rule {
-        name: Some("Локальная сеть".to_owned()),
+        name: Some(LOCAL_RULE.to_owned()),
         action: Action::Direct,
         ip: [
             "10.0.0.0/8",
@@ -1603,6 +1633,7 @@ fn first_profile() -> Profile {
         .to_vec(),
         ..Rule::default()
     });
+    profile.routing.rules.push(quic_rule());
     profile.routing.ensure_ids();
     profile
 }
@@ -1673,7 +1704,6 @@ async fn bring_up(
     router: Arc<Router>,
     packets: bliss_tun::Packets,
     names: Arc<bliss_tun::names::FakeNames>,
-    block_quic: Arc<std::sync::atomic::AtomicBool>,
     epoch: u64,
     own: mpsc::WeakUnboundedSender<Cmd>,
 ) -> Result<Running, String> {
@@ -1693,7 +1723,6 @@ async fn bring_up(
     // there are what lets domain and geosite rules see TUN connections.
     carrying.names = Some((DNS_ADDRESS, names));
     carrying.owner = Some(Arc::new(crate::android::owner_of));
-    carrying.block_quic = block_quic;
     let carrying = Arc::new(carrying);
     let ended = own.clone();
     let stack = tokio::spawn(async move {
@@ -1972,6 +2001,73 @@ mod tests {
             eprintln!("{host}: {:?} by {}", d.route, d.rule);
             assert_eq!(d.route, Route::Direct, "{host}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A profile from before the built-in «QUIC» rule gets it once, under
+    /// «Локальная сеть», switched as 0.2.5's switch stood; deleted, it is not
+    /// given back. A new profile starts with it on. And the editor's words
+    /// for it read back into the same rule.
+    #[test]
+    fn the_quic_rule_is_offered_once() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-quic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths {
+            files: dir.clone(),
+            libs: dir.clone(),
+            socket: dir.join("s"),
+        };
+        // 0.2.5's profile — the local network rule and one of the user's —
+        // with the switch turned off.
+        let mut old = Profile::default();
+        old.routing
+            .rules
+            .push(first_profile().routing.rules[0].clone());
+        old.routing.rules.push(Rule {
+            name: Some("Reddit".to_owned()),
+            action: Action::Direct,
+            geosite: vec!["reddit".to_owned()],
+            ..Rule::default()
+        });
+        std::fs::write(paths.profile(), toml::to_string(&old).unwrap()).unwrap();
+        std::fs::write(dir.join("android.json"), r#"{"block_quic":false}"#).unwrap();
+        let load = || {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (frames, _) = watch::channel(Frame::default());
+            Engine::load(paths.clone(), tx.downgrade(), frames)
+        };
+
+        let mut engine = load();
+        let rules = &engine.profile.routing.rules;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].name.as_deref(), Some(LOCAL_RULE));
+        assert_eq!(rules[1].protocol, ["quic"]);
+        assert!(!rules[1].enabled, "as the switch stood");
+        assert_eq!(rules[2].name.as_deref(), Some("Reddit"));
+
+        // Deleted, and not given back on the next start.
+        engine.ui(UiCommand::DeleteRule { index: 1 });
+        drop(engine);
+        let engine = load();
+        assert!(
+            engine
+                .profile
+                .routing
+                .rules
+                .iter()
+                .all(|r| r.protocol.is_empty())
+        );
+
+        // A new profile has it, on.
+        let new = first_profile();
+        assert_eq!(new.routing.rules[1].protocol, ["quic"]);
+        assert!(new.routing.rules[1].enabled);
+
+        let typed = rule_text::parse("QUIC", Action::Block, "protocol:QUIC").unwrap();
+        assert_eq!(typed.protocol, ["quic"]);
+        assert_eq!(rule_text::to_text(&typed), "protocol:quic");
+        assert!(rule_text::parse("x", Action::Block, "protocol:http").is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 

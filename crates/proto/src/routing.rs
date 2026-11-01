@@ -264,6 +264,13 @@ pub struct Rule {
     /// TUN mode, where bliss sees packets rather than requests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub geoip: Vec<String>,
+
+    /// Protocols read off the connection, in xray's word for the field:
+    /// `quic` alone so far — QUIC can only be told by its first packet, and a
+    /// rule of "UDP" and "port 443" would match every HTTPS connection too,
+    /// since any one condition is enough.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocol: Vec<String>,
 }
 
 /// A rule that sends nothing anywhere yet: switched on, conditions to fill in.
@@ -280,6 +287,7 @@ impl Default for Rule {
             process: Vec::new(),
             geosite: Vec::new(),
             geoip: Vec::new(),
+            protocol: Vec::new(),
         }
     }
 }
@@ -297,6 +305,7 @@ impl Rule {
             && self.process.is_empty()
             && self.geosite.is_empty()
             && self.geoip.is_empty()
+            && self.protocol.is_empty()
     }
 
     /// The name to show, invented from the contents if none was given.

@@ -1551,11 +1551,17 @@ table.
   and 8080, up to 16 KB and 400 ms, for a ClientHello's `server_name` or a
   request's `Host:`, then dialled straight to the address it chose or by the
   name through the tunnel, the bytes read passed on first. QUIC to a bare
-  address is refused, so the program falls back to that TCP. So is QUIC that
-  would go through the server, while «Блокировать QUIC через сервер» is on
-  (the default, `Carrying::block_quic`): QUIC is UDP inside the tunnel,
-  which Vision drops on 443 and other servers carry badly
-  (`quic_through_the_server_is_refused_when_asked`). And there,
+  address is refused, so the program falls back to that TCP. Any other
+  QUIC flow is told by its first packet (on every platform) and handed to
+  the rules as `protocol:quic`, a condition of its own — "UDP" and "443"
+  would not do, since any one condition is enough and 443 is every HTTPS
+  connection too. The phone's profiles carry a built-in «QUIC» → block
+  rule under «Локальная сеть» (`quic_rule`; offered once to older
+  profiles, `the_quic_rule_is_offered_once`): QUIC is UDP inside the tunnel,
+  which Vision drops on 443 and other servers carry badly, and parts of
+  GitHub did not load. It replaced 0.2.5's switch in the settings, at the
+  user's ask, so a rule above it can keep a site's QUIC
+  (`quic_is_handed_to_the_rules`, `quic_is_a_protocol_not_a_port`). And there,
   unlike the desktop, a rule change ends the open connections the new table
   sends elsewhere (`until_rerouted`, `Serving::router_changes`): an app
   keeps its connections for minutes, and the user's `geosite:reddit` rule

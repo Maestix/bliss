@@ -57,8 +57,6 @@ pub struct Frame {
     /// Every category in the rule sets, `geosite:…` then `geoip:…`, only
     /// while the rule editor asks (`UiCommand::GeoNames`).
     pub categories: Option<Vec<String>>,
-    /// Whether QUIC through the server is refused.
-    pub block_quic: bool,
 }
 
 /// The rule sets: where from, what is here, and a fetch under way.
@@ -254,9 +252,6 @@ pub enum UiCommand {
         on: bool,
     },
     /// The editor is open and wants the categories, or is closed.
-    BlockQuic {
-        on: bool,
-    },
     GeoNames {
         open: bool,
     },
@@ -278,7 +273,8 @@ pub fn app_of(rule: &bliss_proto::Rule) -> Option<String> {
         && rule.geosite.is_empty()
         && rule.ip.is_empty()
         && rule.geoip.is_empty()
-        && rule.port.is_empty();
+        && rule.port.is_empty()
+        && rule.protocol.is_empty();
     only_app.then(|| rule.process[0].clone())
 }
 
@@ -342,6 +338,7 @@ pub fn conditions(rule: &bliss_proto::Rule) -> String {
     parts.extend(rule.geoip.iter().map(|g| format!("geoip:{g}")));
     parts.extend(rule.port.iter().map(|p| format!("port:{p}")));
     parts.extend(rule.process.iter().map(|p| format!("app:{p}")));
+    parts.extend(rule.protocol.iter().map(|p| p.to_ascii_uppercase()));
     parts.join(" · ")
 }
 

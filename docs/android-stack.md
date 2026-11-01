@@ -456,5 +456,17 @@ connection whose name was read out of its own bytes now goes through the
 server to the address the app chose, not by the name: an outer ECH name
 resolves elsewhere.
 
+## 0.2.6: QUIC as a rule
+
+At the user's ask, the QUIC switch became a built-in rule, like «Локальная
+сеть»: «QUIC — открывать по TCP», block, second in the list, with a
+condition of its own, `protocol:quic` (xray's word), told by the flow's
+first packet. Seen in the list, it can be switched off, moved, or put under
+a rule that sends a site direct with its QUIC. A profile from before gets
+it once, switched as the old setting stood; deleted, it stays deleted. The
+desktop reads and writes the condition too (rule_text.rs, the table's
+words), and its TUN tells QUIC the same way; the desktop window was
+type-checked against stand-in libraries here, not run.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
