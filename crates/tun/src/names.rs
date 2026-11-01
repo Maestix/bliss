@@ -115,7 +115,10 @@ impl FakeNames {
             TYPE_A if is_local(&query.name) => Answer::Local(query),
             TYPE_A => {
                 let ip = self.address_for(&query.name);
-                Answer::Ready(query.reply(&[ip]))
+                Answer::Faked {
+                    reply: query.reply(&[ip]),
+                    name: query.name,
+                }
             }
             TYPE_AAAA | TYPE_HTTPS | TYPE_SVCB => Answer::Ready(query.reply(&[])),
             _ => Answer::Forward(query),
@@ -128,6 +131,10 @@ impl FakeNames {
 pub enum Answer {
     /// Answered here: send this back.
     Ready(Vec<u8>),
+    /// Answered here with an address from the pool, for this name: send the
+    /// reply back, and the caller may learn the name's real address ahead of
+    /// the connection that will follow (`Addresses`).
+    Faked { reply: Vec<u8>, name: String },
     /// A name of the local network: resolve it on the real network and
     /// answer with `Query::reply`.
     Local(Query),
@@ -229,6 +236,117 @@ impl Query {
     }
 }
 
+/// How many sites' real addresses are kept, and for how long. Past the cap
+/// the oldest is forgotten first.
+pub const ADDRESSES: usize = 4_096;
+const ADDRESS_LIFE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Sites' real addresses, learnt through the tunnel for the rules that look
+/// at addresses (`geoip:`, a subnet): the pool's address says nothing about
+/// a site's country. `None` remembers a name that has no IPv4 address.
+#[derive(Default)]
+pub struct Addresses {
+    known: Mutex<HashMap<String, (Option<Ipv4Addr>, std::time::Instant)>>,
+}
+
+impl Addresses {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What is known of a name, while it is fresh: `Some(None)` for a name
+    /// known to have no address, `None` for one not asked about yet.
+    pub fn get(&self, name: &str) -> Option<Option<Ipv4Addr>> {
+        let known = self.known.lock().expect("addresses lock");
+        known
+            .get(name)
+            .filter(|(_, at)| at.elapsed() < ADDRESS_LIFE)
+            .map(|(ip, _)| *ip)
+    }
+
+    pub fn put(&self, name: &str, ip: Option<Ipv4Addr>) {
+        let mut known = self.known.lock().expect("addresses lock");
+        if known.len() >= ADDRESSES && !known.contains_key(name) {
+            known.retain(|_, (_, at)| at.elapsed() < ADDRESS_LIFE);
+            if known.len() >= ADDRESSES
+                && let Some(oldest) = known
+                    .iter()
+                    .min_by_key(|(_, (_, at))| *at)
+                    .map(|(name, _)| name.clone())
+            {
+                known.remove(&oldest);
+            }
+        }
+        known.insert(name.to_owned(), (ip, std::time::Instant::now()));
+    }
+
+    pub fn len(&self) -> usize {
+        self.known.lock().expect("addresses lock").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A query for a name's IPv4 address, recursion asked for.
+pub fn query_a(id: u16, name: &str) -> Vec<u8> {
+    let mut q = Vec::with_capacity(name.len() + 18);
+    q.extend_from_slice(&id.to_be_bytes());
+    q.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in name.split('.').filter(|l| !l.is_empty()) {
+        let label = &label.as_bytes()[..label.len().min(63)];
+        q.push(label.len() as u8);
+        q.extend_from_slice(label);
+    }
+    q.push(0);
+    q.extend_from_slice(&TYPE_A.to_be_bytes());
+    q.extend_from_slice(&1u16.to_be_bytes());
+    q
+}
+
+/// The first IPv4 address in an answer to `query_a(id, …)`; `None` for
+/// another id, a failure, or an answer with none. CNAMEs before it are
+/// stepped over.
+pub fn first_a(answer: &[u8], id: u16) -> Option<Ipv4Addr> {
+    if answer.len() < 12 || answer[..2] != id.to_be_bytes() || answer[2] & 0x80 == 0 {
+        return None;
+    }
+    if answer[3] & 0x0f != 0 {
+        return None;
+    }
+    let questions = u16::from_be_bytes([answer[4], answer[5]]);
+    let answers = u16::from_be_bytes([answer[6], answer[7]]);
+    let mut at = 12;
+    // A name: labels to a zero, or ending in a pointer.
+    let skip_name = |mut at: usize| -> Option<usize> {
+        loop {
+            let len = *answer.get(at)?;
+            if len & 0xc0 == 0xc0 {
+                return Some(at + 2);
+            }
+            at += 1 + len as usize;
+            if len == 0 {
+                return Some(at);
+            }
+        }
+    };
+    for _ in 0..questions {
+        at = skip_name(at)? + 4;
+    }
+    for _ in 0..answers {
+        at = skip_name(at)?;
+        let kind = u16::from_be_bytes([*answer.get(at)?, *answer.get(at + 1)?]);
+        let len = u16::from_be_bytes([*answer.get(at + 8)?, *answer.get(at + 9)?]) as usize;
+        let data = answer.get(at + 10..at + 10 + len)?;
+        if kind == TYPE_A && len == 4 {
+            return Some(Ipv4Addr::new(data[0], data[1], data[2], data[3]));
+        }
+        at += 10 + len;
+    }
+    None
+}
+
 /// A name only the local network knows.
 fn is_local(name: &str) -> bool {
     !name.contains('.')
@@ -262,9 +380,52 @@ mod tests {
 
     fn answered(names: &FakeNames, name: &str, qtype: u16) -> Vec<u8> {
         match names.answer(&query(name, qtype)) {
-            Some(Answer::Ready(bytes)) => bytes,
+            Some(Answer::Ready(bytes)) | Some(Answer::Faked { reply: bytes, .. }) => bytes,
             other => panic!("not answered here: {other:?}"),
         }
+    }
+
+    /// A real answer through a CNAME: the query is read back and the A
+    /// record found past the alias; another id, a failure and an answer of
+    /// none give nothing.
+    #[test]
+    fn a_real_address_is_read_out_of_an_answer() {
+        let q = query_a(0x4242, "www.example.net");
+        assert_eq!(&q[..2], &[0x42, 0x42]);
+        let mut a = q.clone();
+        a[2] = 0x81;
+        a[3] = 0x80;
+        a[7] = 2; // two answers
+        // www.example.net CNAME edge.example.net
+        a.extend_from_slice(&[0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 60, 0, 7]);
+        a.extend_from_slice(&[4, b'e', b'd', b'g', b'e', 0xc0, 16]);
+        // edge.example.net A 203.0.113.7
+        a.extend_from_slice(&[0xc0, 33, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 203, 0, 113, 7]);
+        assert_eq!(first_a(&a, 0x4242), Some(Ipv4Addr::new(203, 0, 113, 7)));
+        assert_eq!(first_a(&a, 0x4243), None);
+        let mut failed = a.clone();
+        failed[3] = 0x83;
+        assert_eq!(first_a(&failed, 0x4242), None);
+        let mut none = q.clone();
+        none[2] = 0x81;
+        assert_eq!(first_a(&none, 0x4242), None);
+        assert_eq!(first_a(&a[..20], 0x4242), None);
+    }
+
+    #[test]
+    fn the_real_addresses_have_a_cap() {
+        let known = Addresses::new();
+        known.put("first.example", Some(Ipv4Addr::new(203, 0, 113, 1)));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        for i in 0..ADDRESSES {
+            known.put(&format!("s{i}.example"), None);
+        }
+        assert_eq!(known.len(), ADDRESSES);
+        assert_eq!(known.get("first.example"), None, "the oldest went first");
+        assert_eq!(
+            known.get(&format!("s{}.example", ADDRESSES - 1)),
+            Some(None)
+        );
     }
 
     #[test]

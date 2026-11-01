@@ -31,4 +31,5 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+bliss-proto = { path = "../proto" }
 sha2.workspace = true

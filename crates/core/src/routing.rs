@@ -252,6 +252,18 @@ impl Router {
     /// work, and a client that refuses to start because a database is absent is
     /// worse than one that tells you which rules are inactive.
     pub fn build(config: &Routing, geo_dir: &Path) -> Self {
+        Self::compile(config, geo_dir, false)
+    }
+
+    /// The same table for a caller that learns a site's address before
+    /// deciding (`decide_with`) — Android's TUN, which resolves names through
+    /// the tunnel — so a country rule does see sites, and the warning that it
+    /// cannot is not given.
+    pub fn build_resolving(config: &Routing, geo_dir: &Path) -> Self {
+        Self::compile(config, geo_dir, true)
+    }
+
+    fn compile(config: &Routing, geo_dir: &Path, resolving: bool) -> Self {
         let mut warnings = Vec::new();
 
         // Load every category any rule mentions, once, rather than per rule —
@@ -366,7 +378,7 @@ impl Router {
                 .iter()
                 .filter(|country| !rule.geosite.iter().any(|set| covers_country(set, country)))
                 .collect();
-            if !blind.is_empty() {
+            if !blind.is_empty() && !resolving {
                 let names = site_names.get_or_insert_with(|| {
                     crate::geo::site_names(&geo_dir.join("geosite.dat")).ok()
                 });
@@ -385,6 +397,19 @@ impl Router {
 
     /// Which way does this connection go, and why?
     pub fn decide(&self, target: &Target, process: Option<&str>) -> Decision {
+        self.decide_with(target, None, process)
+    }
+
+    /// `decide`, for a site whose address the caller has learnt: domain and
+    /// geosite conditions look at the name, address and geoip conditions at
+    /// `resolved`. Only a caller that resolved the name without leaking it —
+    /// through the tunnel — should pass one (AGENTS.md §5).
+    pub fn decide_with(
+        &self,
+        target: &Target,
+        resolved: Option<IpAddr>,
+        process: Option<&str>,
+    ) -> Decision {
         let host = normalise(&target.host());
         let ip = match target {
             Target::Socket(addr) => Some(addr.ip()),
@@ -398,7 +423,7 @@ impl Router {
             //
             // A name that is not an address is still never resolved here — see
             // the note on `Rule::geoip`.
-            Target::Domain { host, .. } => host.parse().ok(),
+            Target::Domain { host, .. } => host.parse().ok().or(resolved),
         };
         let port = target.port();
 
@@ -414,6 +439,38 @@ impl Router {
             route: self.fallback,
             rule: "по умолчанию".to_owned(),
         }
+    }
+
+    /// Whether a site's address could change the decision: walking the rules
+    /// by the name alone, an address or country rule comes before any rule
+    /// that matches. False for an address, which is its own answer, and for a
+    /// name decided before any such rule — so a name is resolved only when an
+    /// answer depends on it, as xray's `IPIfNonMatch` does.
+    pub fn wants_address(&self, target: &Target, process: Option<&str>) -> bool {
+        let Target::Domain { host, .. } = target else {
+            return false;
+        };
+        if host.parse::<IpAddr>().is_ok() {
+            return false;
+        }
+        let host = normalise(host);
+        let port = target.port();
+        for rule in &self.rules {
+            if rule.matches(&host, None, port, process) {
+                return false;
+            }
+            if !rule.cidrs.is_empty() || !rule.ips.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether any rule looks at addresses at all.
+    pub fn has_address_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| !rule.cidrs.is_empty() || !rule.ips.is_empty())
     }
 
     pub fn rule_count(&self) -> usize {
@@ -565,6 +622,45 @@ mod tests {
             action,
             ..Rule::default()
         }
+    }
+
+    /// A site's address, learnt by the caller, decides the address rules a
+    /// name alone went past — and is asked for only when one comes before
+    /// the decision. On Android every site arrives by name, and without this
+    /// no `geoip:` rule ever matched a page there.
+    #[test]
+    fn a_resolved_site_meets_the_address_rules() {
+        let mut named = rule(Action::Proxy, "Сайт");
+        named.domain = vec!["kept.example".into()];
+        let mut lan = rule(Action::Direct, "Сеть");
+        lan.ip = vec!["10.0.0.0/8".into()];
+        let r = router(vec![named, lan], Action::Proxy);
+        let site = Target::Domain {
+            host: "shop.example".into(),
+            port: 443,
+        };
+        let inside: IpAddr = "10.1.2.3".parse().unwrap();
+        let outside: IpAddr = "203.0.113.5".parse().unwrap();
+        assert!(r.wants_address(&site, None));
+        assert_eq!(
+            r.decide_with(&site, Some(inside), None).route,
+            Route::Direct
+        );
+        assert_eq!(
+            r.decide_with(&site, Some(outside), None).route,
+            Route::Proxy
+        );
+        assert_eq!(r.decide(&site, None).route, Route::Proxy);
+        // Decided by its name first: nothing to ask.
+        let kept = Target::Domain {
+            host: "kept.example".into(),
+            port: 443,
+        };
+        assert!(!r.wants_address(&kept, None));
+        assert_eq!(r.decide_with(&kept, Some(inside), None).route, Route::Proxy);
+        // An address is its own answer.
+        assert!(!r.wants_address(&Target::Socket("10.1.2.3:80".parse().unwrap()), None));
+        assert!(r.has_address_rules());
     }
 
     fn router(rules: Vec<Rule>, fallback: Action) -> Router {
@@ -876,6 +972,13 @@ mod tests {
             ..Routing::default()
         };
         let r = Router::build(&routing, &dir);
+        // A table whose caller resolves sites has no such warning to give.
+        assert!(
+            !Router::build_resolving(&routing, &dir)
+                .warnings
+                .iter()
+                .any(|w| w.contains("сайты это правило не поймает"))
+        );
 
         let all = r.warnings.join("\n");
         // One such warning, for `RU`: `private` means addresses, and the last

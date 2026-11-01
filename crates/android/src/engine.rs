@@ -1140,7 +1140,9 @@ impl Engine {
             ip: vec!["::/0".to_owned()],
             ..Rule::default()
         });
-        Router::build(&routing, &self.paths.files)
+        // The stack learns a site's address through the tunnel for rules that
+        // look at addresses (`Carrying::decide`), so `geoip:` sees sites here.
+        Router::build_resolving(&routing, &self.paths.files)
     }
 
     /// A rule from the editor. One condition that does not read refuses the

@@ -400,5 +400,19 @@ colours, and a monochrome layer for themed icons
 (`android/make-icon.py`, from `crates/app/assets/bliss.ico`). The
 notification's off pill reads «Выкл.»: «Отключить» was cut to «Отключ…».
 
+## 0.2.3: countries
+
+The user found `geoip:` missing from Правила. Two holes. The editor put the
+countries after some 1 500 lists of sites, sixty at a time, so none ever
+showed: «+ Страна» is a picker of its own now, a country by its flag and
+Russian name (`geoipLabel`), the usual ones first. And on the phone every
+site reaches the rules by name, which a `geoip:` rule never looks at: the
+stack now learns the site's real address through the tunnel when a rule
+that looks at addresses comes before the decision — at the DNS answer
+already, ahead of the connection, when the table has any such rule — and
+decides by name and address together. `a_site_by_name_meets_a_rule_by_address`
+holds the stack to it; on both real rule sets an address in Russia meets
+`geoip:ru`.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

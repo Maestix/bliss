@@ -23,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpSocket;
 
 use crate::device::MTU;
-use crate::names::{Answer, FakeNames};
+use crate::names::{Addresses, Answer, FakeNames};
 use crate::net::{self, Gateway};
 
 /// How long a connection may sit idle before the stack forgets it.
@@ -50,6 +50,9 @@ pub struct Carrying {
     /// a table read (Android: `getConnectionOwnerUid`). Without it, the
     /// machine's own tables (`bliss_core::name_for_connection`).
     pub owner: Option<Owner>,
+    /// Sites' real addresses, learnt through the tunnel where `names` hands
+    /// out the pool's: what `geoip:` and subnet rules decide a site by.
+    pub addresses: Arc<Addresses>,
 }
 
 /// How long a connection waits to learn its program from the system.
@@ -65,6 +68,7 @@ impl Carrying {
             gateway,
             names: None,
             owner: None,
+            addresses: Arc::new(Addresses::new()),
         }
     }
 
@@ -116,6 +120,58 @@ async fn ask_owner(
         Err(_) => {
             tracing::debug!("tun: nobody said whose {local} → {remote} is; deciding without");
             None
+        }
+    }
+}
+
+impl Carrying {
+    /// The rules' answer, by the site's real address too where a rule that
+    /// looks at addresses comes before the decision.
+    async fn decide(&self, target: &Target, process: Option<&str>) -> Decision {
+        let router = self.serving.router();
+        if self.names.is_some()
+            && let Target::Domain { host, .. } = target
+            && !is_vpn_program(process)
+            && router.wants_address(target, process)
+        {
+            let ip = self.real_address(host).await.map(IpAddr::V4);
+            return router.decide_with(target, ip, process);
+        }
+        decide(&self.serving, target, process)
+    }
+
+    /// A site's IPv4 address, asked of 1.1.1.1 through the tunnel — never of
+    /// the phone's network, which would tell it every site (AGENTS.md §5) —
+    /// and kept for ten minutes.
+    async fn real_address(&self, name: &str) -> Option<std::net::Ipv4Addr> {
+        if let Some(known) = self.addresses.get(name) {
+            return known;
+        }
+        static IDS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0x5a17);
+        let id = IDS.fetch_add(0x9e37, std::sync::atomic::Ordering::Relaxed);
+        let asked = async {
+            let upstream = self
+                .serving
+                .bind_tunnelled(Route::Proxy, &Target::Socket(UPSTREAM_DNS))
+                .await?;
+            upstream.send(&crate::names::query_a(id, name)).await?;
+            let mut back = vec![0u8; 1500];
+            loop {
+                let got = upstream.recv(&mut back).await?;
+                // Only the answer to this question: an id that differs is
+                // something else, and the wait goes on.
+                if got >= 2 && back[..2] == id.to_be_bytes() {
+                    return io::Result::Ok(crate::names::first_a(&back[..got], id));
+                }
+            }
+        };
+        match tokio::time::timeout(LOOKUP_WAIT, asked).await {
+            Ok(Ok(ip)) => {
+                self.addresses.put(name, ip);
+                ip
+            }
+            // Not remembered: the next connection asks again.
+            _ => None,
         }
     }
 }
@@ -273,7 +329,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
         .program(true, client.local_addr(), client.peer_addr())
         .await;
     // One table decides this connection, whatever changes while it is open.
-    let decision = decide(serving, &target, process.as_deref());
+    let decision = carrying.decide(&target, process.as_deref()).await;
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: {target} blocked by {}", decision.rule);
@@ -344,7 +400,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let process = carrying
         .program(false, client.local_addr(), client.peer_addr())
         .await;
-    let decision = decide(serving, &target, process.as_deref());
+    let decision = carrying.decide(&target, process.as_deref()).await;
 
     if decision.route == Route::Blocked {
         tracing::debug!("tun: udp {target} blocked by {}", decision.rule);
@@ -414,6 +470,20 @@ async fn answer_lookups(
         let reply = match names.answer(&buf[..n]) {
             None => continue,
             Some(Answer::Ready(reply)) => reply,
+            Some(Answer::Faked { reply, name }) => {
+                // The connection follows in a moment: learn the site's real
+                // address now, if any rule looks at addresses, so it is
+                // decided without waiting.
+                if carrying.serving.router().has_address_rules()
+                    && carrying.addresses.get(&name).is_none()
+                {
+                    let carrying = Arc::clone(&carrying);
+                    tokio::spawn(async move {
+                        let _ = carrying.real_address(&name).await;
+                    });
+                }
+                reply
+            }
             Some(Answer::Local(query)) => {
                 let found = tokio::time::timeout(
                     LOOKUP_WAIT,
@@ -465,10 +535,14 @@ async fn answer_lookups(
 /// abroad, if the work server takes connections from there at all.
 const VPN_PROGRAMS: [&str; 2] = ["openvpn.exe", "openvpn"];
 
+fn is_vpn_program(process: Option<&str>) -> bool {
+    process.is_some_and(|p| VPN_PROGRAMS.iter().any(|v| p.eq_ignore_ascii_case(v)))
+}
+
 /// The rules' answer, except for the VPN's own connections, which leave the
 /// ordinary way whatever the rules say.
 fn decide(serving: &Serving, target: &Target, process: Option<&str>) -> Decision {
-    if process.is_some_and(|p| VPN_PROGRAMS.iter().any(|v| p.eq_ignore_ascii_case(v))) {
+    if is_vpn_program(process) {
         return Decision {
             route: Route::Direct,
             rule: "OpenVPN, мимо туннеля".to_owned(),
@@ -680,6 +754,62 @@ mod tests {
     /// comes back from that address with an address from the pool — and a
     /// second one for the same name with the same address. This is the path
     /// every name on the phone takes; 0.2.0 shipped without it run anywhere.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_site_by_name_meets_a_rule_by_address() {
+        let mut lan = bliss_proto::Rule {
+            name: Some("Сеть".to_owned()),
+            action: bliss_proto::Action::Direct,
+            ..bliss_proto::Rule::default()
+        };
+        lan.ip = vec!["10.0.0.0/8".to_owned()];
+        let routing = bliss_proto::Routing {
+            fallback: bliss_proto::Action::Proxy,
+            rules: vec![lan],
+            ..bliss_proto::Routing::default()
+        };
+        let router = Router::build_resolving(&routing, std::path::Path::new("/nonexistent"));
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().expect("an address"),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(router),
+        ));
+        let mut carrying = Carrying::new(serving, Gateway::for_tests());
+        carrying.names = Some(("172.19.0.2:53".parse().unwrap(), Arc::new(FakeNames::new())));
+        // As if learnt through the tunnel already.
+        carrying
+            .addresses
+            .put("nas.example", Some(std::net::Ipv4Addr::new(10, 1, 2, 3)));
+        carrying
+            .addresses
+            .put("far.example", Some(std::net::Ipv4Addr::new(203, 0, 113, 5)));
+        let site = |host: &str| Target::Domain {
+            host: host.to_owned(),
+            port: 443,
+        };
+        assert_eq!(
+            carrying.decide(&site("nas.example"), None).await.route,
+            Route::Direct
+        );
+        assert_eq!(
+            carrying.decide(&site("far.example"), None).await.route,
+            Route::Proxy
+        );
+        // Without names (the desktop), a name is never resolved for a rule.
+        carrying.names = None;
+        assert_eq!(
+            carrying.decide(&site("nas.example"), None).await.route,
+            Route::Proxy
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_lookup_through_the_stack_is_answered_from_the_pool() {
