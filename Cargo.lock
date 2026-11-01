@@ -846,6 +846,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bliss-core",
+ "bliss-proto",
  "ipstack",
  "libc",
  "sha2",

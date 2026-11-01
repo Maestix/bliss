@@ -320,6 +320,30 @@ mod tests {
             router.decide(&target, None).route,
             bliss_core::Route::Direct
         );
+
+        // A site by name meets a country rule by the address learnt for it.
+        routing.rules.push(bliss_proto::Rule {
+            action: bliss_proto::Action::Block,
+            geoip: vec!["ru".to_owned()],
+            ..bliss_proto::Rule::default()
+        });
+        let router = bliss_core::Router::build_resolving(&routing, &dir);
+        let site = bliss_core::Target::Domain {
+            host: "shop.example".to_owned(),
+            port: 443,
+        };
+        assert!(router.wants_address(&site, None));
+        // 77.88.8.8, Yandex's public DNS, in Russia; 203.0.113.5 nowhere.
+        let ru: std::net::IpAddr = "77.88.8.8".parse().unwrap();
+        let elsewhere: std::net::IpAddr = "203.0.113.5".parse().unwrap();
+        assert_eq!(
+            router.decide_with(&site, Some(ru), None).route,
+            bliss_core::Route::Blocked
+        );
+        assert_eq!(
+            router.decide_with(&site, Some(elsewhere), None).route,
+            bliss_core::Route::Proxy
+        );
     }
 
     #[test]

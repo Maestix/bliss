@@ -1532,7 +1532,12 @@ table.
   — is what makes the rest of the rules work. It exists on Android only
   (`names.rs`, given to the stack as `Carrying::names`), where the VPN
   service names bliss's own DNS address; the desktop's adapter does not
-  answer DNS yet. While the adapter is on, the routing screen names the rules this silences
+  answer DNS yet. There a name also meets `geoip:` and subnet rules: when
+  such a rule comes before the decision (`Router::wants_address`), the
+  stack asks 1.1.1.1 through the tunnel for the site's address — never the
+  phone's network — keeps it ten minutes (`names::Addresses`, 4 096 at
+  most), and decides by both (`decide_with`); a table built with
+  `build_resolving` gives no warning that a country rule cannot see sites. While the adapter is on, the routing screen names the rules this silences
   (`blind_under_tun`): the ones whose only conditions are domains and geosite
   sets. A rule that also has an address, a port or a program still decides
   with those, so it is left out rather than buried in the list. The user's own
