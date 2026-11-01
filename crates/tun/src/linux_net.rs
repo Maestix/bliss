@@ -41,6 +41,17 @@ pub struct Gateway {
     next_hop: Option<Ipv4Addr>,
 }
 
+impl Gateway {
+    /// A way out for tests that never dial directly.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            index: 1,
+            next_hop: None,
+        }
+    }
+}
+
 impl std::fmt::Display for Gateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.next_hop {

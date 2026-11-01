@@ -370,5 +370,24 @@ notification of bliss's own.
   under «Постоянный VPN» with its block, where it would mean no network.
 - Not run on a phone before it was handed over: no emulator here.
 
+## 0.2.1: what the phone showed
+
+0.2.0 said «Подключено», carried nothing, and its «Отключить» did nothing.
+The call back for apps was the cause: `Native.start` is a method of the
+`Native` object, so the second argument JNI hands it is that object, and
+0.2.0 kept it as the class to call `ownerOf` on. A release build does not
+check (no CheckJNI), and the lookup on an object taken for a class hung
+inside ART — every connection through the TUN waited on it for good, and
+the hung thread, holding the runtime's lock, froze the service's own
+Java threads, the one that takes «Отключить» among them. The class is now
+looked up by name in `start`, and the stack waits 500 ms at most for an
+owner before deciding without one (`an_owner_that_never_answers_is_not_waited_for`).
+`a_lookup_through_the_stack_is_answered_from_the_pool` now carries a DNS
+query through the real stack and back, on Linux.
+
+The notification also stood as a dark box inside the system's card, its
+«Отключить» pushed past the edge: it is colorized in the surface colour
+now (a foreground service may), and its pills share the width.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

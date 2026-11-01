@@ -27,7 +27,7 @@ fn string(env: &mut JNIEnv, value: &JString) -> Option<String> {
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_bliss_Native_start(
     mut env: JNIEnv,
-    class: JClass,
+    _this: JObject,
     files: JString,
     libs: JString,
     socket: JString,
@@ -40,8 +40,14 @@ pub extern "system" fn Java_app_bliss_Native_start(
         return 0;
     };
     // Kept for the call back: a thread the engine made finds no app class by
-    // name, so the class is held from here, where the app called in.
-    if let (Ok(vm), Ok(class)) = (env.get_java_vm(), env.new_global_ref(&class)) {
+    // name, so the class is looked up here, where the app called in. Not the
+    // second argument: `start` is a method of the `Native` object, so that is
+    // the object itself, and 0.2.0 handed it to CallStaticObjectMethod as a
+    // class — which a release build does not check, and which hung every
+    // connection through the TUN and froze the service's Java side with it.
+    if let (Ok(vm), Ok(class)) = (env.get_java_vm(), env.find_class("app/bliss/Native"))
+        && let Ok(class) = env.new_global_ref(&class)
+    {
         let _ = JAVA.set((vm, class));
     }
     let paths = Paths {
