@@ -290,7 +290,7 @@ private fun RuleList(frame: Frame, c: Commands, open: (Sheet) -> Unit) {
 // --- the editor ----------------------------------------------------------------
 
 /** What kind of condition the add row is asking for. */
-private enum class Adding { None, Site, App, Category, Address }
+private enum class Adding { None, Site, App, Sites, Country, Address }
 
 /**
  * A rule's editor: a name, where it sends, and its conditions as chips
@@ -355,7 +355,8 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                     }
                     Row(Modifier.padding(top = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for ((kind, word) in listOf(Adding.Site to "+ Сайт", Adding.App to "+ Приложение",
-                            Adding.Category to "+ Категория", Adding.Address to "+ Адрес или порт")) {
+                            Adding.Sites to "+ Список сайтов", Adding.Country to "+ Страна",
+                            Adding.Address to "+ Адрес или порт")) {
                             Chip(word, adding == kind) { adding = if (adding == kind) Adding.None else kind }
                         }
                     }
@@ -367,7 +368,8 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                         Adding.Site -> Entry("example.com — и всё под ним", add)
                         Adding.Address -> Entry("1.2.3.4, 10.0.0.0/8 или port:443", add)
                         Adding.App -> AppPicker { add("app:$it") }
-                        Adding.Category -> CategoryPicker(frame, c, add)
+                        Adding.Sites -> CategoryPicker(frame, c, "geosite:", add)
+                        Adding.Country -> CategoryPicker(frame, c, "geoip:", add)
                     }
                 }
             }
@@ -389,7 +391,8 @@ private fun Condition(line: String, remove: () -> Unit) {
     val shown = when {
         line.startsWith("app:") -> "📱 " + Apps.label(context, line.removePrefix("app:"))
         line.startsWith("process:") -> "📱 " + Apps.label(context, line.removePrefix("process:"))
-        line.startsWith("geosite:") || line.startsWith("geoip:") -> "🗂 " + line
+        line.startsWith("geoip:") -> geoipLabel(line.removePrefix("geoip:"))
+        line.startsWith("geosite:") -> "🗂 " + line.removePrefix("geosite:")
         else -> line
     }
     Row(
@@ -448,26 +451,69 @@ private fun AppPicker(pick: (String) -> Unit) {
     }
 }
 
+/** Lists of sites most rules start from, offered before the rest. */
+private val PopularSites = listOf("category-ru", "google", "youtube", "telegram", "category-ads-all",
+    "openai", "discord", "instagram", "facebook", "twitter", "netflix", "spotify", "github", "apple", "microsoft")
+
+/** Countries most rules start from, offered before the rest. */
+private val PopularCountries = listOf("ru", "private", "by", "kz", "ua", "us", "de", "nl", "fi", "tr", "cn")
+
+private val Russian = java.util.Locale.forLanguageTag("ru")
+
+/**
+ * A geoip entry as a person reads it: a country by its flag and Russian name
+ * (`ru` → 🇷🇺 Россия), `private` as the local networks, anything else — a
+ * company's addresses, `telegram`, `cloudflare` — as it is written.
+ */
+fun geoipLabel(code: String): String {
+    if (code == "private") return "🏠 Локальные сети"
+    if (code.length == 2 && code.all { it in 'a'..'z' }) {
+        val name = java.util.Locale.Builder().setRegion(code.uppercase()).build().getDisplayCountry(Russian)
+        if (name.isNotBlank() && !name.equals(code, ignoreCase = true)) {
+            val flag = code.uppercase().map { Character.toChars(0x1F1E6 + (it - 'A')).concatToString() }.joinToString("")
+            return "$flag $name"
+        }
+    }
+    return "🌐 $code"
+}
+
+/**
+ * Picks one entry of the rule sets: `geosite:` lists of sites, or `geoip:`
+ * countries and address lists, each from its own button — in one list the
+ * countries came after some 1 500 lists of sites and never showed.
+ */
 @Composable
-private fun CategoryPicker(frame: Frame, c: Commands, pick: (String) -> Unit) {
+private fun CategoryPicker(frame: Frame, c: Commands, prefix: String, pick: (String) -> Unit) {
     val names = frame.categories
     var query by remember { mutableStateOf("") }
+    val countries = prefix == "geoip:"
     Column(Modifier.padding(top = 8.dp)) {
         if (names.isNullOrEmpty()) {
-            Text("Категории берутся из гео-файлов, а их на телефоне пока нет.", style = T.small)
+            Text(if (countries) "Страны берутся из гео-файлов, а их на телефоне пока нет."
+                else "Списки сайтов берутся из гео-файлов, а их на телефоне пока нет.", style = T.small)
             Btn(if (frame.geo.fetching != null) "Скачиваю… ${bytes(frame.geo.fetching)}" else "Скачать гео-файлы",
                 enabled = frame.geo.fetching == null, modifier = Modifier.padding(top = 8.dp)) { c("geo_update", "source" to null) }
             return@Column
         }
-        Search(query, "google, youtube, ru, category-ads-all…") { query = it }
+        val codes = remember(names, prefix) { names.filter { it.startsWith(prefix) }.map { it.removePrefix(prefix) } }
+        val labels = remember(codes) { if (countries) codes.associateWith { geoipLabel(it) } else emptyMap() }
+        Search(query, if (countries) "Россия, Германия, ru, private…" else "google, youtube, category-ru…") { query = it }
         val q = query.trim().lowercase()
-        // The most likely first: an exact name, then names that start with it.
-        val found = names.asSequence().filter { q.isEmpty() || it.substringAfter(':').contains(q) }
-            .sortedBy { val n = it.substringAfter(':'); if (n == q) 0 else if (n.startsWith(q)) 1 else 2 }
+        val popular = if (countries) PopularCountries else PopularSites
+        val found = codes.asSequence()
+            .filter { q.isEmpty() || it.contains(q) || (labels[it]?.lowercase()?.contains(q) ?: false) }
+            .sortedWith(compareBy<String>(
+                // The most likely first: the exact code, the popular ones, codes that start with it.
+                { if (it == q) 0 else if (q.isEmpty() && it in popular) 1 else if (it.startsWith(q)) 2 else 3 },
+                { if (q.isEmpty()) popular.indexOf(it).let { i -> if (i < 0) Int.MAX_VALUE else i } else 0 },
+                { labels[it]?.substringAfter(' ') ?: it },
+            ))
             .take(60).toList()
-        for (name in found) {
-            Text(name, style = T.body.copy(fontSize = 14.sp), modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .clickable { pick(name) }.padding(horizontal = 10.dp, vertical = 11.dp))
+        if (found.isEmpty()) Text("Ничего не нашлось", style = T.small, modifier = Modifier.padding(10.dp))
+        for (code in found) {
+            Text(if (countries) labels[code] ?: code else code, style = T.body.copy(fontSize = 14.sp),
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable { pick(prefix + code) }.padding(horizontal = 10.dp, vertical = 11.dp))
         }
     }
 }
