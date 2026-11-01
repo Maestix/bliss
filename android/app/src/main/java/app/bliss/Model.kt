@@ -39,6 +39,8 @@ data class Frame(
     val geo: GeoView = GeoView(),
     /** Every geosite:/geoip: category, only while the rule editor asks. */
     val categories: List<String>? = null,
+    /** Whether QUIC through the server is refused, so pages open over TCP. */
+    val blockQuic: Boolean = true,
     /** Not from the engine: whether the socket is up at all. */
     val connected: Boolean = false,
 )
@@ -136,6 +138,7 @@ fun parseFrame(text: String): Frame {
         } ?: GeoView(),
         categories = if (o.isNull("categories") || !o.has("categories")) null
             else o.optJSONArray("categories")?.let { a -> (0 until a.length()).map { a.getString(it) } },
+        blockQuic = o.optBoolean("block_quic", true),
         connected = true,
     )
 }
