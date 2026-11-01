@@ -291,7 +291,7 @@ private fun RuleList(frame: Frame, c: Commands, open: (Sheet) -> Unit) {
 // --- the editor ----------------------------------------------------------------
 
 /** What kind of condition the add row is asking for. */
-private enum class Adding { None, Site, App, Sites, Country, Address, Quic }
+private enum class Adding { None, Site, App, Sites, Country, Address }
 
 /**
  * A rule's editor: a name, where it sends, and its conditions as chips
@@ -304,7 +304,14 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
     val old = index?.let { frame.rules.getOrNull(it) }
     var name by remember { mutableStateOf(if (old?.named == true) old.name else "") }
     var action by remember { mutableStateOf(old?.action?.takeIf { it != "vpn" } ?: "proxy") }
-    val lines = remember { mutableStateListOf<String>().apply { addAll(old?.text?.lines()?.filter { it.isNotBlank() }.orEmpty()) } }
+    val written = old?.text?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+    // The network is not one of the conditions but a limit on them all, as
+    // in xray: chosen apart, «UDP» with port 443 being QUIC.
+    val isNetwork = { line: String -> line.startsWith("network:", ignoreCase = true) }
+    var network by remember {
+        mutableStateOf(written.filter(isNetwork).map { it.substringAfter(':').lowercase() }.singleOrNull() ?: "")
+    }
+    val lines = remember { mutableStateListOf<String>().apply { addAll(written.filterNot(isNetwork)) } }
     var asText by remember { mutableStateOf(false) }
     var text by remember { mutableStateOf("") }
     var adding by remember { mutableStateOf(Adding.None) }
@@ -327,6 +334,9 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                 Row(Modifier.padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (a in listOf("proxy", "direct", "block")) Chip(actionWord(a), action == a, color = actionColor(a)) { action = a }
                 }
+                Kicker("Сеть — для чего правило", Modifier.padding(top = 2.dp))
+                Segments(listOf("" to "Любая", "tcp" to "TCP", "udp" to "UDP"), network,
+                    Modifier.padding(top = 6.dp, bottom = 12.dp)) { network = it }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Kicker("Условия — хватит любого", Modifier.weight(1f))
                     Text(if (asText) "Чипами" else "Текстом", style = T.small.copy(color = C.Accent),
@@ -357,21 +367,15 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                     Row(Modifier.padding(top = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for ((kind, word) in listOf(Adding.Site to "+ Сайт", Adding.App to "+ Приложение",
                             Adding.Sites to "+ Список сайтов", Adding.Country to "+ Страна",
-                            Adding.Address to "+ Адрес или порт", Adding.Quic to "+ QUIC")) {
-                            Chip(word, adding == kind) {
-                                // QUIC has one value and nothing to choose: added on the tap.
-                                if (kind == Adding.Quic) {
-                                    if ("protocol:quic" !in lines) lines.add("protocol:quic")
-                                    adding = Adding.None
-                                } else adding = if (adding == kind) Adding.None else kind
-                            }
+                            Adding.Address to "+ Адрес или порт")) {
+                            Chip(word, adding == kind) { adding = if (adding == kind) Adding.None else kind }
                         }
                     }
                 }
                 item {
                     val add = { value: String -> if (value.isNotBlank() && value !in lines) lines.add(value.trim()); adding = Adding.None }
                     when (adding) {
-                        Adding.None, Adding.Quic -> {}
+                        Adding.None -> {}
                         Adding.Site -> Entry("example.com — и всё под ним", add)
                         Adding.Address -> Entry("1.2.3.4, 10.0.0.0/8 или port:443", add)
                         Adding.App -> AppPicker { add("app:$it") }
@@ -383,7 +387,8 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
         }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Btn("Отмена", accent = false, modifier = Modifier.weight(1f), onClick = close)
-            val conditions = if (asText) text else lines.joinToString("\n")
+            val conditions = listOfNotNull(if (asText) text else lines.joinToString("\n"),
+                network.takeIf { it.isNotEmpty() }?.let { "network:$it" }).filter { it.isNotBlank() }.joinToString("\n")
             Btn("Сохранить", modifier = Modifier.weight(1.4f), enabled = conditions.isNotBlank()) {
                 c("save_rule", "index" to index, "name" to name, "action" to action, "text" to conditions)
                 close()
@@ -399,7 +404,6 @@ private fun Condition(line: String, remove: () -> Unit) {
         line.startsWith("app:") -> "📱 " + Apps.label(context, line.removePrefix("app:"))
         line.startsWith("process:") -> "📱 " + Apps.label(context, line.removePrefix("process:"))
         line.startsWith("geoip:") -> geoipLabel(line.removePrefix("geoip:"))
-        line.equals("protocol:quic", ignoreCase = true) -> "⚡ QUIC"
         line.startsWith("geosite:") -> "🗂 " + line.removePrefix("geosite:")
         else -> line
     }
