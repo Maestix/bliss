@@ -19,7 +19,7 @@
         android:src="@drawable/scene" />
 
     <ImageView
-        android:layout_width="230dp"
+        android:layout_width="170dp"
         android:layout_height="match_parent"
         android:contentDescription="@null"
         android:scaleType="fitXY"
@@ -89,49 +89,65 @@
                 android:fontFamily="sans-serif-medium"
                 android:textColor="#D3C9DD"
                 android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/latency"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#B5A9C4"
+                android:textSize="13sp" />
         </LinearLayout>
 
+        <!-- Three pills of one width: at their own widths «Отключить» was
+             pushed past the edge and wrapped out of sight on the user's phone. -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="14dp"
             android:orientation="horizontal">
 
             <TextView
                 android:id="@+id/first"
-                android:layout_width="wrap_content"
-                android:layout_height="34dp"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
                 android:background="@drawable/note_pill"
+                android:ellipsize="end"
                 android:fontFamily="sans-serif-medium"
                 android:gravity="center"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
+                android:maxLines="1"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
                 android:textColor="#EE82C4"
                 android:textSize="13sp" />
-
             <TextView
                 android:id="@+id/second"
-                android:layout_width="wrap_content"
-                android:layout_height="34dp"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
                 android:layout_marginStart="8dp"
                 android:background="@drawable/note_pill_quiet"
+                android:ellipsize="end"
                 android:fontFamily="sans-serif-medium"
                 android:gravity="center"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
+                android:maxLines="1"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
                 android:textColor="#D3C9DD"
                 android:textSize="13sp" />
-
             <TextView
                 android:id="@+id/third"
-                android:layout_width="wrap_content"
-                android:layout_height="34dp"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
                 android:layout_marginStart="8dp"
                 android:background="@drawable/note_pill_quiet"
+                android:ellipsize="end"
                 android:fontFamily="sans-serif-medium"
                 android:gravity="center"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
+                android:maxLines="1"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
                 android:textColor="#D3C9DD"
                 android:textSize="13sp" />
         </LinearLayout>
