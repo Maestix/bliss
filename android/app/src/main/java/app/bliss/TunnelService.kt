@@ -237,6 +237,7 @@ class TunnelService : VpnService() {
                     views.setViewVisibility(R.id.clock, View.GONE)
                 }
                 big.setTextViewText(R.id.clock_word, "")
+                big.setTextViewText(R.id.latency, "")
                 pill(0, "Отключить", service(DISCONNECT, 1))
             }
             is Note.On -> {
@@ -245,10 +246,11 @@ class TunnelService : VpnService() {
                 small.setTextViewText(R.id.detail, note.server + (note.latency?.let { " · $it мс" } ?: ""))
                 big.setTextViewText(R.id.title, title)
                 big.setTextViewText(R.id.detail, note.server)
-                big.setTextViewText(R.id.clock_word, "в сети" + (note.latency?.let { " · $it мс ·" } ?: ""))
+                big.setTextViewText(R.id.clock_word, "в сети")
+                big.setTextViewText(R.id.latency, note.latency?.let { " · $it мс" } ?: "")
                 clock(SystemClock.elapsedRealtime() - (System.currentTimeMillis() - note.since), false)
                 var at = 0
-                if (!isLockdownEnabled) pill(at++, "Пауза 5 мин", service(PAUSE, 2))
+                if (!isLockdownEnabled) pill(at++, "Пауза", service(PAUSE, 2))
                 pill(at++, "Сервер", PendingIntent.getActivity(
                     this, 3, Intent(this, MainActivity::class.java).setAction(OPEN_SERVERS),
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -263,6 +265,7 @@ class TunnelService : VpnService() {
                 small.setTextViewText(R.id.detail, "вернусь сам")
                 big.setTextViewText(R.id.detail, "Туннель отдыхает и вернётся сам")
                 big.setTextViewText(R.id.clock_word, "через")
+                big.setTextViewText(R.id.latency, "")
                 clock(note.until, true)
                 pill(0, "Продолжить", service(RESUME, 4))
                 pill(1, "Отключить", service(DISCONNECT, 1))
@@ -270,7 +273,12 @@ class TunnelService : VpnService() {
         }
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_heart)
-            .setColor(getColor(R.color.accent))
+            // The whole card in the program's surface colour, which the
+            // scene's edges fade into: a foreground service may colour its
+            // notification, and without it the card stood as a box inside
+            // the system's (the user's screenshot of 0.2.0).
+            .setColor(getColor(R.color.surface))
+            .setColorized(true)
             .setContentTitle(title)
             .setStyle(Notification.DecoratedCustomViewStyle())
             .setCustomContentView(small)

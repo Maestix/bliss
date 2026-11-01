@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Over the picture's left part, so the words read as on the desktop's card. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <gradient android:angle="0" android:startColor="#F21E1629" android:centerColor="#991E1629" android:endColor="#001E1629" />
+    <gradient android:angle="0" android:startColor="#E61E1629" android:centerColor="#661E1629" android:endColor="#001E1629" />
 </shape>
