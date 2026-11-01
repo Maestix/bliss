@@ -9,6 +9,7 @@
 //! the real interface.
 
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -22,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpSocket;
 
 use crate::device::MTU;
+use crate::names::{Answer, FakeNames};
 use crate::net::{self, Gateway};
 
 /// How long a connection may sit idle before the stack forgets it.
@@ -40,6 +42,75 @@ pub struct Carrying {
     pub serving: Arc<Serving>,
     /// Where a connection bliss dials itself has to leave by.
     pub gateway: Gateway,
+    /// Where bliss is the system's DNS server (Android's VPN service names
+    /// one inside the tunnel): that address, and the names it handed out.
+    /// Connections to those addresses are then decided by name.
+    pub names: Option<(SocketAddr, Arc<FakeNames>)>,
+    /// Who holds a connection, where the system has to be asked rather than
+    /// a table read (Android: `getConnectionOwnerUid`). Without it, the
+    /// machine's own tables (`bliss_core::name_for_connection`).
+    pub owner: Option<Owner>,
+}
+
+/// Which program holds a connection: TCP or not, its local end and its far one.
+pub type Owner = Arc<dyn Fn(bool, SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
+
+impl Carrying {
+    pub fn new(serving: Arc<Serving>, gateway: Gateway) -> Self {
+        Self {
+            serving,
+            gateway,
+            names: None,
+            owner: None,
+        }
+    }
+
+    /// The program behind a connection, asked off the runtime's threads,
+    /// since the system's answer is a call into it.
+    async fn program(&self, tcp: bool, local: SocketAddr, remote: SocketAddr) -> Option<String> {
+        match &self.owner {
+            Some(owner) => {
+                let owner = Arc::clone(owner);
+                tokio::task::spawn_blocking(move || owner(tcp, local, remote))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None if tcp => bliss_core::name_for_connection(local, remote),
+            None => bliss_core::name_for_datagram_port(local.port()),
+        }
+    }
+
+    /// The destination as the rules see it: by name when the address is one
+    /// bliss handed out for a name. `Err` for such an address whose name has
+    /// been forgotten: nothing can be dialled for it.
+    fn target(&self, peer: SocketAddr) -> Result<Target, ()> {
+        let Some((_, names)) = &self.names else {
+            return Ok(Target::Socket(peer));
+        };
+        match peer.ip() {
+            IpAddr::V4(ip) if FakeNames::is_fake(ip) => match names.name_of(ip) {
+                Some(host) => Ok(Target::Domain {
+                    host,
+                    port: peer.port(),
+                }),
+                None => Err(()),
+            },
+            _ => Ok(Target::Socket(peer)),
+        }
+    }
+}
+
+/// A name's address on the real network, for a direct route: resolved here,
+/// as direct routes always are (AGENTS.md §5).
+async fn resolve(target: &Target) -> io::Result<SocketAddr> {
+    match target {
+        Target::Socket(addr) => Ok(*addr),
+        Target::Domain { host, port } => tokio::net::lookup_host((host.as_str(), *port))
+            .await?
+            .find(SocketAddr::is_ipv4)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{host}: no address"))),
+    }
 }
 
 /// The device as the stack reads it, with an end the stack cannot miss.
@@ -168,13 +239,20 @@ where
 
 /// One connection, from the packet that opened it to the last byte.
 async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Result<()> {
-    let Carrying { serving, gateway } = &*carrying;
-    // Always an address here: a TUN sees what the program put in the packet,
-    // and the name it looked up first is gone by then. Domain rules therefore
-    // do not match a TUN connection until bliss answers the DNS query itself
-    // and hands out an address it can recognise again.
-    let target = Target::Socket(client.peer_addr());
-    let process = bliss_core::name_for_connection(client.local_addr(), client.peer_addr());
+    let Carrying {
+        serving, gateway, ..
+    } = &*carrying;
+    // An address, unless bliss answered the lookup itself (`names`): a TUN
+    // sees what the program put in the packet, and the name it looked up
+    // first is gone by then.
+    let Ok(target) = carrying.target(client.peer_addr()) else {
+        tracing::debug!("tun: {} is a name no longer known", client.peer_addr());
+        let _ = client.shutdown().await;
+        return Ok(());
+    };
+    let process = carrying
+        .program(true, client.local_addr(), client.peer_addr())
+        .await;
     // One table decides this connection, whatever changes while it is open.
     let decision = decide(serving, &target, process.as_deref());
 
@@ -192,7 +270,10 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     }
 
     let upstream = match decision.route {
-        Route::Direct => dial_direct(client.peer_addr(), *gateway).await,
+        Route::Direct => match resolve(&target).await {
+            Ok(addr) => dial_direct(addr, *gateway).await,
+            Err(e) => Err(e),
+        },
         route => serving.dial_tunnelled(route, &target).await,
     };
     let upstream = match upstream {
@@ -229,9 +310,21 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
 /// and a direct flow is bound to the real interface for the same reason a
 /// direct connection is.
 async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> io::Result<()> {
-    let Carrying { serving, gateway } = &*carrying;
-    let target = Target::Socket(client.peer_addr());
-    let process = bliss_core::name_for_datagram_port(client.local_addr().port());
+    if let Some((dns, names)) = &carrying.names
+        && client.peer_addr() == *dns
+    {
+        return answer_lookups(client, Arc::clone(names), carrying).await;
+    }
+    let Carrying {
+        serving, gateway, ..
+    } = &*carrying;
+    let Ok(target) = carrying.target(client.peer_addr()) else {
+        tracing::debug!("tun: udp {} is a name no longer known", client.peer_addr());
+        return Ok(());
+    };
+    let process = carrying
+        .program(false, client.local_addr(), client.peer_addr())
+        .await;
     let decision = decide(serving, &target, process.as_deref());
 
     if decision.route == Route::Blocked {
@@ -247,7 +340,10 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     }
 
     let upstream = match decision.route {
-        Route::Direct => bind_direct(client.peer_addr(), *gateway).await,
+        Route::Direct => match resolve(&target).await {
+            Ok(addr) => bind_direct(addr, *gateway).await,
+            Err(e) => Err(e),
+        },
         route => serving.bind_tunnelled(route, &target).await,
     };
     let upstream = match upstream {
@@ -273,6 +369,73 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let result = bliss_core::relay_datagrams(client, upstream, Arc::clone(&conn)).await;
     serving.tracker.close(id);
     result
+}
+
+/// Where the lookups `names` does not answer itself go: through the tunnel.
+const UPSTREAM_DNS: SocketAddr =
+    SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53);
+/// How long a flow of lookups may stay quiet, and one lookup may take.
+const LOOKUP_IDLE: Duration = Duration::from_secs(30);
+const LOOKUP_WAIT: Duration = Duration::from_secs(5);
+
+/// The lookups sent to bliss's own DNS address, one datagram at a time.
+async fn answer_lookups(
+    mut client: IpStackUdpStream,
+    names: Arc<FakeNames>,
+    carrying: Arc<Carrying>,
+) -> io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; 1500];
+    loop {
+        let n = match tokio::time::timeout(LOOKUP_IDLE, client.read(&mut buf)).await {
+            Ok(Ok(0)) | Err(_) => return Ok(()),
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+        };
+        let reply = match names.answer(&buf[..n]) {
+            None => continue,
+            Some(Answer::Ready(reply)) => reply,
+            Some(Answer::Local(query)) => {
+                let found = tokio::time::timeout(
+                    LOOKUP_WAIT,
+                    tokio::net::lookup_host((query.name.as_str(), 0)),
+                )
+                .await;
+                match found {
+                    Ok(Ok(addrs)) => {
+                        let ips: Vec<_> = addrs
+                            .filter_map(|a| match a.ip() {
+                                IpAddr::V4(ip) => Some(ip),
+                                IpAddr::V6(_) => None,
+                            })
+                            .take(8)
+                            .collect();
+                        query.reply(&ips)
+                    }
+                    _ => query.failed(),
+                }
+            }
+            Some(Answer::Forward(query)) => {
+                let asked = &buf[..n];
+                let forwarded = async {
+                    let upstream = carrying
+                        .serving
+                        .bind_tunnelled(Route::Proxy, &Target::Socket(UPSTREAM_DNS))
+                        .await?;
+                    upstream.send(asked).await?;
+                    let mut back = vec![0u8; 1500];
+                    let got = upstream.recv(&mut back).await?;
+                    back.truncate(got);
+                    io::Result::Ok(back)
+                };
+                match tokio::time::timeout(LOOKUP_WAIT, forwarded).await {
+                    Ok(Ok(back)) => back,
+                    _ => query.failed(),
+                }
+            }
+        };
+        client.write_all(&reply).await?;
+    }
 }
 
 /// Programs whose own connections carry a VPN beside the tunnel.

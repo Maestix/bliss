@@ -27,10 +27,12 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::geo;
 use crate::protocol::{
-    ConnRow, Frame, GroupRow, Numbers, RuleRow, ServerRow, Suggest, Toast, UiCommand, action_key,
-    conditions, how_it_hides, kind,
+    ConnRow, Frame, GeoSource, GeoView, GroupRow, Numbers, RuleRow, ServerRow, Suggest, Toast,
+    UiCommand, action_key, conditions, how_it_hides, kind,
 };
+use crate::rule_text;
 use crate::subscription;
 use crate::ui::plural;
 
@@ -69,6 +71,14 @@ const MAX_PROFILE_SERVERS: usize = 5_000;
 /// A server list older than this is fetched again when the engine starts.
 const STALE: i64 = 12 * 3600;
 
+/// The phone's DNS server as the service names it (`TunnelService.DNS`):
+/// inside the TUN's /30, answered by the stack itself.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const DNS_ADDRESS: SocketAddr = SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 19, 0, 2)),
+    53,
+);
+
 /// What reaches the loop.
 pub enum Cmd {
     /// The service established the TUN: its descriptor, and the ticket the
@@ -90,6 +100,9 @@ pub enum Cmd {
     },
     /// The stack ended by itself: the system took the TUN away.
     StackEnded(u64, String),
+    /// The rule sets' fetch: bytes so far, then how it ended.
+    GeoProgress(u64),
+    GeoDone(Result<(), String>),
 }
 
 /// A tunnel that is up: the engine, and the stack reading the TUN.
@@ -236,6 +249,7 @@ enum State {
 enum Trashed {
     Server(usize, ServerEntry),
     Group(Subscription, Vec<(usize, ServerEntry)>),
+    Rule(usize, Rule),
 }
 
 struct Engine {
@@ -255,6 +269,10 @@ struct Engine {
     /// The descriptor of a TUN whose start is waiting for a server switch to
     /// end, or that arrived while busy.
     tracker: Arc<Tracker>,
+    /// The names handed out as the phone's DNS: kept across reconnects, as
+    /// programs keep the answers for a minute.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    names: Arc<bliss_tun::names::FakeNames>,
     version: Option<bliss_xray::Version>,
     pings: HashMap<String, Option<u32>>,
     probing: bool,
@@ -274,6 +292,13 @@ struct Engine {
     table_open: bool,
     log_open: bool,
     warnings: Vec<String>,
+    /// The phone's own settings (geo.rs).
+    settings: geo::Settings,
+    /// Bytes so far while the rule sets are fetched.
+    geo_fetch: Option<u64>,
+    geo_problem: Option<String>,
+    /// The categories, read once the editor asks, until it closes.
+    categories: Option<Vec<String>>,
 }
 
 impl Engine {
@@ -294,6 +319,7 @@ impl Engine {
             Err(_) => first_profile(),
         };
         let selected = std::fs::read_to_string(paths.selected()).ok();
+        let settings = geo::Settings::load(&paths.files);
         let mut engine = Self {
             paths,
             own,
@@ -308,6 +334,7 @@ impl Engine {
             epoch: 0,
             running: None,
             tracker: Arc::new(Tracker::new()),
+            names: Arc::new(bliss_tun::names::FakeNames::new()),
             version: None,
             pings: HashMap::new(),
             probing: false,
@@ -324,6 +351,10 @@ impl Engine {
             table_open: false,
             log_open: false,
             warnings: Vec::new(),
+            settings,
+            geo_fetch: None,
+            geo_problem: None,
+            categories: None,
         };
         engine.reparse();
         engine
@@ -397,6 +428,7 @@ impl Engine {
                         self.state = State::On;
                         self.error = None;
                         self.suggest = None;
+                        self.refresh_geo_if_stale();
                     }
                     Err(why) => self.fail(why),
                 }
@@ -443,6 +475,32 @@ impl Engine {
                 }
             }
             Cmd::Fetched { id, url, result } => self.fetched(id, url, result),
+            Cmd::GeoProgress(bytes) => {
+                if self.geo_fetch.is_some() {
+                    self.geo_fetch = Some(bytes);
+                }
+            }
+            Cmd::GeoDone(result) => {
+                self.geo_fetch = None;
+                match result {
+                    Ok(()) => {
+                        tracing::info!("geo: the rule sets are new");
+                        self.settings.geo_updated = Some(jiff::Timestamp::now().as_second());
+                        self.settings.save(&self.paths.files);
+                        self.geo_problem = None;
+                        if self.categories.is_some() {
+                            self.categories = Some(geo::names(&self.paths.files));
+                        }
+                        self.commit_routing();
+                        self.toast("Гео-файлы обновлены", false, false);
+                    }
+                    Err(why) => {
+                        tracing::warn!("geo: {why}");
+                        self.toast(&format!("Гео-файлы не обновились: {why}"), true, false);
+                        self.geo_problem = Some(why);
+                    }
+                }
+            }
         }
     }
 
@@ -489,6 +547,40 @@ impl Engine {
             },
             UiCommand::Table { open } => self.table_open = open,
             UiCommand::Log { open } => self.log_open = open,
+            UiCommand::SaveRule {
+                index,
+                name,
+                action,
+                text,
+            } => self.save_rule(index, &name, &action, &text),
+            UiCommand::DeleteRule { index } => self.delete_rule(index),
+            UiCommand::MoveRule { from, to } => {
+                let rules = &mut self.profile.routing.rules;
+                if from < rules.len() && to < rules.len() && from != to {
+                    let rule = rules.remove(from);
+                    rules.insert(to, rule);
+                    self.commit_routing();
+                }
+            }
+            UiCommand::AppRoute {
+                package,
+                label,
+                action,
+            } => self.app_route(&package, &label, action.as_deref()),
+            UiCommand::GeoUpdate { source } => {
+                if let Some(source) = source {
+                    self.settings.geo_source = geo::source(&source).key.to_owned();
+                    self.settings.save(&self.paths.files);
+                }
+                self.update_geo();
+            }
+            UiCommand::GeoAuto { on } => {
+                self.settings.geo_auto = on;
+                self.settings.save(&self.paths.files);
+            }
+            UiCommand::GeoNames { open } => {
+                self.categories = open.then(|| geo::names(&self.paths.files));
+            }
         }
     }
 
@@ -548,6 +640,7 @@ impl Engine {
         let router = Arc::new(self.router());
         let port = self.profile.engine.bridge_port;
         let version = self.version;
+        let names = Arc::clone(&self.names);
         tracing::info!("tunnel: starting through «{}»", server.tag);
         tokio::spawn(async move {
             let result = bring_up(
@@ -558,6 +651,7 @@ impl Engine {
                 tracker,
                 router,
                 packets,
+                names,
                 epoch,
                 own.clone(),
             )
@@ -919,6 +1013,13 @@ impl Engine {
                     self.profile.servers.insert(index, entry);
                 }
             }
+            Some(Trashed::Rule(index, rule)) => {
+                let index = index.min(self.profile.routing.rules.len());
+                self.profile.routing.rules.insert(index, rule);
+                self.toast = None;
+                self.commit_routing();
+                return;
+            }
             None => return,
         }
         self.toast = None;
@@ -1040,6 +1141,136 @@ impl Engine {
             ..Rule::default()
         });
         Router::build(&routing, &self.paths.files)
+    }
+
+    /// A rule from the editor. One condition that does not read refuses the
+    /// whole rule, in the words rule_text.rs gives.
+    fn save_rule(&mut self, index: Option<usize>, name: &str, action: &str, text: &str) {
+        let rule = match rule_text::parse(name, crate::protocol::action_of(action), text) {
+            Ok(rule) if rule.is_empty() => {
+                self.toast("У правила нет ни одного условия", true, false);
+                return;
+            }
+            Ok(rule) => rule,
+            Err(why) => {
+                self.toast(&why, true, false);
+                return;
+            }
+        };
+        let rules = &mut self.profile.routing.rules;
+        match index {
+            // The editor knows the rule's words, not its id or its switch.
+            Some(at) => {
+                let Some(old) = rules.get_mut(at) else {
+                    self.toast("Этого правила уже нет", true, false);
+                    return;
+                };
+                *old = Rule {
+                    id: std::mem::take(&mut old.id),
+                    enabled: old.enabled,
+                    ..rule
+                };
+            }
+            None => rules.push(rule),
+        }
+        self.commit_routing();
+        self.toast("Правило сохранено", false, false);
+    }
+
+    fn delete_rule(&mut self, index: usize) {
+        if index >= self.profile.routing.rules.len() {
+            return;
+        }
+        let rule = self.profile.routing.rules.remove(index);
+        self.profile.routing.forget(&rule.id);
+        let name = rule.name.clone().unwrap_or_else(|| conditions(&rule));
+        self.trash = Some(Trashed::Rule(index, rule));
+        self.commit_routing();
+        self.toast(&format!("«{name}» удалено"), false, true);
+    }
+
+    /// An app's own way, as the apps view sets it: its rule changed, made
+    /// (first in the list, so it wins over the rules about sites), or, for
+    /// none, taken away.
+    fn app_route(&mut self, package: &str, label: &str, action: Option<&str>) {
+        let package = package.trim();
+        if package.is_empty() {
+            return;
+        }
+        let rules = &mut self.profile.routing.rules;
+        let at = rules.iter().position(|r| {
+            crate::protocol::app_of(r).is_some_and(|p| p.eq_ignore_ascii_case(package))
+        });
+        match (at, action) {
+            (Some(at), None) => {
+                let rule = rules.remove(at);
+                self.profile.routing.forget(&rule.id);
+            }
+            (Some(at), Some(action)) => {
+                let rule = &mut rules[at];
+                rule.action = crate::protocol::action_of(action);
+                rule.enabled = true;
+            }
+            (None, Some(action)) => rules.insert(
+                0,
+                Rule {
+                    name: Some(if label.trim().is_empty() {
+                        package.to_owned()
+                    } else {
+                        label.trim().to_owned()
+                    }),
+                    action: crate::protocol::action_of(action),
+                    process: vec![package.to_owned()],
+                    ..Rule::default()
+                },
+            ),
+            (None, None) => return,
+        }
+        self.commit_routing();
+    }
+
+    // --- rule sets -------------------------------------------------------------
+
+    fn update_geo(&mut self) {
+        if self.geo_fetch.is_some() {
+            return;
+        }
+        self.geo_fetch = Some(0);
+        self.geo_problem = None;
+        let source = geo::source(&self.settings.geo_source);
+        let files = self.paths.files.clone();
+        // Through the tunnel when it is up: GitHub is slow from some networks.
+        let via = self
+            .running
+            .as_ref()
+            .and_then(|r| r.xray.as_ref())
+            .map(|x| x.socks_addr());
+        let own = self.own.clone();
+        tracing::info!("geo: fetching the rule sets from {}", source.key);
+        tokio::spawn(async move {
+            let progress = |bytes| {
+                if let Some(own) = own.upgrade() {
+                    let _ = own.send(Cmd::GeoProgress(bytes));
+                }
+            };
+            let result = geo::update(source, &files, via, progress).await;
+            if let Some(own) = own.upgrade() {
+                let _ = own.send(Cmd::GeoDone(result));
+            }
+        });
+    }
+
+    /// Once they are here, the rule sets are kept a week old at most.
+    fn refresh_geo_if_stale(&mut self) {
+        let here = geo::size(&geo::site_path(&self.paths.files)).is_some();
+        let now = jiff::Timestamp::now().as_second();
+        let stale = self
+            .settings
+            .geo_updated
+            .is_none_or(|t| now - t > geo::STALE);
+        if here && stale && self.settings.geo_auto {
+            self.update_geo();
+        }
     }
 
     fn commit_routing(&mut self) {
@@ -1236,7 +1467,10 @@ impl Engine {
             .iter()
             .map(|rule| RuleRow {
                 name: rule.name.clone().unwrap_or_else(|| conditions(rule)),
+                named: rule.name.is_some(),
                 conditions: conditions(rule),
+                text: rule_text::to_text(rule),
+                app: crate::protocol::app_of(rule),
                 action: action_key(rule.action),
                 enabled: rule.enabled,
             })
@@ -1249,6 +1483,7 @@ impl Engine {
                 .take(200)
                 .map(|row| ConnRow {
                     target: row.target,
+                    app: row.process,
                     route: match row.route {
                         Route::Proxy => "proxy",
                         Route::Direct => "direct",
@@ -1312,6 +1547,24 @@ impl Engine {
             can_restore: self.trash.is_some(),
             ticket: self.ticket,
             holding: self.running.is_some() || self.state == State::Busy,
+            geo: GeoView {
+                source: geo::source(&self.settings.geo_source).key.to_owned(),
+                sources: geo::SOURCES
+                    .iter()
+                    .map(|s| GeoSource {
+                        key: s.key,
+                        name: s.name,
+                        about: s.about,
+                    })
+                    .collect(),
+                auto: self.settings.geo_auto,
+                ip: geo::size(&geo::ip_path(&self.paths.files)),
+                site: geo::size(&geo::site_path(&self.paths.files)),
+                updated: self.settings.geo_updated,
+                fetching: self.geo_fetch,
+                problem: self.geo_problem.clone(),
+            },
+            categories: self.categories.clone(),
         };
         let _ = self.frames.send(frame);
     }
@@ -1405,6 +1658,7 @@ async fn bring_up(
     tracker: Arc<Tracker>,
     router: Arc<Router>,
     packets: bliss_tun::Packets,
+    names: Arc<bliss_tun::names::FakeNames>,
     epoch: u64,
     own: mpsc::WeakUnboundedSender<Cmd>,
 ) -> Result<Running, String> {
@@ -1419,10 +1673,12 @@ async fn bring_up(
         },
     ));
     let serving = Arc::new(Serving::new(outbound, tracker, router));
-    let carrying = Arc::new(bliss_tun::Carrying {
-        serving: Arc::clone(&serving),
-        gateway: bliss_tun::Gateway,
-    });
+    let mut carrying = bliss_tun::Carrying::new(Arc::clone(&serving), bliss_tun::Gateway);
+    // The service names DNS_ADDRESS as the phone's DNS server, and answers
+    // there are what lets domain and geosite rules see TUN connections.
+    carrying.names = Some((DNS_ADDRESS, names));
+    carrying.owner = Some(Arc::new(crate::android::owner_of));
+    let carrying = Arc::new(carrying);
     let ended = own.clone();
     let stack = tokio::spawn(async move {
         let why = match bliss_tun::serve(packets, carrying).await {
