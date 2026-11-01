@@ -298,9 +298,22 @@ What exists, and where it left the plan above:
   app rules and «мимо VPN», the rule editor, networks and presets by network,
   Автовыбор, the QR scanner, widgets, the work VPN, and «Только прокси». The
   tile and the notification with «Отключить» are in.
-- **Seen on no phone yet.** Built and type-checked here (no KVM, so no
-  emulator); the engine's socket was tested on Linux, the TUN path only
-  compiles. The user's first install is the first run.
+- **The real check** («Доступ»): beside the TCP ping, which says only that
+  the server's port answers, a page is loaded through each server — a
+  throwaway xray on a free loopback port, two `HEAD /generate_204` to
+  `www.gstatic.com` on one connection, the second timed, four servers at a
+  time, ten seconds each, on a tap and never on its own. A failed tunnel
+  suggests a server that passed it before one that merely answers a ping.
+  `a_server_nobody_answers_has_no_access` runs it against a host xray
+  (`BLISS_XRAY`, ignored by default); a server that answers has been seen
+  only on the phone.
+- **First run on the user's phone, 1 November**: everything there worked.
+  What they asked for after: the state word under the heart slid in and
+  changed width with each word, which read as a jump (it crossfades in a
+  box of one size now); a check that a server really takes you somewhere
+  (above); and the empty top of Главная, which now holds the traffic card —
+  rates, the chart, the delay, the session's totals — that sat as one line
+  under the heart.
 
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

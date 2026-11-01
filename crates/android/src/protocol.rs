@@ -87,6 +87,11 @@ pub struct ServerRow {
     /// "unknown", "probing", "ok", "down" or "udp".
     pub ping: &'static str,
     pub ms: Option<u32>,
+    /// The real check: a page loaded through the server ("ok", with the
+    /// time of the second request), nothing did ("down"), "probing" or
+    /// "unknown".
+    pub check: &'static str,
+    pub check_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +163,10 @@ pub enum UiCommand {
     },
     Restore,
     Ping,
+    /// Real checks through the servers: one by index, or all.
+    Check {
+        index: Option<usize>,
+    },
     Disconnect,
     Rule {
         index: usize,
@@ -271,6 +280,8 @@ mod tests {
             group: None,
             ping: "unknown",
             ms: None,
+            check: "unknown",
+            check_ms: None,
         };
         let json = serde_json::to_string(&row).unwrap();
         assert!(!json.contains("11111111"), "{json}");
