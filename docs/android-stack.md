@@ -486,5 +486,16 @@ answered a handshake it never saw. UDP to 443 is refused whatever the
 packet, and the bare-address refusal now knows any QUIC packet by its fixed
 bit (`sniff::looks_like_quic`).
 
+## 0.2.8: a refusal said aloud
+
+0.2.7 still gave the user ERR_QUIC_PROTOCOL_ERROR on Google, with the rule
+right. The refused datagrams were dropped in silence, and Chromium (Brave
+here), which had seen QUIC to Google work through the server, waited on it
+and gave up instead of going to TCP. A refused flow of datagrams is now
+answered with an ICMP "port unreachable" from its far end, as sing-box
+does, so the browser's socket fails at once and it opens the page over TCP.
+ipstack owns the device and writes only TCP and UDP, so the answer goes out
+through the device wrapper while ipstack waits on its next read.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
