@@ -268,3 +268,39 @@ Measured against the candidates on what the design actually needs:
 - [dioxus-mobile 0.7.0-alpha.2 — "Android support is still quite experimental"](https://docs.rs/crate/dioxus-mobile/0.7.0-alpha.2)
 - [Mullvad — Android developer posting: Compose, Kotlin and a Rust daemon over the NDK, Messenger IPC](https://webbjobb.io/jobb/237550/android-developer-at-mullvad-vpn-gothenburg)
 - [Android 14 — foreground service types](https://developer.android.com/about/versions/14/changes/fgs-types-required)
+
+## The first build, 1 November
+
+What exists, and where it left the plan above:
+
+- **`crates/android`** (`libbliss.so`): its own engine loop rather than the
+  desktop's, which lives inside the desktop binary with the window, the tray,
+  the system proxy and OpenVPN. It reuses bliss-proto, bliss-core, bliss-xray
+  (the config and the process), bliss-tun's stack, and the desktop's
+  `subscription.rs` by `#[path]`. Moving the shared parts into one crate is
+  still ahead.
+- **xray is an executable, not libXray**: `libxray.so` in the APK, run from
+  the folder Android unpacks native libraries into, built with cgo against
+  the NDK so names resolve through Android's resolver. That reuses the
+  desktop's `Xray::spawn`, its readiness check and its leash (the
+  parent-death signal, now on Android too) and needs no gomobile; libXray
+  stays the option to measure against.
+- **The socket speaks JSON lines, Rust on one side and Kotlin on the other**
+  (`protocol.rs`, `Model.kt`), not postcard with UniFFI: the screens' process
+  then loads no Rust at all. `tests/socket.rs` drives it as the screens do.
+- **The service knows which TUN a frame is about** by a ticket `connect`
+  answers (`Frame::ticket`, `holding`): a frame still in the socket from
+  before the hand-over cannot read as "the engine let go".
+- **IPv6 is routed in and refused** (an extra rule built in, not saved), so a
+  program falls back to IPv4 instead of leaking around the tunnel. DNS goes
+  to 1.1.1.1 inside the tunnel, through the server.
+- **Not in it yet:** fake-IP (so domain and geosite rules see nothing),
+  app rules and «мимо VPN», the rule editor, networks and presets by network,
+  Автовыбор, the QR scanner, widgets, the work VPN, and «Только прокси». The
+  tile and the notification with «Отключить» are in.
+- **Seen on no phone yet.** Built and type-checked here (no KVM, so no
+  emulator); the engine's socket was tested on Linux, the TUN path only
+  compiles. The user's first install is the first run.
+
+Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
+`gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

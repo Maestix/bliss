@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- color-bg in theme.css: the ground before Compose draws. -->
+    <color name="ground">#140F1D</color>
+    <color name="accent">#EE82C4</color>
+</resources>
