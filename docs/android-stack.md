@@ -515,5 +515,8 @@ the phone's log to tell which:
   The TUN now has no IPv6 address or route, and Android itself answers an
   app's IPv6 with "unreachable" at once (allowFamily's default).
 
+On the user's phone 0.2.9 opened Google again in Brave. Which of the two it
+was is not known.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
