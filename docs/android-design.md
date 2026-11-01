@@ -320,11 +320,8 @@ These are the parts of the design that are promises about the engine:
   service's `Builder` — and a change to the last re-establishes it. Every
   other rule change is applied live, as on desktop.
 
-How the window would get there is open. Dioxus can target Android with the
-system WebView, which would carry `app.css`, the theme and most of `ui.rs`'s
-habits over (and §6's WebView rules with them); the VPN service, the tile,
-the widgets and the notification are Android components in Kotlin either
-way, talking to the Rust core over JNI.
+How it gets built — the tunnel in a process of its own around the Rust
+core, the screens in Jetpack Compose — is `docs/android-stack.md`.
 
 ## Where the phone leaves the window behind
 

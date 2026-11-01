@@ -1938,7 +1938,11 @@ real download from GitHub through it has not been made.
 Before it can be built it needs names for domain rules under a VPN service
 (fake-IP through the service's own DNS), OpenVPN inside bliss's service
 (Android runs one VPN at a time, and the libraries are AGPL or GPL), and
-`app:` rules by package name.
+`app:` rules by package name. The stack, chosen on 1 November, is
+`docs/android-stack.md`: the tunnel in a process of its own around this
+core and libXray, the screens in Jetpack Compose, `Frame` and `Command`
+over a unix socket — which first means moving them, and the engine loop,
+out of the desktop binary into a crate both can use.
 
 **The resource budget is an acceptance criterion; a regression blocks like a
 failing test:** GUI idle RSS ≤ 400 MB (the spike measured 353 MB and 7 processes
