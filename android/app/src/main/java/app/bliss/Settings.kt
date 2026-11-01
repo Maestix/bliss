@@ -44,6 +44,15 @@ fun Settings(frame: Frame, c: Commands, openTraffic: () -> Unit) {
         Section("Что идёт через bliss") {
             Line("Весь телефон", "VPN-сервис Android: каждое приложение, UDP, звонки и игры. " +
                 "IPv6 пока отклоняется, и приложения уходят на IPv4 — мимо туннеля не идёт ничего.")
+            Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Блокировать QUIC через сервер", style = T.body)
+                    Text("Сайты открываются по обычному HTTPS. QUIC — это UDP, а через прокси он часто теряется " +
+                        "или идёт медленно, и часть страницы не грузится. Напрямую QUIC не трогается.",
+                        style = T.tiny.copy(fontSize = 12.5.sp))
+                }
+                Toggle(frame.blockQuic) { c("block_quic", "on" to it) }
+            }
         }
         GeoCard(frame.geo, c)
         Section("Запуск и защита") {
