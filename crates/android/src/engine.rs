@@ -79,6 +79,10 @@ pub enum Cmd {
     Started(u64, Result<Running, String>),
     Switched(u64, Result<(bliss_xray::Xray, u32), String>),
     Pinged(Vec<(usize, Option<u32>)>),
+    /// One server's real check, by its link: the timed request, or none.
+    Checked(String, Option<u32>),
+    /// The engine's version, learnt by a check before any tunnel.
+    Version(bliss_xray::Version),
     Fetched {
         id: String,
         url: String,
@@ -254,6 +258,10 @@ struct Engine {
     version: Option<bliss_xray::Version>,
     pings: HashMap<String, Option<u32>>,
     probing: bool,
+    /// Real checks by link: a time through the server, or none for a server
+    /// nothing loaded through.
+    checks: HashMap<String, Option<u32>>,
+    checking: std::collections::HashSet<String>,
     fetching: HashMap<String, Option<String>>,
     trash: Option<Trashed>,
     toast: Option<Toast>,
@@ -303,6 +311,8 @@ impl Engine {
             version: None,
             pings: HashMap::new(),
             probing: false,
+            checks: HashMap::new(),
+            checking: std::collections::HashSet::new(),
             fetching: HashMap::new(),
             trash: None,
             toast: None,
@@ -419,6 +429,11 @@ impl Engine {
                     self.disconnect();
                 }
             }
+            Cmd::Checked(link, ms) => {
+                self.checking.remove(&link);
+                self.checks.insert(link, ms);
+            }
+            Cmd::Version(version) => self.version = Some(version),
             Cmd::Pinged(results) => {
                 self.probing = false;
                 for (index, ms) in results {
@@ -440,6 +455,7 @@ impl Engine {
             UiCommand::DeleteGroup { id } => self.delete_group(&id),
             UiCommand::Restore => self.restore(),
             UiCommand::Ping => self.ping_all(),
+            UiCommand::Check { index } => self.check_servers(index),
             UiCommand::Disconnect => self.disconnect(),
             UiCommand::Rule { index, on } => {
                 if let Some(rule) = self.profile.routing.rules.get_mut(index) {
@@ -615,11 +631,19 @@ impl Engine {
             .iter()
             .enumerate()
             .filter(|(index, _)| Some(*index) != current && self.servers[*index].is_some())
-            .filter_map(|(index, entry)| {
-                let ms = (*self.pings.get(&entry.link)?)?;
-                Some((index, ms))
+            // A server a page loaded through first, by that time; then the
+            // fastest handshake among servers never checked. One that failed
+            // its check is not offered.
+            .filter_map(|(index, entry)| match self.checks.get(&entry.link) {
+                Some(Some(ms)) => Some(((0, *ms), index, *ms)),
+                Some(None) => None,
+                None => {
+                    let ms = (*self.pings.get(&entry.link)?)?;
+                    Some(((1, ms), index, ms))
+                }
             })
-            .min_by_key(|(_, ms)| *ms)
+            .min_by_key(|(rank, _, _)| *rank)
+            .map(|(_, index, ms)| (index, ms))
             .map(|(index, ping)| Suggest {
                 index,
                 name: self.servers[index]
@@ -940,6 +964,67 @@ impl Engine {
         });
     }
 
+    /// Real checks: one server, or all of them. Four engines at most at once —
+    /// each is a process of its own — and only on a tap, never on a timer.
+    fn check_servers(&mut self, index: Option<usize>) {
+        let wanted: Vec<(usize, String, ServerConfig)> = self
+            .profile
+            .servers
+            .iter()
+            .zip(&self.servers)
+            .enumerate()
+            .filter(|(i, _)| index.is_none_or(|only| only == *i))
+            .filter_map(|(i, (entry, server))| Some((i, entry.link.clone(), server.clone()?)))
+            .filter(|(_, link, _)| !self.checking.contains(link))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        for (_, link, _) in &wanted {
+            self.checking.insert(link.clone());
+            self.checks.remove(link);
+        }
+        let own = self.own.clone();
+        let paths = self.paths.clone();
+        let known = self.version;
+        tokio::spawn(async move {
+            let version = match known {
+                Some(version) => version,
+                None => match bliss_xray::check_version(&paths.engine(), None).await {
+                    Ok(version) => {
+                        if let Some(own) = own.upgrade() {
+                            let _ = own.send(Cmd::Version(version));
+                        }
+                        version
+                    }
+                    Err(e) => {
+                        tracing::warn!("check: the engine did not answer — {e}");
+                        for (_, link, _) in wanted {
+                            if let Some(own) = own.upgrade() {
+                                let _ = own.send(Cmd::Checked(link, None));
+                            }
+                        }
+                        return;
+                    }
+                },
+            };
+            futures_util::stream::iter(wanted)
+                .map(|(slot, link, server)| {
+                    let paths = paths.clone();
+                    let own = own.clone();
+                    async move {
+                        let ms = real_check(server, paths, version, slot).await;
+                        if let Some(own) = own.upgrade() {
+                            let _ = own.send(Cmd::Checked(link, ms));
+                        }
+                    }
+                })
+                .buffer_unordered(4)
+                .collect::<Vec<()>>()
+                .await;
+        });
+    }
+
     // --- rules ---------------------------------------------------------------
 
     fn router(&self) -> Router {
@@ -1115,6 +1200,16 @@ impl Engine {
                     group: entry.group.clone(),
                     ping,
                     ms,
+                    check: if self.checking.contains(&entry.link) {
+                        "probing"
+                    } else {
+                        match self.checks.get(&entry.link) {
+                            Some(Some(_)) => "ok",
+                            Some(None) => "down",
+                            None => "unknown",
+                        }
+                    },
+                    check_ms: self.checks.get(&entry.link).copied().flatten(),
                 }
             })
             .collect();
@@ -1393,6 +1488,85 @@ async fn check(serving: &Serving) -> Result<u32, String> {
     }
 }
 
+/// The real check of one server: its own xray, for this check alone, on a
+/// free loopback port, and two requests through it on one connection — the
+/// second timed, since the first pays for every handshake. A TCP ping says
+/// the server's port answers; this says a page loads through it.
+async fn real_check(
+    server: ServerConfig,
+    paths: Paths,
+    version: bliss_xray::Version,
+    slot: usize,
+) -> Option<u32> {
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()?
+        .local_addr()
+        .ok()?
+        .port();
+    let work = paths.files.join("checks").join(slot.to_string());
+    let config = bliss_xray::build(&server, port, bliss_xray::LogLevel::None, version);
+    let xray = bliss_xray::Xray::spawn(&paths.engine(), &config, &work, port)
+        .await
+        .ok()?;
+    let outbound = bliss_core::SocksOutbound::new(
+        xray.socks_addr(),
+        bliss_core::EngineInfo {
+            kind: "xray",
+            version: version.to_string(),
+            external: true,
+        },
+    );
+    let timed = async {
+        use bliss_core::Outbound;
+        let mut stream = outbound.connect_tcp(&probe_target()).await.ok()?;
+        http_head(&mut stream, true).await.ok()?;
+        let started = Instant::now();
+        http_head(&mut stream, false).await.ok()?;
+        Some(started.elapsed().as_millis() as u32)
+    };
+    let result = tokio::time::timeout(CHECK_TIMEOUT, timed)
+        .await
+        .ok()
+        .flatten();
+    let _ = xray.shutdown().await;
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+fn probe_target() -> Target {
+    Target::Domain {
+        host: "www.gstatic.com".to_owned(),
+        port: 80,
+    }
+}
+
+/// One `HEAD /generate_204` and its answer's head, read to the blank line.
+async fn http_head(stream: &mut bliss_core::BoxedStream, keep: bool) -> Result<(), String> {
+    let request: &[u8] = if keep {
+        b"HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\n\r\n"
+    } else {
+        b"HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n"
+    };
+    stream.write_all(request).await.map_err(|e| e.to_string())?;
+    let mut head = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 4096 {
+            return Err("an answer head past 4 KB".to_owned());
+        }
+        stream
+            .read_exact(&mut byte)
+            .await
+            .map_err(|e| e.to_string())?;
+        head.push(byte[0]);
+    }
+    if head.starts_with(b"HTTP/") {
+        Ok(())
+    } else {
+        Err("the answer was not HTTP".to_owned())
+    }
+}
+
 /// A TCP handshake to the server, past the tunnel, timed: the list's ping.
 async fn handshake(host: &str, port: u16) -> Option<u32> {
     let attempt = async {
@@ -1422,6 +1596,38 @@ mod tests {
             shown_url("https://sub.example.net/SECRET"),
             "https://sub.example.net"
         );
+    }
+
+    /// The real check through a server that is not there answers "no access",
+    /// inside its time, and leaves no engine or folder behind. Needs an xray
+    /// for this machine: `BLISS_XRAY=<path> cargo test -p bliss-android --
+    /// --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn a_server_nobody_answers_has_no_access() {
+        let xray = PathBuf::from(std::env::var("BLISS_XRAY").expect("BLISS_XRAY names an xray"));
+        let dir = std::env::temp_dir().join(format!("bliss-android-check-{}", std::process::id()));
+        let libs = dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        std::fs::copy(&xray, libs.join("libxray.so")).unwrap();
+        let paths = Paths {
+            files: dir.join("files"),
+            libs,
+            socket: dir.join("engine.sock"),
+        };
+        let version = bliss_xray::check_version(&paths.engine(), None)
+            .await
+            .unwrap();
+        // TEST-NET-3: nothing answers there.
+        let server: ServerConfig = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=www.example.net&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&type=tcp#Test"
+            .parse()
+            .unwrap();
+        let started = Instant::now();
+        let result = real_check(server, paths.clone(), version, 0).await;
+        assert_eq!(result, None);
+        assert!(started.elapsed() < CHECK_TIMEOUT + Duration::from_secs(5));
+        assert!(!paths.files.join("checks").join("0").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
