@@ -133,25 +133,24 @@ impl Carrying {
         target: &Target,
         known: Option<IpAddr>,
         process: Option<&str>,
-        protocol: Option<&str>,
+        udp: bool,
     ) -> Decision {
         let router = self.serving.router();
         if is_vpn_program(process) {
             return decide(&self.serving, target, process);
         }
-        if known.is_some() || protocol.is_some() {
-            let known = known.or_else(|| self.known_address(target));
-            return router.decide_flow(target, known, process, protocol);
-        }
-        if self.names.is_some()
-            && let Target::Domain { host, .. } = target
-            && !is_vpn_program(process)
-            && router.wants_address(target, process)
-        {
-            let ip = self.real_address(host).await.map(IpAddr::V4);
-            return router.decide_with(target, ip, process);
-        }
-        decide(&self.serving, target, process)
+        let known = match known {
+            Some(ip) => Some(ip),
+            None => match target {
+                Target::Domain { host, .. }
+                    if self.names.is_some() && router.wants_address(target, process, udp) =>
+                {
+                    self.real_address(host).await.map(IpAddr::V4)
+                }
+                _ => None,
+            },
+        };
+        router.decide_flow(target, known, process, udp)
     }
 
     /// Carry a connection until it ends — or, where bliss names sites (the
@@ -165,7 +164,7 @@ impl Carrying {
         relayed: impl std::future::Future<Output = io::Result<()>>,
         conn: &bliss_core::Connection,
         seen: Option<IpAddr>,
-        protocol: Option<&str>,
+        udp: bool,
     ) -> Carried {
         let (target, id) = (&conn.target, conn.id);
         if self.names.is_none() {
@@ -180,7 +179,7 @@ impl Carrying {
                     if changed.is_err() {
                         return Carried::Ended(relayed.await);
                     }
-                    if self.reconsidered(target, seen, conn.process.as_deref(), protocol) != conn.route {
+                    if self.reconsidered(target, seen, conn.process.as_deref(), udp) != conn.route {
                         tracing::info!("tun #{id} {target}: the rules send it elsewhere now; closed");
                         return Carried::Rerouted;
                     }
@@ -205,7 +204,7 @@ impl Carrying {
         target: &Target,
         seen: Option<IpAddr>,
         process: Option<&str>,
-        protocol: Option<&str>,
+        udp: bool,
     ) -> Route {
         if is_vpn_program(process) {
             return Route::Direct;
@@ -213,7 +212,7 @@ impl Carrying {
         let known = seen.or_else(|| self.known_address(target));
         self.serving
             .router()
-            .decide_flow(target, known, process, protocol)
+            .decide_flow(target, known, process, udp)
             .route
     }
 
@@ -461,7 +460,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
         .await;
     // One table decides this connection, whatever changes while it is open.
     let decision = carrying
-        .decide(&target, seen, process.as_deref(), None)
+        .decide(&target, seen, process.as_deref(), false)
         .await;
 
     if decision.route == Route::Blocked {
@@ -527,7 +526,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     conn.add_up(first.len() as u64);
 
     let relayed = relay(&mut client, upstream, Arc::clone(&conn));
-    let carried = carrying.until_rerouted(relayed, &conn, seen, None).await;
+    let carried = carrying.until_rerouted(relayed, &conn, seen, false).await;
     serving.tracker.close(id);
     match carried {
         Carried::Ended(result) => result,
@@ -589,21 +588,19 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     };
     let mut client = client;
     let mut first = Vec::new();
-    // QUIC is told by its first packet, wherever it goes: a `protocol:quic`
-    // rule looks at it, and the phone's built-in one refuses it.
-    let mut quic = false;
-    if target.port() == 443 {
+    if carrying.names.is_some()
+        && let Target::Socket(_) = target
+        && target.port() == 443
+    {
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 2048];
         if let Ok(n) = client.read(&mut buf).await {
             first.extend_from_slice(&buf[..n]);
         }
-        quic = sniff::is_quic_initial(&first);
         // QUIC to a bare address: its name is sealed, so the rules could see
         // only the address. Refused, the program falls back to TCP, whose
         // name `carry` reads.
-        if quic
-            && carrying.names.is_some()
+        if sniff::looks_like_quic(&first)
             && let Target::Socket(addr) = target
         {
             tracing::debug!("tun: QUIC to bare {addr} refused, for TCP to name the site");
@@ -613,9 +610,8 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let process = carrying
         .program(false, client.local_addr(), client.peer_addr())
         .await;
-    let protocol = quic.then_some("quic");
     let decision = carrying
-        .decide(&target, None, process.as_deref(), protocol)
+        .decide(&target, None, process.as_deref(), true)
         .await;
 
     if decision.route == Route::Blocked {
@@ -662,9 +658,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
         conn.add_up(first.len() as u64);
     }
     let relayed = bliss_core::relay_datagrams(client, upstream, Arc::clone(&conn));
-    let carried = carrying
-        .until_rerouted(relayed, &conn, None, protocol)
-        .await;
+    let carried = carrying.until_rerouted(relayed, &conn, None, true).await;
     serving.tracker.close(id);
     match carried {
         Carried::Ended(result) => result,
@@ -1259,14 +1253,14 @@ mod tests {
         };
         assert_eq!(
             carrying
-                .decide(&site("nas.example"), None, None, None)
+                .decide(&site("nas.example"), None, None, false)
                 .await
                 .route,
             Route::Direct
         );
         assert_eq!(
             carrying
-                .decide(&site("far.example"), None, None, None)
+                .decide(&site("far.example"), None, None, false)
                 .await
                 .route,
             Route::Proxy
@@ -1275,21 +1269,21 @@ mod tests {
         carrying.names = None;
         assert_eq!(
             carrying
-                .decide(&site("nas.example"), None, None, None)
+                .decide(&site("nas.example"), None, None, false)
                 .await
                 .route,
             Route::Proxy
         );
     }
 
-    /// A QUIC flow is told by its first packet and handed to the rules as
-    /// `quic`: the phone's built-in «QUIC → блок» refuses it — shown so in
-    /// the table — so the page opens over TCP, while the same flow's first
-    /// packet without QUIC's shape, or with the rule switched off, is not.
-    /// The user found parts of GitHub not loading.
+    /// The phone's built-in rule, UDP and port 443 → block, as other clients
+    /// write it: a flow to a site's port 443 is refused — shown so in the
+    /// table — so the page opens over TCP; UDP to another port, or with the
+    /// rule switched off, is carried. The user found parts of GitHub not
+    /// loading, and asked for the rule in this shape.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn quic_is_handed_to_the_rules() {
+    async fn udp_to_443_meets_the_rule() {
         use tokio::io::AsyncWriteExt;
         let routing = |on: bool| {
             let mut quic = bliss_proto::Rule {
@@ -1298,7 +1292,8 @@ mod tests {
                 enabled: on,
                 ..bliss_proto::Rule::default()
             };
-            quic.protocol = vec!["quic".to_owned()];
+            quic.network = vec!["udp".to_owned()];
+            quic.port = vec!["443".to_owned()];
             let routing = bliss_proto::Routing {
                 fallback: bliss_proto::Action::Proxy,
                 rules: vec![quic],
@@ -1335,31 +1330,42 @@ mod tests {
         let mut initial = vec![0u8; 1200];
         initial[0] = 0xc3;
         initial[1..5].copy_from_slice(&1u32.to_be_bytes());
-        let mut send = async |port: u16, payload: &[u8]| {
+        let mut send = async |port: u16, to: SocketAddr, payload: &[u8]| {
             let app = SocketAddr::new("172.19.0.1".parse().unwrap(), port);
             phone
-                .write_all(&udp_packet(app, site, payload))
+                .write_all(&udp_packet(app, to, payload))
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(300)).await;
         };
 
-        send(41000, &initial).await;
+        send(41000, site, &initial).await;
         let rows = serving.tracker.table();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].target, "github.githubassets.com:443");
         assert_eq!(rows[0].route, Route::Blocked);
         assert_eq!(rows[0].rule, "QUIC");
 
-        // Not QUIC's shape: carried towards the server, which here refuses
-        // the association, so nothing is recorded.
-        send(41001, &[0x17; 1200]).await;
-        assert_eq!(serving.tracker.table().len(), 1);
+        // A later packet of the same QUIC connection — a short header, as
+        // the flow after a refused Initial starts with — meets the rule too:
+        // refusing the Initial alone let these through, and Google answered
+        // a handshake it had not seen (ERR_QUIC_PROTOCOL_ERROR).
+        let mut short = vec![0u8; 300];
+        short[0] = 0x43;
+        send(41003, site, &short).await;
+        assert_eq!(serving.tracker.table().len(), 2);
+        assert_eq!(serving.tracker.table()[0].route, Route::Blocked);
 
-        // The rule off: QUIC is carried like any flow.
+        // UDP to another port: carried towards the server, which here
+        // refuses the association, so nothing is recorded.
+        let call = SocketAddr::new(site.ip(), 3478);
+        send(41001, call, &[0x17; 200]).await;
+        assert_eq!(serving.tracker.table().len(), 2);
+
+        // The rule off: carried like any flow.
         serving.set_router(routing(false));
-        send(41002, &initial).await;
-        assert_eq!(serving.tracker.table().len(), 1);
+        send(41002, site, &initial).await;
+        assert_eq!(serving.tracker.table().len(), 2);
         stack.abort();
     }
 

@@ -2229,7 +2229,7 @@ fn blind_under_tun(rules: &[Rule]) -> Option<String> {
                 && rule.geoip.is_empty()
                 && rule.port.is_empty()
                 && rule.process.is_empty()
-                && rule.protocol.is_empty()
+                && rule.network.is_empty()
         })
         .map(|(i, _)| format!("#{}", i + 1))
         .collect();
@@ -2639,7 +2639,7 @@ fn describe_conditions(rule: &bliss_proto::Rule) -> Vec<String> {
     add("страны", &rule.geoip);
     add("порты", &rule.port);
     add("программы", &rule.process);
-    add("протоколы", &rule.protocol);
+    add("только", &rule.network);
     out
 }
 

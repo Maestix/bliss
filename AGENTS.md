@@ -1551,17 +1551,21 @@ table.
   and 8080, up to 16 KB and 400 ms, for a ClientHello's `server_name` or a
   request's `Host:`, then dialled straight to the address it chose or by the
   name through the tunnel, the bytes read passed on first. QUIC to a bare
-  address is refused, so the program falls back to that TCP. Any other
-  QUIC flow is told by its first packet (on every platform) and handed to
-  the rules as `protocol:quic`, a condition of its own — "UDP" and "443"
-  would not do, since any one condition is enough and 443 is every HTTPS
-  connection too. The phone's profiles carry a built-in «QUIC» → block
-  rule under «Локальная сеть» (`quic_rule`; offered once to older
-  profiles, `the_quic_rule_is_offered_once`): QUIC is UDP inside the tunnel,
-  which Vision drops on 443 and other servers carry badly, and parts of
-  GitHub did not load. It replaced 0.2.5's switch in the settings, at the
-  user's ask, so a rule above it can keep a site's QUIC
-  (`quic_is_handed_to_the_rules`, `quic_is_a_protocol_not_a_port`). And there,
+  address is refused, so the program falls back to that TCP.
+- **A rule's `network` is a limit, not a condition** (`tcp`, `udp`, as
+  xray and v2rayN write it): every other condition is "any one is enough",
+  while `network` bounds them all, so `network = ["udp"]` with `port =
+  ["443"]` is QUIC and never HTTPS on the same port, and `network` alone is
+  every flow of it (`udp_and_443_is_quic_not_https`). The TUN's datagrams
+  are decided as UDP (`Router::decide_flow`); `decide` is TCP, which is
+  all the SOCKS and HTTP ports carry. The phone's profiles carry a
+  built-in «QUIC — открывать по TCP», UDP and 443 → block, under «Локальная
+  сеть» (`quic_rule`; offered once to older profiles,
+  `the_quic_rule_is_offered_once`): QUIC is UDP inside the tunnel, which
+  Vision drops on 443 and other servers carry badly, and parts of GitHub
+  did not load (`udp_to_443_meets_the_rule`). The user chose this shape over
+  0.2.6's `protocol = ["quic"]`, which is still read — as UDP and 443,
+  `Rule::settle_protocol` — and never written. And there,
   unlike the desktop, a rule change ends the open connections the new table
   sends elsewhere (`until_rerouted`, `Serving::router_changes`): an app
   keeps its connections for minutes, and the user's `geosite:reddit` rule

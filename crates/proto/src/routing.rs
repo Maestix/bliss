@@ -265,11 +265,18 @@ pub struct Rule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub geoip: Vec<String>,
 
-    /// Protocols read off the connection, in xray's word for the field:
-    /// `quic` alone so far — QUIC can only be told by its first packet, and a
-    /// rule of "UDP" and "port 443" would match every HTTPS connection too,
-    /// since any one condition is enough.
+    /// The networks the rule is for, `tcp` or `udp`, as xray and v2rayN
+    /// write it. Not a condition like the others — any one of those is
+    /// enough — but a limit on them all: a rule with `network = ["udp"]`
+    /// decides UDP flows only, and with nothing else, every UDP flow. So
+    /// `udp` with `port = ["443"]` is QUIC, the way other clients refuse it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network: Vec<String>,
+
+    /// Written by the 0.2.6 test build alone (`["quic"]`), before QUIC was
+    /// `network = ["udp"]` with port 443. Still read, so such a profile
+    /// opens, and taken as exactly that; never written again.
+    #[serde(default, skip_serializing)]
     pub protocol: Vec<String>,
 }
 
@@ -287,6 +294,7 @@ impl Default for Rule {
             process: Vec::new(),
             geosite: Vec::new(),
             geoip: Vec::new(),
+            network: Vec::new(),
             protocol: Vec::new(),
         }
     }
@@ -305,7 +313,21 @@ impl Rule {
             && self.process.is_empty()
             && self.geosite.is_empty()
             && self.geoip.is_empty()
+            && self.network.is_empty()
             && self.protocol.is_empty()
+    }
+
+    /// Read 0.2.6's `protocol = ["quic"]` as what it meant, UDP to port 443.
+    pub fn settle_protocol(&mut self) {
+        if self.protocol.iter().any(|p| p.eq_ignore_ascii_case("quic")) {
+            if !self.network.iter().any(|n| n == "udp") {
+                self.network.push("udp".to_owned());
+            }
+            if !self.port.iter().any(|p| p == "443") {
+                self.port.push("443".to_owned());
+            }
+        }
+        self.protocol.clear();
     }
 
     /// The name to show, invented from the contents if none was given.

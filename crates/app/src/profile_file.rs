@@ -538,7 +538,7 @@ pub fn route_one(profile: &mut Profile, subject: &Subject, action: Action) -> us
             + rule.process.len()
             + rule.geosite.len()
             + rule.geoip.len()
-            + rule.protocol.len();
+            + rule.network.len();
         let list = match subject {
             Subject::Program(_) => &rule.process,
             Subject::Site(_) => &rule.domain,

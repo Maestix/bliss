@@ -346,7 +346,7 @@ mod tests {
             host: "shop.example".to_owned(),
             port: 443,
         };
-        assert!(router.wants_address(&site, None));
+        assert!(router.wants_address(&site, None, false));
         // 77.88.8.8, Yandex's public DNS, in Russia; 203.0.113.5 nowhere.
         let ru: std::net::IpAddr = "77.88.8.8".parse().unwrap();
         let elsewhere: std::net::IpAddr = "203.0.113.5".parse().unwrap();
