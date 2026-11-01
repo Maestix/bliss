@@ -52,6 +52,9 @@ pub struct Carrying {
     pub owner: Option<Owner>,
 }
 
+/// How long a connection waits to learn its program from the system.
+const OWNER_WAIT: Duration = Duration::from_millis(500);
+
 /// Which program holds a connection: TCP or not, its local end and its far one.
 pub type Owner = Arc<dyn Fn(bool, SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
 
@@ -66,16 +69,13 @@ impl Carrying {
     }
 
     /// The program behind a connection, asked off the runtime's threads,
-    /// since the system's answer is a call into it.
+    /// since the system's answer is a call into it — and not waited for past
+    /// `OWNER_WAIT`: a connection without its program is decided by the
+    /// other rules, one that waits for a call that never returns is no
+    /// connection at all (0.2.0 on Android, where every one hung).
     async fn program(&self, tcp: bool, local: SocketAddr, remote: SocketAddr) -> Option<String> {
         match &self.owner {
-            Some(owner) => {
-                let owner = Arc::clone(owner);
-                tokio::task::spawn_blocking(move || owner(tcp, local, remote))
-                    .await
-                    .ok()
-                    .flatten()
-            }
+            Some(owner) => ask_owner(owner, tcp, local, remote, OWNER_WAIT).await,
             None if tcp => bliss_core::name_for_connection(local, remote),
             None => bliss_core::name_for_datagram_port(local.port()),
         }
@@ -97,6 +97,25 @@ impl Carrying {
                 None => Err(()),
             },
             _ => Ok(Target::Socket(peer)),
+        }
+    }
+}
+
+async fn ask_owner(
+    owner: &Owner,
+    tcp: bool,
+    local: SocketAddr,
+    remote: SocketAddr,
+    wait: Duration,
+) -> Option<String> {
+    let owner = Arc::clone(owner);
+    let asked = tokio::task::spawn_blocking(move || owner(tcp, local, remote));
+    match tokio::time::timeout(wait, asked).await {
+        Ok(Ok(name)) => name,
+        Ok(Err(_)) => None,
+        Err(_) => {
+            tracing::debug!("tun: nobody said whose {local} → {remote} is; deciding without");
+            None
         }
     }
 }
@@ -531,6 +550,30 @@ mod tests {
 
     use super::*;
 
+    /// A system that never answers whose a connection is must not hold the
+    /// connection: on Android 0.2.0 every one waited for good.
+    #[tokio::test]
+    async fn an_owner_that_never_answers_is_not_waited_for() {
+        let owner: Owner = Arc::new(|_, _, _| {
+            std::thread::sleep(Duration::from_secs(2));
+            Some("never.seen".to_owned())
+        });
+        let local: SocketAddr = "172.19.0.1:40000".parse().unwrap();
+        let remote: SocketAddr = "198.18.0.1:443".parse().unwrap();
+        let started = std::time::Instant::now();
+        let name = ask_owner(&owner, true, local, remote, Duration::from_millis(100)).await;
+        assert_eq!(name, None);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let quick: Owner = Arc::new(|tcp, _, _| tcp.then(|| "org.example.app".to_owned()));
+        assert_eq!(
+            ask_owner(&quick, true, local, remote, Duration::from_millis(500))
+                .await
+                .as_deref(),
+            Some("org.example.app")
+        );
+    }
+
     /// A device that has ended as a shut-down wintun session has: every read
     /// answered at once with nothing.
     struct ShutDown {
@@ -595,6 +638,109 @@ mod tests {
     /// OpenVPN's own connection to its server leaves the ordinary way, whatever
     /// the rules say: through the tunnel it would reach the work network by way
     /// of the proxy server, if at all.
+    /// An IPv4 packet carrying one UDP datagram, checksum left out (allowed
+    /// for UDP over IPv4).
+    #[cfg(target_os = "linux")]
+    fn udp_packet(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Vec<u8> {
+        let (SocketAddr::V4(src), SocketAddr::V4(dst)) = (src, dst) else {
+            panic!("IPv4 only");
+        };
+        let total = 20 + 8 + payload.len();
+        let mut p = vec![
+            0x45,
+            0,
+            (total >> 8) as u8,
+            total as u8,
+            0,
+            1,
+            0,
+            0,
+            64,
+            17,
+            0,
+            0,
+        ];
+        p.extend_from_slice(&src.ip().octets());
+        p.extend_from_slice(&dst.ip().octets());
+        let sum = (0..20)
+            .step_by(2)
+            .map(|i| u32::from(u16::from_be_bytes([p[i], p[i + 1]])))
+            .sum::<u32>();
+        let sum = !((sum & 0xffff) + (sum >> 16)) as u16;
+        p[10..12].copy_from_slice(&sum.to_be_bytes());
+        p.extend_from_slice(&src.port().to_be_bytes());
+        p.extend_from_slice(&dst.port().to_be_bytes());
+        p.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        p.extend_from_slice(&[0, 0]);
+        p.extend_from_slice(payload);
+        p
+    }
+
+    /// A lookup sent into the TUN, to the address the stack answers at,
+    /// comes back from that address with an address from the pool — and a
+    /// second one for the same name with the same address. This is the path
+    /// every name on the phone takes; 0.2.0 shipped without it run anywhere.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lookup_through_the_stack_is_answered_from_the_pool() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().expect("an address"),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::proxy_everything()),
+        ));
+        let dns: SocketAddr = "172.19.0.2:53".parse().expect("an address");
+        let names = Arc::new(FakeNames::new());
+        let mut carrying = Carrying::new(serving, Gateway::for_tests());
+        carrying.names = Some((dns, Arc::clone(&names)));
+        let (mut phone, device) = tokio::io::duplex(64 * 1024);
+        let stack = tokio::spawn(serve(device, Arc::new(carrying)));
+
+        let mut query = vec![0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in ["www", "example", "net"] {
+            query.push(label.len() as u8);
+            query.extend_from_slice(label.as_bytes());
+        }
+        query.extend_from_slice(&[0, 0, 1, 0, 1]);
+        let app: SocketAddr = "172.19.0.1:40000".parse().expect("an address");
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            phone
+                .write_all(&udp_packet(app, dns, &query))
+                .await
+                .unwrap();
+            let mut buf = vec![0u8; 2048];
+            let n = tokio::time::timeout(Duration::from_secs(3), phone.read(&mut buf))
+                .await
+                .expect("the stack answered")
+                .unwrap();
+            let packet = &buf[..n];
+            // From the DNS address back to the app, UDP.
+            assert_eq!(packet[9], 17);
+            assert_eq!(&packet[12..16], &[172, 19, 0, 2]);
+            assert_eq!(&packet[16..20], &[172, 19, 0, 1]);
+            let answer = &packet[28..];
+            assert_eq!(&answer[..2], &[0xab, 0xcd]);
+            assert_eq!(&answer[6..8], &[0, 1], "one answer");
+            let ip =
+                std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&answer[answer.len() - 4..]).unwrap());
+            assert!(FakeNames::is_fake(ip));
+            assert_eq!(names.name_of(ip).as_deref(), Some("www.example.net"));
+            seen.push(ip);
+        }
+        assert_eq!(seen[0], seen[1]);
+        stack.abort();
+    }
+
     #[test]
     fn the_vpns_own_connection_goes_around_the_tunnel() {
         let serving = Serving::new(
