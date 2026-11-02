@@ -240,6 +240,8 @@ async fn listen(
     };
     loop {
         let Ok((stream, _)) = listener.accept().await else {
+            // Out of descriptors, it fails again at once: a pause, not a spin.
+            tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
         let commands = commands.clone();
