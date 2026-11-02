@@ -161,8 +161,13 @@ pub async fn serve(bound: Bound, serving: Arc<Serving>) -> std::io::Result<()> {
             Ok(pair) => pair,
             // One failed accept is not a reason to stop serving: a client can
             // vanish between the SYN and our accept, and that is routine.
+            // But out of descriptors (EMFILE), the connection waiting in the
+            // backlog fails again at once, and an accept loop without a
+            // pause spins a core and writes a warning per turn: a tenth of
+            // a second lets connections close and descriptors come back.
             Err(e) => {
                 tracing::warn!("{}: accept failed: {e}", inbound.tag);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };

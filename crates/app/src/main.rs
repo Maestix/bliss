@@ -134,6 +134,8 @@ fn main() -> Result<()> {
     // Before any thread exists, since it changes the environment.
     #[cfg(target_os = "linux")]
     webkit_environment();
+    #[cfg(target_os = "linux")]
+    raise_open_files();
     // Before anything can print, clap's own --help and usage errors included.
     // The window prints nowhere; see `wants_console`.
     if wants_console(std::env::args_os().skip(1)) {
@@ -972,6 +974,28 @@ fn attach_console() {
 
 #[cfg(not(windows))]
 fn attach_console() {}
+
+/// Raise the limit on open files to what the system allows. Linux starts a
+/// program at 1 024, and every connection through bliss takes two — the
+/// program's and the one onward — so a browser with a few hundred open
+/// through the TUN or the ports ran out, and every accept failed after.
+/// Held to 65 536, which is plenty: the hard limit can be a million, and the
+/// programs bliss starts inherit what it sets.
+#[cfg(target_os = "linux")]
+fn raise_open_files() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit read and write the one struct given.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
+            limit.rlim_cur = limit.rlim_max.min(65_536);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
 
 /// WebKitGTK's GPU path draws nothing — a blank or white window — on more
 /// machines than it should: under WSLg, which has no `/dev/dri`, with
