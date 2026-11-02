@@ -28,6 +28,7 @@ pub use outbound::{
 pub use process::{name_for_connection, name_for_datagram_port, name_for_port, process_of};
 pub use relay::{relay, relay_datagrams};
 pub use routing::{Decision, Router};
+pub use socks5::Login;
 pub use target::{Target, TargetError};
 pub use through::Through;
 pub use tracker::{Connection, ConnectionId, Route, Snapshot, Tracker};
