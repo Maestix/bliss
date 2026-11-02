@@ -57,6 +57,12 @@ pub struct Carrying {
     /// Packets bliss writes to the device itself (`Ended::answer`), set by
     /// `serve`.
     answers: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// Lookups under way, by name, so that the connections that follow a
+    /// lookup — a page opens several at once — wait for the one question
+    /// already asked rather than each asking again.
+    asking: std::sync::Mutex<
+        std::collections::HashMap<String, Arc<tokio::sync::OnceCell<Option<std::net::Ipv4Addr>>>>,
+    >,
 }
 
 /// How long a connection waits to learn its program from the system.
@@ -74,6 +80,7 @@ impl Carrying {
             owner: None,
             addresses: Arc::new(Addresses::new()),
             answers: std::sync::OnceLock::new(),
+            asking: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -247,10 +254,43 @@ impl Carrying {
     /// A site's IPv4 address, asked of 1.1.1.1 through the tunnel — never of
     /// the phone's network, which would tell it every site (AGENTS.md §5) —
     /// and kept for ten minutes.
+    ///
+    /// One question per name at a time: the lookup started as the name was
+    /// answered is still on its way when the connection arrives, and each
+    /// of a page's connections used to ask again, through the server.
     async fn real_address(&self, name: &str) -> Option<std::net::Ipv4Addr> {
         if let Some(known) = self.addresses.get(name) {
             return known;
         }
+        let cell = {
+            let mut asking = self.asking.lock().expect("asking lock");
+            Arc::clone(asking.entry(name.to_owned()).or_default())
+        };
+        // Out of the table once this caller is done with it, however that
+        // ends — a dropped connection included — so it holds lookups under
+        // way and nothing else.
+        struct Done<'a>(
+            &'a Carrying,
+            &'a str,
+            &'a Arc<tokio::sync::OnceCell<Option<std::net::Ipv4Addr>>>,
+        );
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                let mut asking = self.0.asking.lock().expect("asking lock");
+                let ours = asking.get(self.1).is_some_and(|c| Arc::ptr_eq(c, self.2));
+                // Answered, or the last one waiting (the table's and this
+                // caller's are the only holders) gave up before an answer.
+                if ours && (self.2.initialized() || Arc::strong_count(self.2) <= 2) {
+                    asking.remove(self.1);
+                }
+            }
+        }
+        let _done = Done(self, name, &cell);
+        *cell.get_or_init(|| self.ask_address(name)).await
+    }
+
+    /// The question itself: see `real_address`.
+    async fn ask_address(&self, name: &str) -> Option<std::net::Ipv4Addr> {
         static IDS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0x5a17);
         let id = IDS.fetch_add(0x9e37, std::sync::atomic::Ordering::Relaxed);
         let query = crate::names::query_a(id, name);
@@ -1492,6 +1532,56 @@ mod tests {
                 .await
                 .route,
             Route::Proxy
+        );
+    }
+
+    /// The connections that follow a lookup wait for the one question
+    /// already asked: a page opens several at once, and each asked again
+    /// through the server. Here the "server" never answers, and counts how
+    /// often it was asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_name_is_asked_once_however_many_wait() {
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = silent.local_addr().unwrap();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&asked);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = silent.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                socks,
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::build(
+                &bliss_proto::Routing::default(),
+                std::path::Path::new("/nonexistent"),
+            )),
+        ));
+        let carrying = Arc::new(Carrying::new(serving, Gateway::for_tests()));
+        let waiting: Vec<_> = (0..6)
+            .map(|_| {
+                let carrying = Arc::clone(&carrying);
+                tokio::spawn(async move { carrying.real_address("site.example").await })
+            })
+            .collect();
+        for one in waiting {
+            assert_eq!(one.await.unwrap(), None);
+        }
+        // Once over UDP (its association) and once over TCP, for all six.
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            carrying.asking.lock().unwrap().is_empty(),
+            "a lookup left behind"
         );
     }
 
