@@ -109,6 +109,7 @@ pub enum ProxyError {
 }
 
 /// One value out of a set of settings.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn value<'a>(settings: &'a Settings, key: &str) -> Option<&'a str> {
     settings
         .iter()
