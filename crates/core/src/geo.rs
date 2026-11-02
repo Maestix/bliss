@@ -175,18 +175,10 @@ pub fn load_sites(path: &Path, wanted: &[String]) -> std::io::Result<HashMap<Str
         return Ok(found);
     }
     let wanted: HashSet<String> = wanted.iter().map(|w| w.to_ascii_uppercase()).collect();
-    let bytes = std::fs::read(path)?;
 
-    for entry in top_level_entries(&bytes) {
-        let Some(code) = entry_name(entry) else {
-            continue;
-        };
-        if !wanted.contains(&code) {
-            continue;
-        }
-
+    for (code, entry) in wanted_entries(path, &wanted)? {
         let mut set = SiteSet::default();
-        let mut reader = Reader::new(entry);
+        let mut reader = Reader::new(&entry);
         while let Some((number, value)) = reader.next_field() {
             // Field 2 is one Domain message. Field 1 is the name we already have.
             if let (2, Value::Bytes(domain)) = (number, value) {
@@ -224,8 +216,16 @@ pub fn load_sites(path: &Path, wanted: &[String]) -> std::io::Result<HashMap<Str
 /// The name of every category in `geosite.dat`, uppercased, without reading
 /// one domain: enough to know a category exists before suggesting it.
 pub fn site_names(path: &Path) -> std::io::Result<HashSet<String>> {
-    let bytes = std::fs::read(path)?;
-    Ok(top_level_entries(&bytes).filter_map(entry_name).collect())
+    let mut names = HashSet::new();
+    walk(
+        path,
+        |name| {
+            names.insert(name.to_owned());
+            false
+        },
+        |_, _| {},
+    )?;
+    Ok(names)
 }
 
 /// Load the named countries from `geoip.dat`.
@@ -235,18 +235,10 @@ pub fn load_ips(path: &Path, wanted: &[String]) -> std::io::Result<HashMap<Strin
         return Ok(found);
     }
     let wanted: HashSet<String> = wanted.iter().map(|w| w.to_ascii_uppercase()).collect();
-    let bytes = std::fs::read(path)?;
 
-    for entry in top_level_entries(&bytes) {
-        let Some(code) = entry_name(entry) else {
-            continue;
-        };
-        if !wanted.contains(&code) {
-            continue;
-        }
-
+    for (code, entry) in wanted_entries(path, &wanted)? {
         let mut set = IpSet::new();
-        let mut reader = Reader::new(entry);
+        let mut reader = Reader::new(&entry);
         while let Some((number, value)) = reader.next_field() {
             if let (2, Value::Bytes(cidr)) = (number, value) {
                 let mut addr = None;
@@ -281,19 +273,132 @@ fn ip_from_bytes(raw: &[u8]) -> Option<IpAddr> {
     }
 }
 
-/// The `entry` fields of a `GeoSiteList` or `GeoIPList`, as raw slices.
-fn top_level_entries(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let mut reader = Reader::new(bytes);
-    std::iter::from_fn(move || {
-        loop {
-            match reader.next_field()? {
-                (1, Value::Bytes(entry)) => return Some(entry),
-                // Anything else in a file we did not write is not ours to
-                // interpret, but it must not stop the walk either.
-                _ => continue,
+/// The entries named in `wanted` (uppercased), each read whole.
+fn wanted_entries(
+    path: &Path,
+    wanted: &HashSet<String>,
+) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let mut found = Vec::new();
+    walk(
+        path,
+        |name| wanted.contains(name),
+        |name, entry| {
+            found.push((name, entry));
+        },
+    )?;
+    Ok(found)
+}
+
+/// Walk a `GeoSiteList` or `GeoIPList` on disk without reading it whole:
+/// each entry's head is read for its name, `want` decides, and an entry
+/// nobody asked for is stepped over. The files run to 90 MB (runetfreedom's
+/// geosite), and every rule change on the phone read all of it into memory
+/// to find a category or two: now a few hundred bytes an entry are read,
+/// plus the entries asked for. A file that ends early or lies about a
+/// length ends the walk with what was found, as a corrupt one always did.
+fn walk(
+    path: &Path,
+    mut want: impl FnMut(&str) -> bool,
+    mut take: impl FnMut(String, Vec<u8>),
+) -> std::io::Result<()> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    // Small: the buffer is refilled after every step over an entry, and what
+    // is wanted from each is its first few bytes.
+    let mut file = std::io::BufReader::with_capacity(512, file);
+
+    // A varint from the file, with the bytes it took; `None` at the end.
+    fn varint(file: &mut impl BufRead, raw: &mut Vec<u8>) -> Option<u64> {
+        let mut value = 0u64;
+        for shift in 0..10 {
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).ok()?;
+            raw.push(byte[0]);
+            value |= u64::from(byte[0] & 0x7f) << (shift * 7);
+            if byte[0] & 0x80 == 0 {
+                return Some(value);
             }
         }
-    })
+        None
+    }
+
+    let mut scratch = Vec::new();
+    loop {
+        scratch.clear();
+        let Some(key) = varint(&mut file, &mut scratch) else {
+            return Ok(());
+        };
+        let len = match key & 7 {
+            0 => {
+                if varint(&mut file, &mut scratch).is_none() {
+                    return Ok(());
+                }
+                continue;
+            }
+            1 => 8,
+            2 => match varint(&mut file, &mut scratch) {
+                Some(len) => len,
+                None => return Ok(()),
+            },
+            5 => 4,
+            _ => return Ok(()),
+        };
+        if len > size {
+            return Ok(());
+        }
+        if key != (1 << 3 | 2) {
+            if file.seek_relative(len as i64).is_err() {
+                return Ok(());
+            }
+            continue;
+        }
+        // An entry: its name is field 1, first in every file seen. Read that
+        // much, and the rest only if it is wanted.
+        let mut head = Vec::new();
+        let named = match varint(&mut file, &mut head) {
+            Some(k) if k == (1 << 3 | 2) => match varint(&mut file, &mut head) {
+                Some(n) if (head.len() as u64 + n) <= len => {
+                    let start = head.len();
+                    head.resize(start + n as usize, 0);
+                    if file.read_exact(&mut head[start..]).is_err() {
+                        return Ok(());
+                    }
+                    std::str::from_utf8(&head[start..])
+                        .ok()
+                        .map(str::to_ascii_uppercase)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let rest = len - head.len() as u64;
+        match named {
+            Some(name) if !want(&name) => {
+                if file.seek_relative(rest as i64).is_err() {
+                    return Ok(());
+                }
+            }
+            named => {
+                // Wanted, or a file whose entries do not start with their
+                // name: read the entry whole and look.
+                let mut entry = head;
+                let start = entry.len();
+                entry.resize(start + rest as usize, 0);
+                if file.read_exact(&mut entry[start..]).is_err() {
+                    return Ok(());
+                }
+                match named {
+                    Some(name) => take(name, entry),
+                    None => {
+                        if let Some(name) = entry_name(&entry).filter(|name| want(name)) {
+                            take(name, entry);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Field 1 of an entry: its name, uppercased for comparison.
@@ -505,6 +610,48 @@ mod tests {
     /// The decoder has to survive a file that is not what we expect, because the
     /// alternative is a client that will not start after the geo files are
     /// updated upstream.
+    /// The walk over a real file finds every entry the whole file holds,
+    /// byte for byte: run on the three sources the phone offers with
+    /// `BLISS_GEO_DIR=<dir with geosite.dat and geoip.dat> cargo test -p
+    /// bliss-core -- --ignored the_walk`.
+    #[test]
+    #[ignore]
+    fn the_walk_reads_what_the_whole_file_holds() {
+        let dir = std::path::PathBuf::from(std::env::var("BLISS_GEO_DIR").expect("BLISS_GEO_DIR"));
+        for file in ["geosite.dat", "geoip.dat"] {
+            let path = dir.join(file);
+            let bytes = std::fs::read(&path).unwrap();
+            let mut whole = std::collections::BTreeMap::new();
+            let mut reader = Reader::new(&bytes);
+            while let Some((number, value)) = reader.next_field() {
+                if let (1, Value::Bytes(entry)) = (number, value) {
+                    whole.insert(entry_name(entry).unwrap(), entry.to_vec());
+                }
+            }
+            let names: HashSet<String> = whole.keys().cloned().collect();
+            let mut walked = std::collections::BTreeMap::new();
+            walk(
+                &path,
+                |_| true,
+                |name, entry| {
+                    walked.insert(name, entry);
+                },
+            )
+            .unwrap();
+            assert_eq!(walked.len(), whole.len(), "{file}");
+            assert!(walked == whole, "{file}: an entry differs");
+            if file == "geosite.dat" {
+                assert_eq!(site_names(&path).unwrap(), names);
+            }
+            let some: HashSet<String> = names.iter().step_by(37).cloned().collect();
+            let picked = wanted_entries(&path, &some).unwrap();
+            assert_eq!(picked.len(), some.len(), "{file}");
+            for (name, entry) in picked {
+                assert_eq!(whole[&name], entry, "{file}: {name}");
+            }
+        }
+    }
+
     #[test]
     fn a_corrupt_file_yields_nothing_rather_than_panicking() {
         let dir = std::env::temp_dir().join("bliss-geo-test");
