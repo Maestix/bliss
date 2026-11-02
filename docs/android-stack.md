@@ -519,5 +519,41 @@ On the user's phone 0.2.9 opened Google again in Brave, with the QUIC rule
 switched off as well as on: the closed connections were never QUIC's. Which
 of the two it was is not known.
 
+## 0.3.0: QR codes, and a review
+
+The add sheet reads a QR code (`Scan.kt`): the camera through CameraX, or a
+picture from the gallery for a code sent as a screenshot, decoded by ZXing's
+core — Apache 2.0, no Google Play services, nothing sent anywhere, and
+light-on-dark codes too. A code that reads as a link is imported at once, as
+«Вставить» does; anything else is said by kind and never quoted. The camera
+is asked for on the first scan; refused, the gallery stays. The APK grew by
+the camera libraries.
+
+The user then asked for the whole code to be gone over, desktop and phone,
+and for what turned up to be fixed. What was, each in a commit of its own:
+
+- **One engine on the bridge port at a time** (`Port` in engine.rs). A stop
+  only began the old xray's shutdown while the next start spawned its own,
+  which found the port taken: «Полностью мимо VPN», «Продолжить» right after
+  «Пауза» and a second server picked during a switch all failed the tunnel.
+  Starts, switches and stops are turns now, in the loop's order. A server
+  picked while the tunnel starts is switched to once it is up.
+- **The engine's port asks for a login, on a port of its own per run.** Any
+  app on a phone reaches loopback; xray's open SOCKS port let any of them go
+  through the server around bliss's rules, or find the proxy by knocking.
+- **The rule-set files are walked, not read whole**: every rule switch read
+  all 85 MB of runetfreedom's geosite in the engine loop.
+- **A site's address is asked once**, however many connections wait for it.
+- **Commands reach the engine in order**, wait for it while its process
+  starts, and name a server by a key as well as its place.
+- The connections screen showed the oldest closed connections, never a live
+  one; handshake times landed on neighbours after a refresh; «за сессию»
+  never reset; a profile that did not read was written over at the next
+  save; a refused `establish()` killed the tunnel's process; the socket read
+  lines without end; an accept loop out of descriptors spun.
+
+Left as found: the frame still carries the whole server list every second
+while a screen is open.
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).

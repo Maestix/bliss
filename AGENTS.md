@@ -453,7 +453,10 @@ These cost the most time on this project. None of them announce themselves.
   three: OpenVPN's output kept for why it stopped (64 KB, lines of 4 KB, the
   rest dropped as it arrives, `Tail` in session.rs), the program names
   remembered between socket tables (256, process.rs) and the recent owners
-  tried first (8).
+  tried first (8). Android added a command line from a screen (4 MB,
+  `MAX_LINE` in its engine, read through `take` so a frame between two
+  reads keeps what was read) and the commands a screen holds while the
+  tunnel's process starts (32, the oldest dropped, `EngineClient`).
 - **bliss.log has a cap while bliss runs, not only when it starts**: one run
   writes at most 16 MB into it (`logs::RUN_LIMIT`, a line saying so, then
   nothing; `the_file_stops_at_its_limit`), and at start a file past 2 MB is
@@ -464,6 +467,12 @@ These cost the most time on this project. None of them announce themselves.
   device). The window's log pane keeps its 400 lines whatever the file does.
   The default filter is `info,ipstack=error`: ipstack warns about every
   packet it cannot hand on, which nobody can act on.
+- **The rule-set files are walked, not read whole** (`walk` in geo.rs):
+  each entry's head for its name, the entries asked for whole, the rest
+  stepped over. runetfreedom's geosite is 85 MB, and the phone compiles a
+  table on every rule switch, in its engine loop
+  (`the_walk_reads_what_the_whole_file_holds`, ignored, needs
+  `BLISS_GEO_DIR`).
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
@@ -519,6 +528,16 @@ These cost the most time on this project. None of them announce themselves.
   `Command::AddVpn` and sits in `bliss_proto::Vpn`, whose `Debug` gives its
   length alone (`debug_does_not_show_a_vpn_profile`,
   `a_vpn_profile_on_its_way_is_not_printed`).
+- **On a phone, loopback is everyone's.** Any app reaches 127.0.0.1 with
+  nothing but the internet permission, so xray's SOCKS port there serves
+  only a login made from `/dev/urandom` for each run of the tunnel's
+  process, on a port the system picks (`fresh_login`, `free_port`,
+  `bliss_xray::require_login`, `SocksOutbound::with_login`); the rule sets'
+  fetch through the tunnel carries it too. Open, any app could go through
+  the server around bliss's rules, or find a proxy by knocking — one of the
+  ways apps look for a VPN (`the_engine_serves_only_who_has_the_login`,
+  ignored, needs `BLISS_XRAY`). The desktop's port stays open: what runs
+  beside it runs as the same user.
 - **A connection a rule sends to the VPN goes there or nowhere.** With no VPN
   up, `Serving::dial_tunnelled` refuses it (`NotConnected`, SOCKS reply 3,
   HTTP 502 saying the VPN is not connected) rather than letting it fall
@@ -1555,7 +1574,10 @@ table.
   too, so nearly every site was looked up and, on a server that lost the
   UDP, waited five seconds for it — the user found parts of GitHub not
   loading (`the_local_network_and_ipv6_are_no_reason_to_look_a_site_up`).
-  The lookup goes over UDP, then TCP, 1.5 s each. A table built with
+  The lookup goes over UDP, then TCP, 1.5 s each, and one at a time per
+  name: the connections after a lookup wait for its answer
+  (`Carrying::asking`, `a_name_is_asked_once_however_many_wait`) rather
+  than each asking through the server again. A table built with
   `build_resolving` gives no warning that a country rule cannot see sites.
   A connection that still arrives as a bare address there — a «Частный
   DNS», a browser's own DNS over HTTPS, an address the app kept — is asked
@@ -1702,7 +1724,13 @@ table.
 - `kill_on_drop` does not survive `TerminateProcess` of the parent; the engine
   runs in a Job Object with kill-on-close (`job.rs`).
 - "Ready" means three things (`process.rs`): the bridge port was free before
-  spawn, the child is still alive, and whatever answers speaks SOCKS5.
+  spawn, the child is still alive, and whatever answers speaks SOCKS5 and
+  takes the method the config asked for (no-auth, or a login).
+- **One engine holds the bridge port at a time.** On the phone every start,
+  switch and stop is a turn on `Port` in its engine, in the loop's order:
+  a stop that only began the old xray's shutdown let the next start find
+  the port taken, and the tunnel failed (`turns_on_the_port_run_in_order`).
+  The desktop awaits `parts.stop()` before `start` for the same reason (§5).
 - **A config is written for one engine version.** `check_version` reads it
   (`Version`, compared as numbers: 26.10 is after 26.9) and refuses an engine
   older than `minimum_xray_version` asks for, in `engine::start` before
