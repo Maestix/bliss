@@ -57,6 +57,8 @@ data class Numbers(
     val active: Int = 0, val opened: Long = 0, val latency: Int? = null,
 )
 data class ServerRow(
+    /** Which server this is when a command names it back (a hash of its link). */
+    val key: String,
     val name: String, val kind: String, val detail: String, val address: String,
     val group: String?, val ping: String, val ms: Int?,
     /** The real check: a page fetched through the server ("ok", "down", "probing", "unknown"). */
@@ -98,7 +100,7 @@ fun parseFrame(text: String): Frame {
         since = o.long("since"),
         current = o.int("current"),
         servers = o.optJSONArray("servers").map {
-            ServerRow(it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
+            ServerRow(it.optString("key"), it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
                 it.str("group"), it.getString("ping"), it.int("ms"),
                 it.optString("check", "unknown"), it.int("check_ms"))
         },

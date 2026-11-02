@@ -101,6 +101,9 @@ pub struct Suggest {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerRow {
+    /// Which server this is, as commands name it back: a hash of its link,
+    /// which a refresh does not move as it moves the server's place.
+    pub key: String,
     pub name: String,
     /// "VLESS · REALITY": the fewest words.
     pub kind: String,
@@ -118,6 +121,15 @@ pub struct ServerRow {
     /// "unknown".
     pub check: &'static str,
     pub check_ms: Option<u32>,
+}
+
+/// A server's key in the frame (`ServerRow::key`): FNV-1a over its link, so
+/// the same in every run and nothing of the link read back from it.
+pub fn server_key(link: &str) -> String {
+    let hash = link.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,11 +199,17 @@ pub enum UiCommand {
     Import {
         text: String,
     },
+    /// By place, and by `key` when the screen sends one: a list refreshed
+    /// in the background moves servers, and the place alone named another.
     Select {
         index: usize,
+        #[serde(default)]
+        key: Option<String>,
     },
     Delete {
         index: usize,
+        #[serde(default)]
+        key: Option<String>,
     },
     DeleteGroup {
         id: String,
@@ -201,6 +219,8 @@ pub enum UiCommand {
     /// Real checks through the servers: one by index, or all.
     Check {
         index: Option<usize>,
+        #[serde(default)]
+        key: Option<String>,
     },
     Disconnect,
     Rule {
@@ -354,7 +374,13 @@ mod tests {
     #[test]
     fn commands_read_as_the_screens_write_them() {
         let c: UiCommand = serde_json::from_str(r#"{"cmd":"select","index":3}"#).unwrap();
-        assert!(matches!(c, UiCommand::Select { index: 3 }));
+        assert!(matches!(
+            c,
+            UiCommand::Select {
+                index: 3,
+                key: None
+            }
+        ));
         let c: UiCommand = serde_json::from_str(r#"{"cmd":"refresh","id":null}"#).unwrap();
         assert!(matches!(c, UiCommand::Refresh { id: None }));
         let c: UiCommand = serde_json::from_str(r#"{"cmd":"hello","full":true}"#).unwrap();
@@ -366,7 +392,9 @@ mod tests {
         let server: ServerConfig = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=www.example.net&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&type=tcp#Test"
             .parse()
             .unwrap();
+        let link = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=www.example.net&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&type=tcp#Test";
         let row = ServerRow {
+            key: server_key(link),
             name: server.tag.clone(),
             kind: kind(&server),
             detail: how_it_hides(&server),
