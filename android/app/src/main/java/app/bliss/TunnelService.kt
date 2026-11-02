@@ -131,7 +131,10 @@ class TunnelService : VpnService() {
             leaveForeground()
             return
         }
-        val tun = Builder()
+        // establish() throws when consent was taken back in between (another
+        // VPN switched on) or the system refuses: the tunnel's process must
+        // not die of it.
+        val tun = try { Builder()
             .setSession("bliss")
             .setMtu(1500)
             .addAddress("172.19.0.1", 30)
@@ -154,7 +157,7 @@ class TunnelService : VpnService() {
             }
             .setConfigureIntent(openApp())
             .setMetered(false)
-            .establish()
+            .establish() } catch (_: Exception) { null }
         if (tun == null) {
             leaveForeground()
             return
