@@ -90,6 +90,32 @@ fn the_screens_drive_the_engine_over_its_socket() {
         f["rules"][0]["enabled"] == false
     });
 
+    // A line with no end is not read for ever: past 4 MB the socket closes.
+    let mut endless = UnixStream::connect(&socket).unwrap();
+    endless
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let block = vec![b'x'; 1 << 20];
+    for _ in 0..5 {
+        if endless.write_all(&block).is_err() {
+            break;
+        }
+    }
+    // Frames keep coming while the socket is open, so read until the end
+    // of the stream, or its reset (the engine left bytes unread), for ten
+    // seconds at most.
+    use std::io::Read;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut chunk = [0u8; 64 << 10];
+    loop {
+        match endless.read(&mut chunk) {
+            Ok(0) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Ok(_) | Err(_) => {}
+        }
+        assert!(Instant::now() < deadline, "the engine kept the socket open");
+    }
+
     // And it all reached the profile on disk.
     let profile = std::fs::read_to_string(dir.join("bliss.toml")).unwrap();
     assert!(profile.contains("enabled = false"), "{profile}");

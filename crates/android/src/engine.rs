@@ -218,6 +218,10 @@ pub fn handle() -> Option<&'static Handle> {
 
 // --- the socket -------------------------------------------------------------
 
+/// The longest command a screen may send: an import of a pasted list is the
+/// longest there is, and a subscription's body is held to the same 4 MB.
+const MAX_LINE: usize = 4 << 20;
+
 /// Serve the screens and the service: frames out, commands in.
 async fn listen(
     path: PathBuf,
@@ -244,16 +248,31 @@ async fn listen(
         let watching = watching.clone();
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
-            let mut lines = BufReader::new(read).lines();
+            let mut read = BufReader::new(read);
+            let mut line = Vec::new();
             let mut frames = frames;
             let mut full = false;
             // The first frame goes out at once; then one per change.
             frames.mark_changed();
             loop {
+                // Cancel-safe: what a frame interrupts stays in `line`, and
+                // the limit counts it.
+                let mut limited = (&mut read).take((MAX_LINE - line.len()) as u64);
                 tokio::select! {
-                    line = lines.next_line() => {
-                        let Ok(Some(line)) = line else { break };
-                        match serde_json::from_str::<UiCommand>(&line) {
+                    got = limited.read_until(b'\n', &mut line) => {
+                        match got {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) if line.last() != Some(&b'\n') => {
+                                if line.len() >= MAX_LINE {
+                                    tracing::warn!("engine: a screen sent a line past {MAX_LINE} bytes; closed");
+                                    break;
+                                }
+                                continue;
+                            }
+                            Ok(_) => {}
+                        }
+                        let text = std::mem::take(&mut line);
+                        match serde_json::from_slice::<UiCommand>(&text) {
                             Ok(UiCommand::Hello { full: wants }) => {
                                 if wants != full {
                                     full = wants;
@@ -1598,6 +1617,9 @@ impl Engine {
             })
             .collect();
         let table = self.table_open.then(|| {
+            // Live connections first, then the closed ones, newest first: the
+            // table's own order. Reversed, the screen showed the 200 oldest
+            // of the closed ones and never a live connection.
             self.tracker
                 .table()
                 .into_iter()
@@ -1644,9 +1666,6 @@ impl Engine {
                 .presets
                 .iter()
                 .map(|p| p.name.clone())
-            // Live connections first, then the closed ones, newest first: the
-            // table's own order. Reversed, the screen showed the 200 oldest
-            // of the closed ones and never a live connection.
                 .collect(),
             preset: self.profile.routing.current_preset.clone(),
             drifted: self.drifted(),
