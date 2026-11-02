@@ -1601,7 +1601,6 @@ impl Engine {
             self.tracker
                 .table()
                 .into_iter()
-                .rev()
                 .take(200)
                 .map(|row| ConnRow {
                     target: row.target,
@@ -1645,6 +1644,9 @@ impl Engine {
                 .presets
                 .iter()
                 .map(|p| p.name.clone())
+            // Live connections first, then the closed ones, newest first: the
+            // table's own order. Reversed, the screen showed the 200 oldest
+            // of the closed ones and never a live connection.
                 .collect(),
             preset: self.profile.routing.current_preset.clone(),
             drifted: self.drifted(),
