@@ -89,7 +89,9 @@ pub enum Cmd {
     Started(u64, Result<Running, String>),
     /// A switch ended: the link it switched to, and the time through it.
     Switched(u64, String, Result<u32, String>),
-    Pinged(Vec<(usize, Option<u32>)>),
+    /// Handshake times by link: a list refreshed or a server deleted while
+    /// they were measured moves the indices.
+    Pinged(Vec<(String, Option<u32>)>),
     /// One server's real check, by its link: the timed request, or none.
     Checked(String, Option<u32>),
     /// The engine's version, learnt by a check before any tunnel.
@@ -525,10 +527,8 @@ impl Engine {
             Cmd::Version(version) => self.version = Some(version),
             Cmd::Pinged(results) => {
                 self.probing = false;
-                for (index, ms) in results {
-                    if let Some(entry) = self.profile.servers.get(index) {
-                        self.pings.insert(entry.link.clone(), ms);
-                    }
+                for (link, ms) in results {
+                    self.pings.insert(link, ms);
                 }
             }
             Cmd::Fetched { id, url, result } => self.fetched(id, url, result),
@@ -1117,29 +1117,29 @@ impl Engine {
             return;
         }
         self.probing = true;
-        let targets: Vec<(usize, Option<(String, u16)>)> = self
+        let targets: Vec<(String, Option<(String, u16)>)> = self
             .servers
             .iter()
-            .enumerate()
-            .map(|(index, server)| {
+            .zip(&self.profile.servers)
+            .map(|(server, entry)| {
                 let target = server.as_ref().filter(|s| !s.over_udp()).map(|s| {
                     (
                         s.address.to_string().trim_matches(['[', ']']).to_owned(),
                         s.port,
                     )
                 });
-                (index, target)
+                (entry.link.clone(), target)
             })
             .collect();
         let own = self.own.clone();
         tokio::spawn(async move {
             let results = futures_util::stream::iter(targets)
-                .map(|(index, target)| async move {
+                .map(|(link, target)| async move {
                     let ms = match target {
                         Some((host, port)) => handshake(&host, port).await,
                         None => None,
                     };
-                    (index, ms)
+                    (link, ms)
                 })
                 .buffer_unordered(16)
                 .collect::<Vec<_>>()
