@@ -9,6 +9,7 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /** What the engine publishes (crates/android/src/protocol.rs, `Frame`). */
@@ -148,35 +149,57 @@ fun parseFrame(text: String): Frame {
 class EngineClient(private val path: String, private val full: Boolean) {
     private val _frames = MutableStateFlow(Frame())
     val frames: StateFlow<Frame> = _frames
-    @Volatile private var out: OutputStream? = null
     @Volatile private var socket: LocalSocket? = null
     @Volatile private var running = false
+    /** Which start the reading thread belongs to: a stop and a start in quick
+     *  succession (onStop, onStart) must not leave two threads, the old one
+     *  clearing the new one's socket. */
+    @Volatile private var generation = 0
+
+    /** Every write goes through this one thread, in the order the screens
+     *  sent them: a thread per command let «log off» from one tab's cleanup
+     *  land after «log on» from the next tab's start, and the journal stayed
+     *  empty. */
+    private val writer = Executors.newSingleThreadExecutor { r -> Thread(r, "bliss-socket-out").apply { isDaemon = true } }
+    /** Touched on the writer's thread only. */
+    private var out: OutputStream? = null
+    /** Commands sent while there is no connection — the tunnel's process
+     *  starting — written once there is one, rather than dropped. */
+    private val waiting = ArrayDeque<String>()
 
     fun start() {
         if (running) return
         running = true
+        val mine = ++generation
         thread(name = "bliss-socket", isDaemon = true) {
             var wait = 100L
-            while (running) {
+            while (running && generation == mine) {
+                var s: LocalSocket? = null
                 try {
-                    val s = LocalSocket(LocalSocket.SOCKET_STREAM)
+                    s = LocalSocket(LocalSocket.SOCKET_STREAM)
                     s.connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
                     socket = s
-                    out = s.outputStream
-                    send(JSONObject().put("cmd", "hello").put("full", full))
+                    val stream = s.outputStream
+                    val hello = JSONObject().put("cmd", "hello").put("full", full).toString()
+                    writer.execute {
+                        out = stream
+                        write(hello)
+                        while (out != null && waiting.isNotEmpty()) write(waiting.removeFirst())
+                    }
                     wait = 100L
                     val reader = BufferedReader(InputStreamReader(s.inputStream, Charsets.UTF_8))
-                    while (running) {
+                    while (running && generation == mine) {
                         val line = reader.readLine() ?: break
                         try { _frames.value = parseFrame(line) } catch (_: Exception) { }
                     }
                 } catch (_: Exception) {
                 }
-                out = null
-                try { socket?.close() } catch (_: Exception) { }
-                socket = null
-                _frames.value = _frames.value.copy(connected = false)
-                if (!running) break
+                val stream = try { s?.outputStream } catch (_: Exception) { null }
+                writer.execute { if (out === stream) out = null }
+                try { s?.close() } catch (_: Exception) { }
+                if (socket === s) socket = null
+                if (generation == mine) _frames.value = _frames.value.copy(connected = false)
+                if (!running || generation != mine) break
                 Thread.sleep(wait)
                 wait = (wait * 2).coerceAtMost(2000)
             }
@@ -189,13 +212,28 @@ class EngineClient(private val path: String, private val full: Boolean) {
         try { socket?.close() } catch (_: Exception) { }
     }
 
-    fun send(command: JSONObject) {
-        val stream = out ?: return
-        thread(isDaemon = true) {
-            try {
-                synchronized(this) { stream.write((command.toString() + "\n").toByteArray(Charsets.UTF_8)); stream.flush() }
-            } catch (_: Exception) { }
+    /** On the writer's thread: one line, or the connection is taken as gone. */
+    private fun write(line: String) {
+        val stream = out ?: run { hold(line); return }
+        try {
+            stream.write((line + "\n").toByteArray(Charsets.UTF_8))
+            stream.flush()
+        } catch (_: Exception) {
+            out = null
+            hold(line)
         }
+    }
+
+    private fun hold(line: String) {
+        // A few, not without end: an engine that never comes back must not
+        // grow this. The oldest go first.
+        if (waiting.size >= 32) waiting.removeFirst()
+        waiting.addLast(line)
+    }
+
+    fun send(command: JSONObject) {
+        val line = command.toString()
+        writer.execute { write(line) }
     }
 
     fun command(name: String, vararg pairs: Pair<String, Any?>) {
