@@ -409,6 +409,10 @@ struct Engine {
     /// each run of the tunnel's process (`fresh_login`, `free_port`).
     bridge: u16,
     login: bliss_core::Login,
+    /// The tracker's totals as the tunnel last came up: «за сессию» counts
+    /// from there. The tracker lives as long as the process, which the
+    /// bound screens can keep for days, across any number of connections.
+    session: (u64, u64, u64),
     /// The descriptor of a TUN whose start is waiting for a server switch to
     /// end, or that arrived while busy.
     tracker: Arc<Tracker>,
@@ -484,6 +488,7 @@ impl Engine {
             port: Port::default(),
             bridge: 0,
             login: fresh_login(),
+            session: (0, 0, 0),
             tracker: Arc::new(Tracker::new()),
             names: Arc::new(bliss_tun::names::FakeNames::new()),
             version: None,
@@ -582,6 +587,7 @@ impl Engine {
                         self.version = Some(running.version);
                         let link = running.link.clone();
                         self.running = Some(running);
+                        self.session = self.tracker.totals();
                         self.state = State::On;
                         self.error = None;
                         self.suggest = None;
@@ -1653,7 +1659,15 @@ impl Engine {
 
     fn publish(&mut self) {
         let current = self.current().map(|(index, _)| index);
-        let (up_total, down_total, opened) = self.tracker.totals();
+        let (up_total, down_total, opened) = {
+            let (up, down, opened) = self.tracker.totals();
+            let (up0, down0, opened0) = self.session;
+            (
+                up.saturating_sub(up0),
+                down.saturating_sub(down0),
+                opened.saturating_sub(opened0),
+            )
+        };
         let servers = self
             .profile
             .servers
@@ -2461,7 +2475,9 @@ mod tests {
             tx.downgrade(),
             frames,
         );
-        let link = |n: u8| format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}");
+        let link = |n: u8| {
+            format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}")
+        };
         engine.import(&format!("{}\n{}\n{}", link(1), link(2), link(3)));
         assert_eq!(engine.profile.servers.len(), 3);
         let second = crate::protocol::server_key(&link(2));
@@ -2472,7 +2488,12 @@ mod tests {
             index: 1,
             key: Some(second.clone()),
         });
-        let left: Vec<_> = engine.profile.servers.iter().map(|e| e.link.clone()).collect();
+        let left: Vec<_> = engine
+            .profile
+            .servers
+            .iter()
+            .map(|e| e.link.clone())
+            .collect();
         assert_eq!(left, vec![link(3)]);
         // Gone altogether: nothing is deleted in its stead.
         engine.ui(UiCommand::Delete {
