@@ -310,6 +310,27 @@ async fn listen(
     }
 }
 
+/// Write a file and wait until it is on the disk, so that a rename over the
+/// old one never leaves an empty file after the phone loses power.
+fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Copy a profile that does not read to `bliss.toml.bak` (`.1.bak` and on
+/// if taken), as the desktop does; the copy's path, if it was made.
+fn keep_aside(path: &std::path::Path) -> Option<PathBuf> {
+    let free = (0..100).map(|n| match n {
+        0 => path.with_extension("toml.bak"),
+        n => path.with_extension(format!("toml.{n}.bak")),
+    });
+    let target = free.into_iter().find(|p| !p.exists())?;
+    std::fs::copy(path, &target).ok()?;
+    Some(target)
+}
+
 // --- the loop ---------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,8 +408,13 @@ impl Engine {
         let _ = std::fs::create_dir_all(&paths.files);
         let profile = match std::fs::read_to_string(paths.profile()) {
             Ok(text) => toml::from_str::<Profile>(&text).unwrap_or_else(|e| {
+                // Kept aside before anything writes over it: the next save
+                // would otherwise take every server and subscription with it.
+                let kept = keep_aside(&paths.profile());
                 tracing::warn!(
-                    "engine: the profile did not read, starting afresh: {}",
+                    "engine: the profile did not read, starting afresh{}: {}",
+                    kept.map(|p| format!(" (the old one is {})", p.display()))
+                        .unwrap_or_default(),
                     e.message()
                 );
                 first_profile()
@@ -1521,7 +1547,7 @@ impl Engine {
             .map_err(|e| e.to_string())
             .and_then(|text| {
                 let tmp = path.with_extension("toml.new");
-                std::fs::write(&tmp, text)
+                write_synced(&tmp, text.as_bytes())
                     .and_then(|()| std::fs::rename(&tmp, &path))
                     .map_err(|e| e.to_string())
             });
@@ -2253,6 +2279,37 @@ mod tests {
         );
         let saved = std::fs::read_to_string(paths2.profile()).unwrap();
         assert!(!saved.contains("protocol"), "{saved}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A profile that does not read is copied aside before anything can
+    /// write over it, and a second such start keeps the first copy.
+    #[test]
+    fn a_profile_that_does_not_read_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths {
+            files: dir.clone(),
+            libs: dir.clone(),
+            socket: dir.join("s"),
+        };
+        let broken = "[[servers]]\nlink = \"vless://unterminated\n";
+        for _ in 0..2 {
+            std::fs::write(paths.profile(), broken).unwrap();
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (frames, _) = watch::channel(Frame::default());
+            let mut engine = Engine::load(paths.clone(), tx.downgrade(), frames);
+            engine.save();
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bliss.toml.bak")).unwrap(),
+            broken
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bliss.toml.1.bak")).unwrap(),
+            broken
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
