@@ -71,13 +71,13 @@ fun Servers(frame: Frame, c: Commands, add: () -> Unit, menu: (Int) -> Unit, gro
                 if (frame.servers.isEmpty() && frame.groups.isEmpty()) item { Empty(add) }
                 if (own.isNotEmpty()) item { Kicker("Свои", Modifier.padding(start = 12.dp, top = 6.dp, bottom = 4.dp)) }
                 items(own, key = { "s${it.index}:${it.value.name}" }) { (i, s) ->
-                    ServerLine(s, i == frame.current, onClick = { c("select", "index" to i) }, onMore = { menu(i) })
+                    ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key) }, onMore = { menu(i) })
                 }
                 for (g in frame.groups) {
                     item(key = "g" + g.id) { GroupHead(g, frame.servers.count { it.group == g.id }, c, group) }
                     val rows = frame.servers.withIndex().filter { it.value.group == g.id }
                     items(rows, key = { "g${g.id}:${it.index}" }) { (i, s) ->
-                        ServerLine(s, i == frame.current, onClick = { c("select", "index" to i) }, onMore = { menu(i) })
+                        ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key) }, onMore = { menu(i) })
                     }
                 }
                 item { Spacer(Modifier.height(96.dp)) }
@@ -214,7 +214,7 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
         }
         LazyColumn(Modifier.heightIn(max = 380.dp).padding(horizontal = 8.dp)) {
             items(frame.servers.withIndex().toList(), key = { it.index }) { (i, s) ->
-                ServerLine(s, i == frame.current, onClick = { c("select", "index" to i); close() }, onMore = null)
+                ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key); close() }, onMore = null)
             }
         }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -302,15 +302,19 @@ fun verdict(text: String): Triple<String, Color, Boolean> {
 
 @Composable
 fun ServerMenu(frame: Frame, index: Int, c: Commands, close: () -> Unit) {
-    val s = frame.servers.getOrNull(index) ?: return close()
+    // The server the menu was opened on, followed by its key: a list
+    // refreshed while the menu is up moves the places.
+    val key = remember { frame.servers.getOrNull(index)?.key } ?: return close()
+    val at = frame.servers.indexOfFirst { it.key == key }
+    val s = frame.servers.getOrNull(at) ?: return close()
     BlissSheet(close) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
             Text(s.name, style = T.sheet, maxLines = 1)
             Text(listOf(s.detail, s.address).filter { it.isNotEmpty() }.joinToString(" · "), style = T.small, maxLines = 2)
         }
-        MenuRow(Icons.Check, "Подключаться через него", C.N300) { c("select", "index" to index); close() }
-        MenuRow(Icons.Shield, "Проверить доступ через него", C.N300) { c("check", "index" to index); close() }
-        MenuRow(Icons.Trash, "Удалить", C.BadText) { c("delete", "index" to index); close() }
+        MenuRow(Icons.Check, "Подключаться через него", C.N300) { c("select", "index" to at, "key" to key); close() }
+        MenuRow(Icons.Shield, "Проверить доступ через него", C.N300) { c("check", "index" to at, "key" to key); close() }
+        MenuRow(Icons.Trash, "Удалить", C.BadText) { c("delete", "index" to at, "key" to key); close() }
     }
 }
 

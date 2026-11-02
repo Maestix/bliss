@@ -660,12 +660,28 @@ impl Engine {
         match command {
             UiCommand::Hello { .. } => {}
             UiCommand::Import { text } => self.import(&text),
-            UiCommand::Select { index } => self.select(index),
-            UiCommand::Delete { index } => self.delete(index),
+            UiCommand::Select { index, key } => {
+                if let Some(index) = self.place_of(index, key.as_deref()) {
+                    self.select(index);
+                }
+            }
+            UiCommand::Delete { index, key } => {
+                if let Some(index) = self.place_of(index, key.as_deref()) {
+                    self.delete(index);
+                }
+            }
             UiCommand::DeleteGroup { id } => self.delete_group(&id),
             UiCommand::Restore => self.restore(),
             UiCommand::Ping => self.ping_all(),
-            UiCommand::Check { index } => self.check_servers(index),
+            UiCommand::Check { index: None, .. } => self.check_servers(None),
+            UiCommand::Check {
+                index: Some(index),
+                key,
+            } => {
+                if let Some(index) = self.place_of(index, key.as_deref()) {
+                    self.check_servers(Some(index));
+                }
+            }
             UiCommand::Disconnect => self.disconnect(),
             UiCommand::Rule { index, on } => {
                 if let Some(rule) = self.profile.routing.rules.get_mut(index) {
@@ -929,6 +945,31 @@ impl Engine {
                     .unwrap_or_default(),
                 ping,
             });
+    }
+
+    /// The place of the server a screen meant: the one at `index` when its
+    /// key agrees (or none was sent), else wherever that key is now. A
+    /// subscription refreshed between the frame the screen drew and the tap
+    /// had moved the servers, and «Удалить» took the one that slid into the
+    /// place. None, and a word, when the server is gone.
+    fn place_of(&mut self, index: usize, key: Option<&str>) -> Option<usize> {
+        let Some(key) = key else {
+            return Some(index);
+        };
+        let at = |i: usize| {
+            self.profile
+                .servers
+                .get(i)
+                .map(|e| crate::protocol::server_key(&e.link))
+        };
+        if at(index).as_deref() == Some(key) {
+            return Some(index);
+        }
+        let found = (0..self.profile.servers.len()).find(|&i| at(i).as_deref() == Some(key));
+        if found.is_none() {
+            self.toast("Этого сервера уже нет в списке", true, false);
+        }
+        found
     }
 
     fn select(&mut self, index: usize) {
@@ -1644,6 +1685,7 @@ impl Engine {
                     (false, None, false) => ("unknown", None),
                 };
                 ServerRow {
+                    key: crate::protocol::server_key(&entry.link),
                     name,
                     kind: kind_,
                     detail,
@@ -2399,6 +2441,45 @@ mod tests {
         );
         let saved = std::fs::read_to_string(paths2.profile()).unwrap();
         assert!(!saved.contains("protocol"), "{saved}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A tap names the server the screen drew: after the list moved under
+    /// it, by its key, never whatever slid into its place.
+    #[tokio::test]
+    async fn a_command_finds_its_server_after_the_list_moved() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        let link = |n: u8| format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}");
+        engine.import(&format!("{}\n{}\n{}", link(1), link(2), link(3)));
+        assert_eq!(engine.profile.servers.len(), 3);
+        let second = crate::protocol::server_key(&link(2));
+        // The screen drew s2 at place 1; s1 went away in between.
+        engine.profile.servers.remove(0);
+        engine.reparse();
+        engine.ui(UiCommand::Delete {
+            index: 1,
+            key: Some(second.clone()),
+        });
+        let left: Vec<_> = engine.profile.servers.iter().map(|e| e.link.clone()).collect();
+        assert_eq!(left, vec![link(3)]);
+        // Gone altogether: nothing is deleted in its stead.
+        engine.ui(UiCommand::Delete {
+            index: 0,
+            key: Some(second),
+        });
+        assert_eq!(engine.profile.servers.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
