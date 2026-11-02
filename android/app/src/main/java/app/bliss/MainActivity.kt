@@ -61,6 +61,8 @@ sealed interface Sheet {
     data object Permission : Sheet
     data class App(val pkg: String, val label: String) : Sheet
     data class RuleEdit(val index: Int?) : Sheet
+    /** The QR scanner: a screen of its own, over everything. */
+    data object Scan : Sheet
 }
 
 /** Opens the quick server sheet: the notification's «Сервер». */
@@ -189,6 +191,7 @@ fun App(
 
     BackHandler(enabled = sheet != null || traffic || tab != Tab.Home) {
         when {
+            sheet == Sheet.Scan -> sheet = Sheet.Add()
             sheet != null -> sheet = null
             traffic -> traffic = false
             else -> tab = Tab.Home
@@ -221,7 +224,8 @@ fun App(
         when (val s = sheet) {
             null -> {}
             Sheet.Server -> ServerSheet(frame, c = c, close = { sheet = null }, all = { sheet = null; tab = Tab.Servers })
-            is Sheet.Add -> AddSheet(s.text, c = c, close = { sheet = null })
+            is Sheet.Add -> AddSheet(s.text, c = c, close = { sheet = null }, scan = { sheet = Sheet.Scan })
+            Sheet.Scan -> Scanner(back = { sheet = Sheet.Add() }, found = { c("import", "text" to it); sheet = null })
             is Sheet.ServerMenu -> ServerMenu(frame, s.index, c = c, close = { sheet = null })
             is Sheet.Group -> GroupMenu(frame, s.id, c = c, close = { sheet = null })
             Sheet.Permission -> PermissionSheet(close = { sheet = null }, go = { sheet = null; connect(true) })
