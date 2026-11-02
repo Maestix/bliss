@@ -120,6 +120,23 @@ pub fn build(server: &ServerConfig, port: u16, log: LogLevel, engine: Version) -
     })
 }
 
+/// Make the config's SOCKS port serve only who has `user` and `pass`
+/// (`bliss_core::Login` on bliss's side). On a phone every app can reach
+/// loopback: without it any of them could go through the server around
+/// bliss's rules, or find a proxy there by knocking.
+pub fn require_login(config: &mut Value, user: &str, pass: &str) {
+    if let Some(settings) = config
+        .pointer_mut("/inbounds/0/settings")
+        .and_then(Value::as_object_mut)
+    {
+        settings.insert("auth".to_owned(), json!("password"));
+        settings.insert(
+            "accounts".to_owned(),
+            json!([{ "user": user, "pass": pass }]),
+        );
+    }
+}
+
 fn outbound(server: &ServerConfig, engine: Version) -> Value {
     let address = server.address.to_string();
     let port = server.port;
@@ -487,6 +504,19 @@ mod tests {
         // 26.10 is after 26.9, which a comparison of text would get wrong.
         assert!(Version::new(26, 10, 0) > Version::new(26, 9, 9));
         assert_eq!(STABLE.to_string(), "26.3.27");
+    }
+
+    /// A login makes the port answer only with it, in the form xray's
+    /// SOCKS and mixed inbounds read; UDP stays on.
+    #[test]
+    fn a_login_closes_the_port_to_others() {
+        let server: ServerConfig = "trojan://PPPP@example.net:443#t".parse().unwrap();
+        let mut config = build(&server, 10_000, LogLevel::Warning, STABLE);
+        require_login(&mut config, "u1", "QQQQ");
+        assert_eq!(
+            config["inbounds"][0]["settings"],
+            json!({ "auth": "password", "accounts": [{ "user": "u1", "pass": "QQQQ" }], "udp": true })
+        );
     }
 
     /// xray 26.3.27 panics on the first connection when a hop has no

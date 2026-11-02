@@ -310,6 +310,47 @@ async fn listen(
     }
 }
 
+/// A login for the engine's port, made of random bytes: every app on the
+/// phone can reach loopback, and without one any of them could use the
+/// server around bliss's rules, or find the proxy by knocking on its port.
+fn fresh_login() -> bliss_core::Login {
+    let word = |n: usize| {
+        let mut bytes = vec![0u8; n];
+        let read = std::fs::File::open("/dev/urandom").and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut bytes)
+        });
+        if read.is_err() {
+            // Not seen on Android; the clock and the process's hasher keys
+            // still make it nobody else's.
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            );
+            let seed = h.finish().to_le_bytes();
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = seed[i % 8] ^ (i as u8).wrapping_mul(0x9d);
+            }
+        }
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    bliss_core::Login {
+        user: word(8),
+        pass: word(16),
+    }
+}
+
+/// A port nobody holds now, from the system's own choice: the engine's
+/// port differs from run to run, so it is not a fixed place to knock.
+fn free_port() -> Option<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    Some(listener.local_addr().ok()?.port())
+}
+
 /// Write a file and wait until it is on the disk, so that a rename over the
 /// old one never leaves an empty file after the phone loses power.
 fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -364,6 +405,10 @@ struct Engine {
     epoch: u64,
     running: Option<Running>,
     port: Port,
+    /// The engine's SOCKS port and the login it asks for, made afresh for
+    /// each run of the tunnel's process (`fresh_login`, `free_port`).
+    bridge: u16,
+    login: bliss_core::Login,
     /// The descriptor of a TUN whose start is waiting for a server switch to
     /// end, or that arrived while busy.
     tracker: Arc<Tracker>,
@@ -437,6 +482,8 @@ impl Engine {
             epoch: 0,
             running: None,
             port: Port::default(),
+            bridge: 0,
+            login: fresh_login(),
             tracker: Arc::new(Tracker::new()),
             names: Arc::new(bliss_tun::names::FakeNames::new()),
             version: None,
@@ -460,6 +507,7 @@ impl Engine {
             geo_problem: None,
             categories: None,
         };
+        engine.bridge = free_port().unwrap_or(engine.profile.engine.bridge_port);
         engine.settle_protocols();
         engine.offer_quic_rule();
         engine.reparse();
@@ -742,7 +790,8 @@ impl Engine {
         let paths = self.paths.clone();
         let tracker = Arc::clone(&self.tracker);
         let router = Arc::new(self.router());
-        let port = self.profile.engine.bridge_port;
+        let port = self.bridge;
+        let login = self.login.clone();
         let version = self.version;
         let names = Arc::clone(&self.names);
         let link = self.current_link().unwrap_or_default();
@@ -751,13 +800,14 @@ impl Engine {
         // through the server go on after it, so a stop asked for meanwhile
         // need not wait for them.
         self.port.queue(move |slot| async move {
-            let started = spawn_engine(&server, &paths, port, version, &slot).await;
+            let started = spawn_engine(&server, &paths, port, version, &login, &slot).await;
             tokio::spawn(async move {
                 let result = match started {
                     Ok((socks, version)) => {
                         let up = Up {
                             link,
                             socks,
+                            login,
                             version,
                             tracker,
                             router,
@@ -807,11 +857,12 @@ impl Engine {
         let epoch = self.epoch;
         let own = self.own.clone();
         let paths = self.paths.clone();
-        let port = self.profile.engine.bridge_port;
+        let port = self.bridge;
+        let login = self.login.clone();
         let version = self.version;
         tracing::info!("tunnel: switching to «{}»", server.tag);
         self.port.queue(move |slot| async move {
-            let started = spawn_engine(&server, &paths, port, version, &slot).await;
+            let started = spawn_engine(&server, &paths, port, version, &login, &slot).await;
             tokio::spawn(async move {
                 let result = match started {
                     Ok(_) => {
@@ -1374,7 +1425,7 @@ impl Engine {
         let source = geo::source(&self.settings.geo_source);
         let files = self.paths.files.clone();
         // Through the tunnel when it is up: GitHub is slow from some networks.
-        let via = self.running.as_ref().map(|r| r.socks);
+        let via = self.running.as_ref().map(|r| (r.socks, self.login.clone()));
         let own = self.own.clone();
         tracing::info!("geo: fetching the rule sets from {}", source.key);
         tokio::spawn(async move {
@@ -1818,6 +1869,7 @@ async fn spawn_engine(
     paths: &Paths,
     port: u16,
     version: Option<bliss_xray::Version>,
+    login: &bliss_core::Login,
     slot: &Slot,
 ) -> Result<(SocketAddr, bliss_xray::Version), String> {
     clear(slot).await;
@@ -1828,7 +1880,8 @@ async fn spawn_engine(
             .await
             .map_err(|e| format!("движок не запустился: {e}"))?,
     };
-    let config = bliss_xray::build(server, port, bliss_xray::LogLevel::Warning, version);
+    let mut config = bliss_xray::build(server, port, bliss_xray::LogLevel::Warning, version);
+    bliss_xray::require_login(&mut config, &login.user, &login.pass);
     let xray = bliss_xray::Xray::spawn(&exe, &config, &paths.work(), port)
         .await
         .map_err(|e| format!("движок не запустился: {e}"))?;
@@ -1842,6 +1895,7 @@ async fn spawn_engine(
 struct Up {
     link: String,
     socks: SocketAddr,
+    login: bliss_core::Login,
     version: bliss_xray::Version,
     tracker: Arc<Tracker>,
     router: Arc<Router>,
@@ -1862,6 +1916,7 @@ async fn bring_up(
     let Up {
         link,
         socks,
+        login,
         version,
         tracker,
         router,
@@ -1869,14 +1924,17 @@ async fn bring_up(
         names,
     } = up;
     step(own, epoch, 1);
-    let outbound = Arc::new(bliss_core::SocksOutbound::new(
-        socks,
-        bliss_core::EngineInfo {
-            kind: "xray",
-            version: version.to_string(),
-            external: true,
-        },
-    ));
+    let outbound = Arc::new(
+        bliss_core::SocksOutbound::new(
+            socks,
+            bliss_core::EngineInfo {
+                kind: "xray",
+                version: version.to_string(),
+                external: true,
+            },
+        )
+        .with_login(login),
+    );
     let serving = Arc::new(Serving::new(outbound, tracker, router));
     let mut carrying = bliss_tun::Carrying::new(Arc::clone(&serving), bliss_tun::Gateway);
     // The service names DNS_ADDRESS as the phone's DNS server, and answers
@@ -1965,7 +2023,9 @@ async fn real_check(
         .ok()?
         .port();
     let work = paths.files.join("checks").join(slot.to_string());
-    let config = bliss_xray::build(&server, port, bliss_xray::LogLevel::None, version);
+    let login = fresh_login();
+    let mut config = bliss_xray::build(&server, port, bliss_xray::LogLevel::None, version);
+    bliss_xray::require_login(&mut config, &login.user, &login.pass);
     let xray = bliss_xray::Xray::spawn(&paths.engine(), &config, &work, port)
         .await
         .ok()?;
@@ -1976,7 +2036,8 @@ async fn real_check(
             version: version.to_string(),
             external: true,
         },
-    );
+    )
+    .with_login(login);
     let timed = async {
         use bliss_core::Outbound;
         let mut stream = outbound.connect_tcp(&probe_target()).await.ok()?;
@@ -2121,6 +2182,65 @@ mod tests {
         assert_eq!(decision.route, Route::Direct);
         let decision = router.decide(&Target::Socket("203.0.113.7:443".parse().unwrap()), None);
         assert_eq!(decision.route, Route::Proxy);
+    }
+
+    /// The engine's port answers only with the run's login: bliss's dial
+    /// with it is taken, one without it — any other app on the phone — is
+    /// turned away at the greeting. Needs an xray, like the check above.
+    #[tokio::test]
+    #[ignore]
+    async fn the_engine_serves_only_who_has_the_login() {
+        use bliss_core::Outbound;
+        let xray = PathBuf::from(std::env::var("BLISS_XRAY").expect("BLISS_XRAY names an xray"));
+        let dir = std::env::temp_dir().join(format!("bliss-android-login-{}", std::process::id()));
+        let libs = dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        std::fs::copy(&xray, libs.join("libxray.so")).unwrap();
+        let paths = Paths {
+            files: dir.join("files"),
+            libs,
+            socket: dir.join("engine.sock"),
+        };
+        std::fs::create_dir_all(&paths.files).unwrap();
+        let server: ServerConfig =
+            "trojan://PPPP@203.0.113.7:443?security=tls&sni=www.example.net#t"
+                .parse()
+                .unwrap();
+        let login = fresh_login();
+        let slot = Slot::default();
+        let port = free_port().unwrap();
+        let (socks, version) = spawn_engine(&server, &paths, port, None, &login, &slot)
+            .await
+            .expect("the engine starts with a login");
+        let info = || bliss_core::EngineInfo {
+            kind: "xray",
+            version: version.to_string(),
+            external: true,
+        };
+        let target = Target::Socket("203.0.113.9:80".parse().unwrap());
+        // xray answers CONNECT before it reaches the server (AGENTS.md §10),
+        // so a dial that gets past the greeting is a login taken.
+        let with = bliss_core::SocksOutbound::new(socks, info()).with_login(login.clone());
+        assert!(
+            with.connect_tcp(&target).await.is_ok(),
+            "the login was refused"
+        );
+        let wrong = bliss_core::Login {
+            user: login.user.clone(),
+            pass: "QQQQ".to_owned(),
+        };
+        let guessed = bliss_core::SocksOutbound::new(socks, info()).with_login(wrong);
+        assert!(
+            guessed.connect_tcp(&target).await.is_err(),
+            "a wrong password was taken"
+        );
+        let without = bliss_core::SocksOutbound::new(socks, info());
+        assert!(
+            without.connect_tcp(&target).await.is_err(),
+            "the port served a stranger"
+        );
+        clear(&slot).await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A rule made in the editor, as the user made it, against real rule

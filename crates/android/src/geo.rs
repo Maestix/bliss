@@ -153,7 +153,7 @@ pub fn names(files: &Path) -> Vec<String> {
 pub async fn update(
     source: &Source,
     files: &Path,
-    via: Option<SocketAddr>,
+    via: Option<(SocketAddr, bliss_core::Login)>,
     progress: impl Fn(u64),
 ) -> Result<(), String> {
     let builder = reqwest::Client::builder()
@@ -161,9 +161,10 @@ pub async fn update(
         // Timed by silence, not length: a 20 MB file on a slow line is fine.
         .read_timeout(Duration::from_secs(60));
     let builder = match via {
-        Some(addr) => builder.proxy(
+        Some((addr, login)) => builder.proxy(
             reqwest::Proxy::all(format!("socks5h://{addr}"))
-                .map_err(|_| "не удалось направить загрузку через туннель".to_owned())?,
+                .map_err(|_| "не удалось направить загрузку через туннель".to_owned())?
+                .basic_auth(&login.user, &login.pass),
         ),
         // An app on Android has no proxy variables; a test on a machine with
         // them goes the way that machine goes out.

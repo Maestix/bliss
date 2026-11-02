@@ -16,6 +16,10 @@ use crate::target::Target;
 
 const VERSION: u8 = 5;
 const NO_AUTH: u8 = 0;
+/// RFC 1929: a user name and a password.
+const USER_PASS: u8 = 2;
+/// The version of RFC 1929's own little exchange.
+const USER_PASS_VERSION: u8 = 1;
 const CMD_CONNECT: u8 = 1;
 const CMD_UDP: u8 = 3;
 const RESERVED: u8 = 0;
@@ -41,6 +45,9 @@ pub enum SocksError {
 
     #[error("the proxy wants an authentication method bliss does not offer ({0:#04x})")]
     Auth(u8),
+
+    #[error("the proxy refused the login")]
+    LoginRefused,
 
     #[error("unsupported command {0:#04x} — bliss serves CONNECT only")]
     Command(u8),
@@ -71,15 +78,30 @@ fn reply_reason(code: u8) -> &'static str {
 
 // --- client: dial through a SOCKS5 proxy ----------------------------------
 
-/// Negotiate no-auth and ask the proxy to connect to `target`.
-///
-/// On return the stream carries the tunnelled connection and nothing else.
-pub async fn connect_through<S>(stream: &mut S, target: &Target) -> Result<(), SocksError>
+/// A user name and a password for the engine's port (RFC 1929). Each at most
+/// 255 bytes, which is all the exchange can carry.
+#[derive(Clone)]
+pub struct Login {
+    pub user: String,
+    pub pass: String,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The greeting: no authentication, or the login when there is one — and
+/// then the login itself.
+async fn greet<S>(stream: &mut S, login: Option<&Login>) -> Result<(), SocksError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    // Greeting: one method, no authentication.
-    stream.write_all(&[VERSION, 1, NO_AUTH]).await?;
+    let method = if login.is_some() { USER_PASS } else { NO_AUTH };
+    stream.write_all(&[VERSION, 1, method]).await?;
     stream.flush().await?;
 
     let mut greeting = [0u8; 2];
@@ -87,9 +109,42 @@ where
     if greeting[0] != VERSION {
         return Err(SocksError::Version(greeting[0]));
     }
-    if greeting[1] != NO_AUTH {
+    if greeting[1] != method {
         return Err(SocksError::Auth(greeting[1]));
     }
+    if let Some(login) = login {
+        let (user, pass) = (login.user.as_bytes(), login.pass.as_bytes());
+        if user.len() > 255 || pass.len() > 255 {
+            return Err(SocksError::Auth(USER_PASS));
+        }
+        let mut hello = vec![USER_PASS_VERSION, user.len() as u8];
+        hello.extend_from_slice(user);
+        hello.push(pass.len() as u8);
+        hello.extend_from_slice(pass);
+        stream.write_all(&hello).await?;
+        stream.flush().await?;
+        let mut answer = [0u8; 2];
+        stream.read_exact(&mut answer).await?;
+        if answer[1] != 0 {
+            return Err(SocksError::LoginRefused);
+        }
+    }
+    Ok(())
+}
+
+/// Greet the proxy — with `login` when there is one — and ask it to connect
+/// to `target`.
+///
+/// On return the stream carries the tunnelled connection and nothing else.
+pub async fn connect_through<S>(
+    stream: &mut S,
+    target: &Target,
+    login: Option<&Login>,
+) -> Result<(), SocksError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    greet(stream, login).await?;
 
     let mut request = vec![VERSION, CMD_CONNECT, RESERVED];
     write_target(&mut request, target)?;
@@ -120,21 +175,15 @@ where
 /// The association lives exactly as long as `stream`. SOCKS5 says so, and a
 /// proxy drops it the moment that connection closes — so whoever asks has to
 /// keep the stream, not just the address.
-pub async fn associate_udp<S>(stream: &mut S, from: SocketAddr) -> Result<Target, SocksError>
+pub async fn associate_udp<S>(
+    stream: &mut S,
+    from: SocketAddr,
+    login: Option<&Login>,
+) -> Result<Target, SocksError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    stream.write_all(&[VERSION, 1, NO_AUTH]).await?;
-    stream.flush().await?;
-
-    let mut greeting = [0u8; 2];
-    stream.read_exact(&mut greeting).await?;
-    if greeting[0] != VERSION {
-        return Err(SocksError::Version(greeting[0]));
-    }
-    if greeting[1] != NO_AUTH {
-        return Err(SocksError::Auth(greeting[1]));
-    }
+    greet(stream, login).await?;
 
     let mut request = vec![VERSION, CMD_UDP, RESERVED];
     write_target(&mut request, &Target::Socket(from))?;
@@ -354,6 +403,49 @@ mod tests {
     /// A fragment is refused rather than passed on as if it were whole.
     /// Carried through, its payload would be half a packet with a header that
     /// looked fine.
+    /// With a login, the greeting offers user and password alone and sends
+    /// them as RFC 1929 lays out; a refusal is said as one.
+    #[tokio::test]
+    async fn a_login_is_offered_and_sent() {
+        let login = Login {
+            user: "u1".to_owned(),
+            pass: "PPPP".to_owned(),
+        };
+        for accept in [true, false] {
+            let (mut client, mut server) = tokio::io::duplex(1024);
+            let proxy = tokio::spawn(async move {
+                let mut greeting = [0u8; 3];
+                server.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [VERSION, 1, USER_PASS]);
+                server.write_all(&[VERSION, USER_PASS]).await.unwrap();
+                let mut hello = [0u8; 9];
+                server.read_exact(&mut hello).await.unwrap();
+                assert_eq!(&hello, b"\x01\x02u1\x04PPPP");
+                server
+                    .write_all(&[1, if accept { 0 } else { 1 }])
+                    .await
+                    .unwrap();
+                if accept {
+                    let mut request = [0u8; 10];
+                    server.read_exact(&mut request).await.unwrap();
+                    server
+                        .write_all(&[VERSION, 0, 0, ATYP_IPV4, 0, 0, 0, 0, 0, 0])
+                        .await
+                        .unwrap();
+                }
+            });
+            let target = Target::Socket("203.0.113.7:443".parse().unwrap());
+            let result = connect_through(&mut client, &target, Some(&login)).await;
+            if accept {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(SocksError::LoginRefused)));
+            }
+            proxy.await.unwrap();
+        }
+        assert!(!format!("{login:?}").contains("PPPP"));
+    }
+
     #[tokio::test]
     async fn a_fragment_is_refused() {
         let mut wire = Vec::new();

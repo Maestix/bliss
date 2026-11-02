@@ -78,11 +78,24 @@ const DIAL_ATTEMPTS: usize = 3;
 pub struct SocksOutbound {
     addr: SocketAddr,
     info: EngineInfo,
+    login: Option<socks5::Login>,
 }
 
 impl SocksOutbound {
     pub fn new(addr: SocketAddr, info: EngineInfo) -> Self {
-        Self { addr, info }
+        Self {
+            addr,
+            info,
+            login: None,
+        }
+    }
+
+    /// Dial with a user name and a password: an engine whose port others on
+    /// the machine can reach — every app on a phone can reach loopback —
+    /// serves only who has them.
+    pub fn with_login(mut self, login: socks5::Login) -> Self {
+        self.login = Some(login);
+        self
     }
 }
 
@@ -131,7 +144,7 @@ impl Outbound for SocksOutbound {
         let unspecified = SocketAddr::from(([0, 0, 0, 0], 0));
         let bound = match tokio::time::timeout(
             DIAL_TIMEOUT,
-            socks5::associate_udp(&mut control, unspecified),
+            socks5::associate_udp(&mut control, unspecified, self.login.as_ref()),
         )
         .await
         {
@@ -169,7 +182,11 @@ impl SocksOutbound {
         // few bytes Nagle would save.
         stream.set_nodelay(true)?;
 
-        match tokio::time::timeout(DIAL_TIMEOUT, socks5::connect_through(&mut stream, target)).await
+        match tokio::time::timeout(
+            DIAL_TIMEOUT,
+            socks5::connect_through(&mut stream, target, self.login.as_ref()),
+        )
+        .await
         {
             Ok(result) => result?,
             Err(_) => {

@@ -131,7 +131,14 @@ impl Xray {
             config_path,
             _leash: leash,
         };
-        xray.await_listening(Duration::from_secs(10)).await?;
+        // The method the config's port asks for: a login (`require_login`)
+        // or none.
+        let method = match config.pointer("/inbounds/0/settings/auth") {
+            Some(Value::String(auth)) if auth == "password" => 2,
+            _ => 0,
+        };
+        xray.await_listening(Duration::from_secs(10), method)
+            .await?;
         Ok(xray)
     }
 
@@ -146,10 +153,11 @@ impl Xray {
     /// 1. the port was free before the spawn (`claim_bridge_port`, above);
     /// 2. the child is still alive — polled every round, which is what makes
     ///    `ExitedEarly` reachable rather than decorative;
-    /// 3. whatever answers speaks SOCKS5 and offers no-auth, which is the
-    ///    cheapest proof that it is the inbound we asked for and not a stray
-    ///    program that merely accepts connections.
-    async fn await_listening(&mut self, timeout: Duration) -> Result<(), XrayError> {
+    /// 3. whatever answers speaks SOCKS5 and takes the method the config
+    ///    asked for — no-auth, or a login — which is the cheapest proof that
+    ///    it is the inbound we asked for and not a stray program that merely
+    ///    accepts connections.
+    async fn await_listening(&mut self, timeout: Duration, method: u8) -> Result<(), XrayError> {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port);
         let deadline = tokio::time::Instant::now() + timeout;
 
@@ -160,7 +168,7 @@ impl Xray {
             if let Some(status) = self.exited() {
                 return Err(XrayError::ExitedEarly { status });
             }
-            if speaks_socks5(addr).await {
+            if speaks_socks5(addr, method).await {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -226,19 +234,20 @@ fn claim_bridge_port(port: u16) -> Result<(), XrayError> {
 
 /// Does whatever is listening there answer a SOCKS5 greeting?
 ///
-/// Sends the same three bytes the dialer does and expects `05 00` back. A
+/// Sends the same three bytes the dialer does and expects `05` and that method
+/// back: `05 00` for no-auth, `05 02` for a login. A
 /// program that is not a SOCKS5 proxy will not, which is the difference between
 /// "the port is occupied" and "the engine is up".
-async fn speaks_socks5(addr: SocketAddr) -> bool {
+async fn speaks_socks5(addr: SocketAddr, method: u8) -> bool {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let handshake = async {
         let mut stream = TcpStream::connect(addr).await.ok()?;
-        // version 5, one method offered, method 0 = no authentication.
-        stream.write_all(&[5, 1, 0]).await.ok()?;
+        // version 5, one method offered: 0 = no authentication, 2 = a login.
+        stream.write_all(&[5, 1, method]).await.ok()?;
         let mut answer = [0u8; 2];
         stream.read_exact(&mut answer).await.ok()?;
-        Some(answer == [5, 0])
+        Some(answer == [5, method])
     };
 
     // A squatter that accepts and then says nothing must not hold the whole
@@ -466,12 +475,15 @@ mod readiness_tests {
             addr
         }
 
-        assert!(speaks_socks5(listening_with(&[5, 0]).await).await);
+        assert!(speaks_socks5(listening_with(&[5, 0]).await, 0).await);
+        // An engine that asks for the login it was given.
+        assert!(speaks_socks5(listening_with(&[5, 2]).await, 2).await);
         // Accepts, answers something else — an HTTP server, say.
-        assert!(!speaks_socks5(listening_with(b"HT").await).await);
+        assert!(!speaks_socks5(listening_with(b"HT").await, 0).await);
         // A SOCKS5 proxy that refuses every method is not one we can use.
-        assert!(!speaks_socks5(listening_with(&[5, 0xFF]).await).await);
+        assert!(!speaks_socks5(listening_with(&[5, 0xFF]).await, 0).await);
+        assert!(!speaks_socks5(listening_with(&[5, 0xFF]).await, 2).await);
         // Accepts and stays silent; must fail on the timeout rather than hang.
-        assert!(!speaks_socks5(listening_with(&[]).await).await);
+        assert!(!speaks_socks5(listening_with(&[]).await, 0).await);
     }
 }
