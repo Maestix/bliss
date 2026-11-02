@@ -97,4 +97,11 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("androidx.core:core-ktx:1.17.0")
+    // QR import: the camera through CameraX, the code read by ZXing's core
+    // (Apache 2.0, no Google Play services, works offline).
+    val camera = "1.5.1"
+    implementation("androidx.camera:camera-camera2:$camera")
+    implementation("androidx.camera:camera-lifecycle:$camera")
+    implementation("androidx.camera:camera-view:$camera")
+    implementation("com.google.zxing:core:3.5.3")
 }

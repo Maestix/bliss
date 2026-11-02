@@ -87,7 +87,12 @@ object Icons {
     val Clip = icon("clip", "M7.4 4.6 H16.6 a2.4 2.4 0 0 1 2.4 2.4 V18.6 a2.4 2.4 0 0 1-2.4 2.4 H7.4 a2.4 2.4 0 0 1-2.4-2.4 V7 a2.4 2.4 0 0 1 2.4-2.4 Z", "M9 4.6 V3.4 H15 V4.6", "M8.6 10.4 H15.4 M8.6 14 H13.2")
     val More = icon("more", circle(6f, 12f, 0.6f), circle(12f, 12f, 0.6f), circle(18f, 12f, 0.6f), stroke = 1.8f)
     val Close = icon("close", "M6 6 L18 18 M18 6 L6 18")
-    val Shield = icon("shield", "M12 2.6 20 5.6 V12 c0 5-3.6 8-8 9.4 C8 20 4.4 17 4.4 12 V5.6 Z", "M8.6 11.8 11.2 14.4 15.6 9.6", stroke = 1.7f)
+    val Qr = icon("qr", "M4.4 4.4 H9.6 V9.6 H4.4 Z", "M14.4 4.4 H19.6 V9.6 H14.4 Z", "M4.4 14.4 H9.6 V19.6 H4.4 Z",
+        "M14.4 14.4 H16.4 M19.6 14.4 V16.6 M14.4 17.6 V19.6 H19.6 M17.2 17.2 h.01", stroke = 1.6f)
+    val Picture = icon("picture", "M5.6 4.6 H18.4 a2 2 0 0 1 2 2 V17.4 a2 2 0 0 1-2 2 H5.6 a2 2 0 0 1-2-2 V6.6 a2 2 0 0 1 2-2 Z",
+        circle(9f, 9.4f, 1.6f), "M3.8 16.4 8.6 12.4 12.4 15.6 15.4 13 20.2 17")
+    val Torch = icon("torch", "M13.2 2.8 6.4 13.4 H11.6 L10.4 21.2 17.6 10.4 H12.4 Z", stroke = 1.6f)
+    val Shield = icon("shield","M12 2.6 20 5.6 V12 c0 5-3.6 8-8 9.4 C8 20 4.4 17 4.4 12 V5.6 Z", "M8.6 11.8 11.2 14.4 15.6 9.6", stroke = 1.7f)
 }
 
 @Composable

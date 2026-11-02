@@ -226,7 +226,7 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
 }
 
 @Composable
-fun AddSheet(prefill: String, c: Commands, close: () -> Unit) {
+fun AddSheet(prefill: String, c: Commands, close: () -> Unit, scan: () -> Unit) {
     val context = LocalContext.current
     var text by remember { mutableStateOf(prefill) }
     val verdict = verdict(text)
@@ -235,26 +235,14 @@ fun AddSheet(prefill: String, c: Commands, close: () -> Unit) {
             Text("Добавить", style = T.sheet)
             Text("сервер или подписку — bliss поймёт по ссылке сам", style = T.small)
         }
-        Row(Modifier.padding(horizontal = 16.dp)) {
-            Row(
-                Modifier.weight(1f).height(72.dp).clip(RoundedCornerShape(20.dp)).background(C.Tint)
-                    .border(1.dp, Color(0x1AEFE8F5), RoundedCornerShape(20.dp))
-                    .clickable {
-                        // Read only now, on the tap: Android shows a banner for every read.
-                        val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-                        val pasted = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
-                        if (!pasted.isNullOrBlank()) { c("import", "text" to pasted); close() }
-                    }.padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(44.dp).clip(RoundedCornerShape(14.dp)).background(C.Accent.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-                    Ico(Icons.Clip, C.Accent)
-                }
-                Column(Modifier.padding(start = 14.dp)) {
-                    Text("Вставить", style = T.body.copy(fontWeight = FontWeight.Bold))
-                    Text("из буфера обмена — сразу добавлю", style = T.tiny.copy(fontSize = 12.5.sp))
-                }
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            AddTile(Icons.Clip, "Вставить", "из буфера обмена", Modifier.weight(1f)) {
+                // Read only now, on the tap: Android shows a banner for every read.
+                val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                val pasted = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+                if (!pasted.isNullOrBlank()) { c("import", "text" to pasted); close() }
             }
+            AddTile(Icons.Qr, "QR-код", "камерой или с фото", Modifier.weight(1f), onClick = scan)
         }
         Text("или вставьте сюда", style = T.small.copy(color = C.N400), modifier = Modifier.padding(start = 20.dp, top = 18.dp, bottom = 8.dp))
         BasicTextField(
@@ -279,8 +267,27 @@ fun AddSheet(prefill: String, c: Commands, close: () -> Unit) {
     }
 }
 
+/** One of the add sheet's two big ways in: the clipboard, a QR code. */
+@Composable
+private fun AddTile(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, hint: String, modifier: Modifier, onClick: () -> Unit) {
+    Row(
+        modifier.height(72.dp).clip(RoundedCornerShape(20.dp)).background(C.Tint)
+            .border(1.dp, Color(0x1AEFE8F5), RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(44.dp).clip(RoundedCornerShape(14.dp)).background(C.Accent.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+            Ico(icon, C.Accent)
+        }
+        Column(Modifier.padding(start = 12.dp)) {
+            Text(title, style = T.body.copy(fontWeight = FontWeight.Bold), maxLines = 1)
+            Text(hint, style = T.tiny.copy(fontSize = 12.sp), maxLines = 2)
+        }
+    }
+}
+
 /** What the text looks like, said by kind and never quoting it back. */
-private fun verdict(text: String): Triple<String, Color, Boolean> {
+fun verdict(text: String): Triple<String, Color, Boolean> {
     val t = text.trim().lowercase()
     val m = Regex("^(vless|vmess|trojan|ss|socks|hysteria2|hy2|wireguard)://").find(t)
     return when {
