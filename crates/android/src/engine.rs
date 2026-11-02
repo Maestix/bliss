@@ -87,7 +87,8 @@ pub enum Cmd {
     Ui(UiCommand),
     Step(u64, u8),
     Started(u64, Result<Running, String>),
-    Switched(u64, Result<(bliss_xray::Xray, u32), String>),
+    /// A switch ended: the link it switched to, and the time through it.
+    Switched(u64, String, Result<u32, String>),
     Pinged(Vec<(usize, Option<u32>)>),
     /// One server's real check, by its link: the timed request, or none.
     Checked(String, Option<u32>),
@@ -105,14 +106,66 @@ pub enum Cmd {
     GeoDone(Result<(), String>),
 }
 
-/// A tunnel that is up: the engine, and the stack reading the TUN.
+/// A tunnel that is up: the stack reading the TUN, and which server's
+/// engine it goes through. The engine itself lives on the bridge port
+/// (`Port`), not here.
 pub struct Running {
-    xray: Option<bliss_xray::Xray>,
+    /// The server's link, which can differ from the one chosen since.
+    link: String,
+    /// The engine's SOCKS address.
+    socks: SocketAddr,
     serving: Arc<Serving>,
     stack: JoinHandle<()>,
     since: i64,
     latency: u32,
     version: bliss_xray::Version,
+}
+
+/// The engine on the bridge port, and the queue of work on that port.
+///
+/// One xray at a time can hold the port, so every start, switch and stop
+/// takes its turn here, in the order the loop asked for them: each waits for
+/// the one before it, takes whatever engine is on the port down, and leaves
+/// its own there. Before, a stop only began the old engine's shutdown and a
+/// start spawned the new one at once, and the new one found the port taken:
+/// «Полностью мимо VPN» on an app, «Продолжить» after «Пауза», and a second
+/// server picked during a switch all failed the tunnel with "already taken".
+#[derive(Default)]
+struct Port {
+    engine: Arc<std::sync::Mutex<Option<bliss_xray::Xray>>>,
+    turn: Option<JoinHandle<()>>,
+}
+
+type Slot = Arc<std::sync::Mutex<Option<bliss_xray::Xray>>>;
+
+impl Port {
+    /// Queue `work` behind every turn already queued.
+    fn queue<F>(&mut self, work: impl FnOnce(Slot) -> F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let before = self.turn.take();
+        let work = work(Arc::clone(&self.engine));
+        self.turn = Some(tokio::spawn(async move {
+            if let Some(before) = before {
+                let _ = before.await;
+            }
+            work.await;
+        }));
+    }
+
+    /// Take the engine off the port, once the turns before this one are done.
+    fn release(&mut self) {
+        self.queue(|slot| async move { clear(&slot).await });
+    }
+}
+
+/// Take down whatever engine is on the port, and wait until it is gone.
+async fn clear(slot: &Slot) {
+    let old = slot.lock().expect("port lock").take();
+    if let Some(old) = old {
+        let _ = old.shutdown().await;
+    }
 }
 
 /// The loop's handle, kept by the JNI side.
@@ -266,6 +319,7 @@ struct Engine {
     suggest: Option<Suggest>,
     epoch: u64,
     running: Option<Running>,
+    port: Port,
     /// The descriptor of a TUN whose start is waiting for a server switch to
     /// end, or that arrived while busy.
     tracker: Arc<Tracker>,
@@ -333,6 +387,7 @@ impl Engine {
             suggest: None,
             epoch: 0,
             running: None,
+            port: Port::default(),
             tracker: Arc::new(Tracker::new()),
             names: Arc::new(bliss_tun::names::FakeNames::new()),
             version: None,
@@ -416,9 +471,11 @@ impl Engine {
             }
             Cmd::Started(epoch, result) => {
                 if epoch != self.epoch {
-                    // A start nobody waits for any more: let it go.
+                    // A start nobody waits for any more: its stack goes, and
+                    // its engine with the next turn on the port, which
+                    // whatever moved the epoch has queued.
                     if let Ok(running) = result {
-                        stop_running(running);
+                        running.stack.abort();
                     }
                     return;
                 }
@@ -426,34 +483,32 @@ impl Engine {
                     Ok(running) => {
                         tracing::info!("tunnel: up, {} ms through the server", running.latency);
                         self.version = Some(running.version);
+                        let link = running.link.clone();
                         self.running = Some(running);
                         self.state = State::On;
                         self.error = None;
                         self.suggest = None;
                         self.refresh_geo_if_stale();
+                        self.follow_choice(&link);
                     }
                     Err(why) => self.fail(why),
                 }
             }
-            Cmd::Switched(epoch, result) => {
+            Cmd::Switched(epoch, link, result) => {
                 if epoch != self.epoch {
-                    if let Ok((xray, _)) = result {
-                        tokio::spawn(xray.shutdown());
-                    }
                     return;
                 }
                 match (result, self.running.as_mut()) {
-                    (Ok((xray, latency)), Some(running)) => {
-                        running.xray = Some(xray);
+                    (Ok(latency), Some(running)) => {
+                        running.link = link.clone();
                         running.latency = latency;
                         running.since = now_ms();
                         self.state = State::On;
                         self.error = None;
                         self.suggest = None;
+                        self.follow_choice(&link);
                     }
-                    (Ok((xray, _)), None) => {
-                        tokio::spawn(xray.shutdown());
-                    }
+                    (Ok(_), None) => self.port.release(),
                     (Err(why), _) => self.fail(why),
                 }
             }
@@ -610,7 +665,7 @@ impl Engine {
             return;
         };
         if let Some(running) = self.running.take() {
-            stop_running(running);
+            running.stack.abort();
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -643,25 +698,49 @@ impl Engine {
         let port = self.profile.engine.bridge_port;
         let version = self.version;
         let names = Arc::clone(&self.names);
+        let link = self.current_link().unwrap_or_default();
         tracing::info!("tunnel: starting through «{}»", server.tag);
-        tokio::spawn(async move {
-            let result = bring_up(
-                server,
-                paths,
-                port,
-                version,
-                tracker,
-                router,
-                packets,
-                names,
-                epoch,
-                own.clone(),
-            )
-            .await;
-            if let Some(own) = own.upgrade() {
-                let _ = own.send(Cmd::Started(epoch, result));
-            }
+        // The engine takes the port in its turn; the stack and the check
+        // through the server go on after it, so a stop asked for meanwhile
+        // need not wait for them.
+        self.port.queue(move |slot| async move {
+            let started = spawn_engine(&server, &paths, port, version, &slot).await;
+            tokio::spawn(async move {
+                let result = match started {
+                    Ok((socks, version)) => {
+                        let up = Up {
+                            link,
+                            socks,
+                            version,
+                            tracker,
+                            router,
+                            packets,
+                            names,
+                        };
+                        bring_up(&server, up, epoch, &own).await
+                    }
+                    Err(why) => Err(why),
+                };
+                if let Some(own) = own.upgrade() {
+                    let _ = own.send(Cmd::Started(epoch, result));
+                }
+            });
         });
+    }
+
+    /// The link of the server a start or switch would go through now.
+    fn current_link(&self) -> Option<String> {
+        self.current()
+            .map(|(index, _)| self.profile.servers[index].link.clone())
+    }
+
+    /// A server chosen while the tunnel was starting or switching: switch
+    /// to it now. Before, the start went on with the old server while the
+    /// screen and the notification named the new one.
+    fn follow_choice(&mut self, running: &str) {
+        if self.current_link().is_some_and(|link| link != running) {
+            self.switch();
+        }
     }
 
     /// Change the server under a tunnel that is up: the TUN and the stack
@@ -670,11 +749,11 @@ impl Engine {
         let Some((_, server)) = self.current() else {
             return;
         };
-        let Some(running) = self.running.as_mut() else {
+        let Some(running) = self.running.as_ref() else {
             return;
         };
-        let old = running.xray.take();
         let serving = Arc::clone(&running.serving);
+        let link = self.current_link().unwrap_or_default();
         self.epoch += 1;
         self.state = State::Busy;
         self.step = 0;
@@ -684,29 +763,32 @@ impl Engine {
         let port = self.profile.engine.bridge_port;
         let version = self.version;
         tracing::info!("tunnel: switching to «{}»", server.tag);
-        tokio::spawn(async move {
-            if let Some(old) = old {
-                let _ = old.shutdown().await;
-            }
-            let result = async {
-                let (xray, _) = spawn_engine(&server, &paths, port, version).await?;
-                step(&own, epoch, 2);
-                let latency = check(&serving).await.map_err(|e| silent(&server, &e))?;
-                Ok((xray, latency))
-            }
-            .await;
-            if let Some(own) = own.upgrade() {
-                let _ = own.send(Cmd::Switched(epoch, result));
-            }
+        self.port.queue(move |slot| async move {
+            let started = spawn_engine(&server, &paths, port, version, &slot).await;
+            tokio::spawn(async move {
+                let result = match started {
+                    Ok(_) => {
+                        step(&own, epoch, 2);
+                        check(&serving).await.map_err(|e| silent(&server, &e))
+                    }
+                    Err(why) => Err(why),
+                };
+                if let Some(own) = own.upgrade() {
+                    let _ = own.send(Cmd::Switched(epoch, link, result));
+                }
+            });
         });
     }
 
     fn disconnect(&mut self) {
         self.epoch += 1;
         if let Some(running) = self.running.take() {
-            stop_running(running);
+            running.stack.abort();
             tracing::info!("tunnel: down");
         }
+        // Always, not only with a tunnel up: a start under way leaves its
+        // engine on the port.
+        self.port.release();
         self.state = State::Off;
         self.error = None;
         self.suggest = None;
@@ -715,8 +797,9 @@ impl Engine {
     fn fail(&mut self, why: String) {
         tracing::warn!("tunnel: {why}");
         if let Some(running) = self.running.take() {
-            stop_running(running);
+            running.stack.abort();
         }
+        self.port.release();
         self.epoch += 1;
         self.state = State::Failed;
         self.error = Some(why);
@@ -1244,11 +1327,7 @@ impl Engine {
         let source = geo::source(&self.settings.geo_source);
         let files = self.paths.files.clone();
         // Through the tunnel when it is up: GitHub is slow from some networks.
-        let via = self
-            .running
-            .as_ref()
-            .and_then(|r| r.xray.as_ref())
-            .map(|x| x.socks_addr());
+        let via = self.running.as_ref().map(|r| r.socks);
         let own = self.own.clone();
         tracing::info!("geo: fetching the rule sets from {}", source.key);
         tokio::spawn(async move {
@@ -1682,20 +1761,17 @@ fn silent(server: &ServerConfig, e: &str) -> String {
     format!("«{}» не ответил", server.tag)
 }
 
-fn stop_running(running: Running) {
-    running.stack.abort();
-    if let Some(xray) = running.xray {
-        tokio::spawn(xray.shutdown());
-    }
-}
-
-/// Start xray for one server; answer it with its version.
+/// Start xray for one server on the bridge port, once the engine before it
+/// there is gone; answer its SOCKS address and its version. Called in the
+/// port's turn (`Port::queue`).
 async fn spawn_engine(
     server: &ServerConfig,
     paths: &Paths,
     port: u16,
     version: Option<bliss_xray::Version>,
-) -> Result<(bliss_xray::Xray, bliss_xray::Version), String> {
+    slot: &Slot,
+) -> Result<(SocketAddr, bliss_xray::Version), String> {
+    clear(slot).await;
     let exe = paths.engine();
     let version = match version {
         Some(version) => version,
@@ -1707,27 +1783,45 @@ async fn spawn_engine(
     let xray = bliss_xray::Xray::spawn(&exe, &config, &paths.work(), port)
         .await
         .map_err(|e| format!("движок не запустился: {e}"))?;
-    Ok((xray, version))
+    let socks = xray.socks_addr();
+    *slot.lock().expect("port lock") = Some(xray);
+    Ok((socks, version))
 }
 
+/// What a start hands the stack once its engine is up.
 #[cfg(target_os = "android")]
-#[allow(clippy::too_many_arguments)]
-async fn bring_up(
-    server: ServerConfig,
-    paths: Paths,
-    port: u16,
-    version: Option<bliss_xray::Version>,
+struct Up {
+    link: String,
+    socks: SocketAddr,
+    version: bliss_xray::Version,
     tracker: Arc<Tracker>,
     router: Arc<Router>,
     packets: bliss_tun::Packets,
     names: Arc<bliss_tun::names::FakeNames>,
+}
+
+/// The stack over an engine that is up, and the check through the server.
+/// A check that fails leaves the engine on the port: the failure moves the
+/// epoch, and the turn it queues takes the engine down.
+#[cfg(target_os = "android")]
+async fn bring_up(
+    server: &ServerConfig,
+    up: Up,
     epoch: u64,
-    own: mpsc::WeakUnboundedSender<Cmd>,
+    own: &mpsc::WeakUnboundedSender<Cmd>,
 ) -> Result<Running, String> {
-    let (xray, version) = spawn_engine(&server, &paths, port, version).await?;
-    step(&own, epoch, 1);
+    let Up {
+        link,
+        socks,
+        version,
+        tracker,
+        router,
+        packets,
+        names,
+    } = up;
+    step(own, epoch, 1);
     let outbound = Arc::new(bliss_core::SocksOutbound::new(
-        xray.socks_addr(),
+        socks,
         bliss_core::EngineInfo {
             kind: "xray",
             version: version.to_string(),
@@ -1751,17 +1845,17 @@ async fn bring_up(
             let _ = own.send(Cmd::StackEnded(epoch, why));
         }
     });
-    step(&own, epoch, 2);
+    step(own, epoch, 2);
     let latency = match check(&serving).await {
         Ok(latency) => latency,
         Err(e) => {
             stack.abort();
-            let _ = xray.shutdown().await;
-            return Err(silent(&server, &e));
+            return Err(silent(server, &e));
         }
     };
     Ok(Running {
-        xray: Some(xray),
+        link,
+        socks,
         serving,
         stack,
         since: now_ms(),
@@ -1903,6 +1997,28 @@ async fn handshake(host: &str, port: u16) -> Option<u32> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Work on the bridge port runs in the order the loop queued it, each
+    /// turn after the one before has finished — however long that took. A
+    /// stop's shutdown used to run beside the next start, which then found
+    /// the port taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn turns_on_the_port_run_in_order() {
+        let mut port = Port::default();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (turn, wait) in [(0, 60), (1, 0), (2, 30), (3, 0)] {
+            let seen = Arc::clone(&seen);
+            port.queue(move |_| async move {
+                seen.lock().unwrap().push(("begin", turn));
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                seen.lock().unwrap().push(("end", turn));
+            });
+        }
+        port.turn.take().unwrap().await.unwrap();
+        let seen = seen.lock().unwrap().clone();
+        let expected: Vec<_> = (0..4).flat_map(|t| [("begin", t), ("end", t)]).collect();
+        assert_eq!(seen, expected);
+    }
 
     #[test]
     fn a_subscription_shows_its_host_and_not_its_token() {
