@@ -23,11 +23,13 @@
    alone (noto-flags.woff2). Windows' own emoji font has no flags, so 🇳🇱 in a
    server's name came out as the letters «NL». Part of the same family, for
    the flag letters only (unicode-range), so every place that writes in
-   Comfortaa gets them, at every weight. Replaced with the file's bytes like
+   Comfortaa gets them. Its weights must be Comfortaa's own: Chromium joins
+   the faces of a family by unicode-range only within one set of weights,
+   and with 100–900 here the flags were never even loaded. Replaced with the file's bytes like
    Comfortaa (`THEME_STYLES`). SIL Open Font License: OFL-NotoColorEmoji.txt. */
 @font-face {
   font-family: "Comfortaa";
-  font-weight: 100 900;
+  font-weight: 300 700;
   font-display: block;
   src: url(noto-flags.woff2) format("woff2");
   unicode-range: U+1F1E6-1F1FF;
