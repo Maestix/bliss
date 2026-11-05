@@ -170,7 +170,7 @@ private fun ServerCard(frame: Frame, open: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) { Ico(Icons.Globe, C.Accent) }
         Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
-            Text(server?.name ?: "Сервер не выбран", style = T.card, maxLines = 1)
+            Text(server?.name?.let { if (frame.auto) "Автовыбор · $it" else it } ?: "Сервер не выбран", style = T.card, maxLines = 1)
             if (server != null) Row {
                 if (checkText(server).isNotEmpty()) Text("доступ ${checkText(server)}", style = T.small.copy(color = checkColor(server)))
                 else Text(pingText(server), style = T.small.copy(color = pingColor(server)))

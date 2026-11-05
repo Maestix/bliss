@@ -79,6 +79,9 @@ pub struct Settings {
     /// Whether the built-in «QUIC» rule has been offered to this profile:
     /// once, so a person who deletes it is not given it back.
     pub quic_rule: bool,
+    /// «Автовыбор»: the fastest server that answers, and the next one when
+    /// it stops (engine.rs, `auto_pick`).
+    pub auto_server: bool,
 }
 
 impl Default for Settings {
@@ -89,6 +92,7 @@ impl Default for Settings {
             geo_updated: None,
             block_quic: true,
             quic_rule: false,
+            auto_server: false,
         }
     }
 }
@@ -267,6 +271,7 @@ mod tests {
             geo_updated: Some(42),
             block_quic: false,
             quic_rule: true,
+            auto_server: true,
         };
         settings.save(&dir);
         let back = Settings::load(&dir);
@@ -274,6 +279,7 @@ mod tests {
         assert!(!back.block_quic);
         assert!(!back.geo_auto);
         assert_eq!(back.geo_updated, Some(42));
+        assert!(back.auto_server);
         assert_eq!(source("nonsense").key, "loyalsoldier");
         // A file from before the QUIC switch reads with it on.
         std::fs::write(dir.join("android.json"), r#"{"geo_source":"v2fly"}"#).unwrap();

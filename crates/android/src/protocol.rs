@@ -24,6 +24,8 @@ pub struct Frame {
     pub since: Option<i64>,
     /// The server a connection uses: the chosen one.
     pub current: Option<usize>,
+    /// «Автовыбор» is on: `current` is the server it chose.
+    pub auto: bool,
     pub servers: Vec<ServerRow>,
     pub groups: Vec<GroupRow>,
     pub rules: Vec<RuleRow>,
@@ -277,6 +279,10 @@ pub enum UiCommand {
     /// The editor is open and wants the categories, or is closed.
     GeoNames {
         open: bool,
+    },
+    /// «Автовыбор» on or off. Picking a server by hand turns it off.
+    Auto {
+        on: bool,
     },
     /// «Поделиться журналом»: the journal with every secret taken out,
     /// written to `journal.txt` beside the profile (`Frame::journal`).

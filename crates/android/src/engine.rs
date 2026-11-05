@@ -62,6 +62,9 @@ impl Paths {
 
 /// How the start's check waits for the server before calling it silent.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long «Автовыбор» trusts a sweep of handshakes before a start takes
+/// it again.
+const AUTO_FRESH: Duration = Duration::from_secs(600);
 /// The rates kept for the chart: twenty seconds at one a second, and one past
 /// each edge so the line can glide (AGENTS.md §6 rule 22).
 const HISTORY: usize = 22;
@@ -101,6 +104,9 @@ pub enum Cmd {
         url: String,
         result: Result<subscription::Fetched, String>,
     },
+    /// A check through the running tunnel, asked when a screen came on: whether
+    /// the server still answers (`health`).
+    Health(u64, bool),
     /// The stack ended by itself: the system took the TUN away.
     StackEnded(u64, String),
     /// The rule sets' fetch: bytes so far, then how it ended.
@@ -118,6 +124,9 @@ pub struct Running {
     socks: SocketAddr,
     serving: Arc<Serving>,
     stack: JoinHandle<()>,
+    /// Up, but nothing loaded through the server: kept so «Автовыбор» can
+    /// try the next one over the same TUN (`bring_up`'s `keep`).
+    doubt: Option<String>,
     since: i64,
     latency: u32,
     version: bliss_xray::Version,
@@ -459,6 +468,13 @@ struct Engine {
     /// from there. The tracker lives as long as the process, which the
     /// bound screens can keep for days, across any number of connections.
     session: (u64, u64, u64),
+    /// «Автовыбор»: a TUN waiting for the ping sweep a start asked for.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pending: Option<OwnedFd>,
+    /// When the handshakes were last measured.
+    pinged_at: Option<Instant>,
+    /// Servers «Автовыбор» tried in this start and saw fail, by link.
+    tried: std::collections::HashSet<String>,
     /// The descriptor of a TUN whose start is waiting for a server switch to
     /// end, or that arrived while busy.
     tracker: Arc<Tracker>,
@@ -537,6 +553,9 @@ impl Engine {
             bridge: 0,
             login: fresh_login(),
             session: (0, 0, 0),
+            pending: None,
+            pinged_at: None,
+            tried: std::collections::HashSet::new(),
             tracker: Arc::new(Tracker::new()),
             names: Arc::new(bliss_tun::names::FakeNames::new()),
             version: None,
@@ -599,6 +618,7 @@ impl Engine {
                         // none were taken yet.
                         self.last = self.measure_now();
                         if self.pings.is_empty() { self.ping_all(); }
+                        self.health();
                     }
                     drawn = now;
                     if drawn == 0 { self.history.clear(); self.table_open = false; self.log_open = false; }
@@ -631,10 +651,22 @@ impl Engine {
                     return;
                 }
                 match result {
+                    Ok(running) if running.doubt.is_some() => {
+                        // «Автовыбор» kept the TUN over a server nothing
+                        // loaded through: the next one, the stack staying.
+                        let why = running.doubt.clone().unwrap_or_default();
+                        let link = running.link.clone();
+                        self.version = Some(running.version);
+                        self.running = Some(running);
+                        self.session = self.tracker.totals();
+                        self.fail_over(&link, why);
+                    }
                     Ok(running) => {
                         tracing::info!("tunnel: up, {} ms through the server", running.latency);
                         self.version = Some(running.version);
                         let link = running.link.clone();
+                        self.checks.insert(link.clone(), Some(running.latency));
+                        self.tried.clear();
                         self.running = Some(running);
                         self.session = self.tracker.totals();
                         self.state = State::On;
@@ -655,13 +687,30 @@ impl Engine {
                         running.link = link.clone();
                         running.latency = latency;
                         running.since = now_ms();
+                        self.checks.insert(link.clone(), Some(latency));
+                        self.tried.clear();
                         self.state = State::On;
                         self.error = None;
                         self.suggest = None;
                         self.follow_choice(&link);
                     }
                     (Ok(_), None) => self.port.release(),
+                    (Err(why), Some(_)) if self.settings.auto_server => self.fail_over(&link, why),
                     (Err(why), _) => self.fail(why),
+                }
+            }
+            Cmd::Health(epoch, fine) => {
+                if epoch == self.epoch
+                    && !fine
+                    && self.state == State::On
+                    && self.settings.auto_server
+                {
+                    let link = self
+                        .running
+                        .as_ref()
+                        .map(|r| r.link.clone())
+                        .unwrap_or_default();
+                    self.fail_over(&link, "сервер перестал отвечать".to_owned());
                 }
             }
             Cmd::StackEnded(epoch, why) => {
@@ -677,8 +726,12 @@ impl Engine {
             Cmd::Version(version) => self.version = Some(version),
             Cmd::Pinged(results) => {
                 self.probing = false;
+                self.pinged_at = Some(Instant::now());
                 for (link, ms) in results {
                     self.pings.insert(link, ms);
+                }
+                if let Some(fd) = self.pending.take() {
+                    self.connect(fd);
                 }
             }
             Cmd::Fetched { id, url, result } => self.fetched(id, url, result),
@@ -717,6 +770,8 @@ impl Engine {
             UiCommand::Import { text } => self.import(&text),
             UiCommand::Select { index, key } => {
                 if let Some(index) = self.place_of(index, key.as_deref()) {
+                    // A server picked by hand is the person's choice.
+                    self.set_auto(false);
                     self.select(index);
                 }
             }
@@ -771,6 +826,7 @@ impl Engine {
             UiCommand::Table { open } => self.table_open = open,
             UiCommand::Log { open } => self.log_open = open,
             UiCommand::ShareLog => self.share_log(),
+            UiCommand::Auto { on } => self.set_auto(on),
             UiCommand::SaveRule {
                 index,
                 name,
@@ -823,6 +879,25 @@ impl Engine {
     }
 
     fn connect(&mut self, fd: OwnedFd) {
+        if self.settings.auto_server && !self.profile.servers.is_empty() {
+            // Measured on a start, never on a timer: a sweep older than ten
+            // minutes, or none, is taken again first, the TUN waiting.
+            let fresh = self.pinged_at.is_some_and(|at| at.elapsed() < AUTO_FRESH);
+            if !fresh {
+                self.pending = Some(fd);
+                self.epoch += 1;
+                self.state = State::Busy;
+                self.step = 0;
+                self.error = None;
+                self.suggest = None;
+                self.ping_all();
+                return;
+            }
+            self.tried.clear();
+            if let Some(index) = self.auto_pick() {
+                self.selected = Some(self.profile.servers[index].link.clone());
+            }
+        }
         let Some((_, server)) = self.current() else {
             self.toast("Сначала добавьте сервер", true, false);
             self.state = State::Off;
@@ -867,6 +942,7 @@ impl Engine {
         let version = self.version;
         let names = Arc::clone(&self.names);
         let link = self.current_link().unwrap_or_default();
+        let keep = self.settings.auto_server;
         tracing::info!("tunnel: starting through «{}»", server.tag);
         // The engine takes the port in its turn; the stack and the check
         // through the server go on after it, so a stop asked for meanwhile
@@ -877,6 +953,7 @@ impl Engine {
                 let result = match started {
                     Ok((socks, version)) => {
                         let up = Up {
+                            keep,
                             link,
                             socks,
                             login,
@@ -952,6 +1029,7 @@ impl Engine {
 
     fn disconnect(&mut self) {
         self.epoch += 1;
+        self.pending = None;
         if let Some(running) = self.running.take() {
             running.stack.abort();
             tracing::info!("tunnel: down");
@@ -1026,6 +1104,93 @@ impl Engine {
             self.toast("Этого сервера уже нет в списке", true, false);
         }
         found
+    }
+
+    /// «Автовыбор» on or off. On, with the tunnel up, it chooses at once.
+    fn set_auto(&mut self, on: bool) {
+        if self.settings.auto_server == on {
+            return;
+        }
+        self.settings.auto_server = on;
+        self.settings.save(&self.paths.files);
+        if on && self.running.is_some() {
+            self.tried.clear();
+            if let Some(index) = self.auto_pick() {
+                let link = self.profile.servers[index].link.clone();
+                if self.selected.as_deref() != Some(link.as_str()) {
+                    self.selected = Some(link);
+                    self.switch();
+                }
+            }
+        }
+    }
+
+    /// The server «Автовыбор» would take now: one a page loaded through
+    /// first, fastest first; then the fastest handshake; then one reached
+    /// over UDP, which has no handshake to time; then one never measured.
+    /// A server whose check failed, whose handshake found nobody, or that
+    /// failed in this start (`tried`), only when nothing else is left —
+    /// and then none, so a dead list ends in a failure said in words.
+    fn auto_pick(&self) -> Option<usize> {
+        let rank = |index: usize| -> Option<(u8, u32)> {
+            let entry = &self.profile.servers[index];
+            let server = self.servers[index].as_ref()?;
+            if self.tried.contains(&entry.link) {
+                return None;
+            }
+            match (self.checks.get(&entry.link), self.pings.get(&entry.link)) {
+                (Some(Some(ms)), _) => Some((0, *ms)),
+                (Some(None), _) => None,
+                (None, Some(Some(ms))) => Some((1, *ms)),
+                (None, _) if server.over_udp() => Some((2, 0)),
+                (None, Some(None)) => None,
+                (None, None) => Some((3, 0)),
+            }
+        };
+        (0..self.profile.servers.len())
+            .filter_map(|index| Some((rank(index)?, index)))
+            .min()
+            .map(|(_, index)| index)
+    }
+
+    /// The server under «Автовыбор» failed — at start, at a switch, or when
+    /// a screen came on and nothing loaded through it: mark it, and go to the
+    /// next one over the same TUN. With none left, the tunnel fails as it
+    /// would by hand, and says why.
+    fn fail_over(&mut self, link: &str, why: String) {
+        tracing::info!("auto: a server failed ({why}); trying the next");
+        self.tried.insert(link.to_owned());
+        self.checks.insert(link.to_owned(), None);
+        match self.auto_pick() {
+            Some(index) if self.running.is_some() => {
+                self.selected = Some(self.profile.servers[index].link.clone());
+                self.switch();
+            }
+            _ => {
+                self.tried.clear();
+                self.fail(format!("ни один сервер не ответил — последний: {why}"));
+            }
+        }
+    }
+
+    /// When a screen comes on with the tunnel up under «Автовыбор»: one small
+    /// request through the server, and the next server if it does not answer.
+    fn health(&mut self) {
+        if !self.settings.auto_server || self.state != State::On {
+            return;
+        }
+        let Some(running) = self.running.as_ref() else {
+            return;
+        };
+        let serving = Arc::clone(&running.serving);
+        let epoch = self.epoch;
+        let own = self.own.clone();
+        tokio::spawn(async move {
+            let fine = check(&serving).await.is_ok();
+            if let Some(own) = own.upgrade() {
+                let _ = own.send(Cmd::Health(epoch, fine));
+            }
+        });
     }
 
     fn select(&mut self, index: usize) {
@@ -1915,6 +2080,7 @@ impl Engine {
                 .filter(|_| self.state == State::On)
                 .map(|r| r.since),
             current,
+            auto: self.settings.auto_server,
             servers,
             groups,
             rules,
@@ -2074,6 +2240,8 @@ async fn spawn_engine(
 /// What a start hands the stack once its engine is up.
 #[cfg(target_os = "android")]
 struct Up {
+    /// «Автовыбор»: a failed check keeps the TUN (`Running::doubt`).
+    keep: bool,
     link: String,
     socks: SocketAddr,
     login: bliss_core::Login,
@@ -2095,6 +2263,7 @@ async fn bring_up(
     own: &mpsc::WeakUnboundedSender<Cmd>,
 ) -> Result<Running, String> {
     let Up {
+        keep,
         link,
         socks,
         login,
@@ -2134,8 +2303,9 @@ async fn bring_up(
         }
     });
     step(own, epoch, 2);
-    let latency = match check(&serving).await {
-        Ok(latency) => latency,
+    let (latency, doubt) = match check(&serving).await {
+        Ok(latency) => (latency, None),
+        Err(e) if keep => (0, Some(silent(server, &e))),
         Err(e) => {
             stack.abort();
             return Err(silent(server, &e));
@@ -2144,6 +2314,7 @@ async fn bring_up(
     Ok(Running {
         link,
         socks,
+        doubt,
         serving,
         stack,
         since: now_ms(),
@@ -2598,6 +2769,62 @@ mod tests {
         );
         let saved = std::fs::read_to_string(paths2.profile()).unwrap();
         assert!(!saved.contains("protocol"), "{saved}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// «Автовыбор» takes a server a page loaded through first, then the
+    /// fastest handshake, then one over UDP, then one never measured; never
+    /// one whose check failed, and none it saw fail in this start. A
+    /// server picked by hand turns it off.
+    #[tokio::test]
+    async fn auto_takes_the_best_that_answers_and_then_the_next() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        let link = |n: u8| {
+            format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}")
+        };
+        let udp = "hy2://PPPP@203.0.113.9:443/?sni=a.example#u".to_owned();
+        engine.import(&[link(1), link(2), link(3), link(4), udp.clone()].join("\n"));
+        assert_eq!(engine.profile.servers.len(), 5);
+        engine.ui(UiCommand::Auto { on: true });
+        assert!(engine.settings.auto_server);
+        engine.checks.insert(link(1), Some(300));
+        engine.pings.insert(link(2), Some(50));
+        engine.checks.insert(link(3), None);
+        engine.pings.insert(link(4), None);
+        let picked = |e: &Engine| e.auto_pick().map(|i| e.profile.servers[i].link.clone());
+        assert_eq!(picked(&engine), Some(link(1)), "a page loaded through it");
+        engine.tried.insert(link(1));
+        assert_eq!(picked(&engine), Some(link(2)), "then the fastest handshake");
+        engine.tried.insert(link(2));
+        assert_eq!(picked(&engine), Some(udp.clone()), "then one over UDP");
+        engine.tried.insert(udp);
+        assert_eq!(
+            picked(&engine),
+            None,
+            "a failed check and a dead handshake are not offered"
+        );
+        // With nothing left, the tunnel fails in words.
+        engine.fail_over(&link(2), "нет ответа".to_owned());
+        assert_eq!(engine.state, State::Failed);
+        assert!(engine.tried.is_empty());
+        // A server picked by hand is the person's choice.
+        engine.ui(UiCommand::Select {
+            index: 1,
+            key: None,
+        });
+        assert!(!engine.settings.auto_server);
         let _ = std::fs::remove_dir_all(dir);
     }
 
