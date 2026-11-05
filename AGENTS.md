@@ -218,17 +218,17 @@ cargo build -p bliss         # target/debug/bliss.exe
   on windows-latest as one `.exe`, and Android on ubuntu-latest through
   `android/build-native.sh` with the runner's newest NDK and Gradle 8.14.3,
   and puts them with a `SHA256SUMS.txt` on the tag's release; run by hand
-  it only leaves artifacts. The APK is signed with the release key when the
-  repository's secrets hold it (`ANDROID_KEYSTORE`, base64 of the `.jks`,
-  and `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
-  `ANDROID_KEY_PASSWORD`, read in app/build.gradle.kts as `BLISS_KEYSTORE`
-  and friends), and otherwise with the run's own debug key, which no other
-  build's APK installs over. The key is the user's to make and keep; it was
-  never made here. Checked here: the `.deb` built from this container's
-  build installed through apt with its capability and came off clean, and
-  the APK took a throwaway key from the environment and the debug key
-  without one. The workflow itself has not run: actionlint could not be
-  installed here, and no tag has been pushed.
+  it only leaves artifacts. Every APK, debug or release, from any machine,
+  is signed with `android/bliss.keystore` (password `android`, alias
+  `androiddebugkey`): the debug key of the container that built every APK
+  before, committed on the user's word — the repository is private and bliss
+  is shared among a few friends — so that each release installs over the
+  last and over what their phones already have, keeping the app's data.
+  A key of each run's own would have meant uninstalling for every update.
+  Checked here: the `.deb` built from this container's build installed
+  through apt with its capability and came off clean, and the APK signed
+  with the committed key. The workflow itself has not run: actionlint could
+  not be installed here, and no tag has been pushed.
 - **Working from Linux, check Windows' build too.** A test in `stack.rs`
   that used `Gateway::for_tests` — Linux's alone — without
   `#[cfg(target_os = "linux")]` passed every run in a Linux container and
