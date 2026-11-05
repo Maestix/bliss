@@ -58,20 +58,16 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
 
-    // The release key, when the build is given one (GitHub Actions, from the
-    // repository's secrets: .github/workflows/release.yml). One key for every
-    // build is what lets a new APK install over the last; without it a build
-    // is signed with this machine's debug key, as the test builds always were,
-    // and only installs over builds from the same machine.
-    val keystore = System.getenv("BLISS_KEYSTORE")?.takeIf { it.isNotBlank() && file(it).isFile }
+    // One key for every build, kept in the repository (a private one, at the
+    // user's word): the debug key of the machine that built every APK before
+    // GitHub Actions did, so a build from anywhere installs over any other
+    // and keeps the app's data. Debug builds take it too.
     signingConfigs {
-        if (keystore != null) {
-            create("release") {
-                storeFile = file(keystore)
-                storePassword = System.getenv("BLISS_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("BLISS_KEY_ALIAS")
-                keyPassword = System.getenv("BLISS_KEY_PASSWORD")
-            }
+        getByName("debug") {
+            storeFile = File(rootDir, "bliss.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
         }
     }
 
@@ -80,7 +76,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName(if (keystore != null) "release" else "debug")
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
