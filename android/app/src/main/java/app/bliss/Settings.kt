@@ -165,10 +165,15 @@ private fun GeoCard(geo: GeoView, c: Commands) {
     }
 }
 
-/** In words: what bliss does on a network. */
-fun netSummary(connect: String, preset: String?): String {
-    val what = when (connect) { "on" -> "подключаюсь сам"; "off" -> "не подключаюсь"; else -> "решает сердечко" }
-    return if (preset != null) "$what · пресет «$preset»" else what
+/** In words: what bliss does on a network — the parts it has, or that it does nothing. */
+fun netSummary(n: NetView?): String {
+    if (n == null) return "ничего не делаю"
+    val parts = listOfNotNull(
+        when (n.connect) { "on" -> "включаю"; "off" -> "выключаю"; else -> null },
+        n.server?.let { if (it == "auto") "автовыбор" else n.serverName?.let { name -> "сервер $name" } ?: "сервер удалён" },
+        n.preset?.let { "пресет «$it»" },
+    )
+    return if (parts.isEmpty()) "ничего не делаю" else parts.joinToString(" · ")
 }
 
 /**
@@ -188,12 +193,13 @@ private fun NetworksCard(frame: Frame, open: (String, String) -> Unit) {
         if (allowed) TunnelService.reportNetwork(context)
     }
     Section("Сети") {
-        Text("Что делать в каждой сети: подключаться самому, не подключаться или оставить сердечку, и какой пресет включить. " +
-            "Работает, пока bliss включён или ждёт другой сети.",
+        Text("Когда телефон переходит в сеть, bliss может сам включиться или выключиться, сменить сервер и пресет. " +
+            "Работает, пока bliss не выключен кнопкой.",
             style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(bottom = 6.dp))
         val now = frame.network
         if (now != null) {
-            NetLine("Сейчас: ${now.name}", netSummary(now.connect, now.preset) + if (!now.own && now.connect.isNotEmpty()) " (как у любого Wi-Fi)" else "", true) {
+            val inherited = !now.own && (now.connect.isNotEmpty() || now.server != null || now.preset != null)
+            NetLine("Сейчас: ${now.name}", netSummary(now) + if (inherited) " (как у любого Wi-Fi)" else "", true) {
                 open(now.id, now.name)
             }
         }
@@ -203,8 +209,7 @@ private fun NetworksCard(frame: Frame, open: (String, String) -> Unit) {
         for (n in frame.networks) if (listed.none { it.first == n.id }) listed += n.id to n.name
         for ((id, name) in listed) {
             if (id == now?.id) continue
-            val rule = frame.networks.firstOrNull { it.id == id }
-            NetLine(name, netSummary(rule?.connect ?: "", rule?.preset), false) { open(id, name) }
+            NetLine(name, netSummary(frame.networks.firstOrNull { it.id == id }), false) { open(id, name) }
         }
         if (!allowed) {
             Text("Чтобы различать сети Wi-Fi по имени, Android просит доступ к местоположению. " +
@@ -234,32 +239,71 @@ private fun NetLine(title: String, hint: String, current: Boolean, onClick: () -
     }
 }
 
-/** What bliss does on one network: connect, stay off or leave it to the heart, and a preset. */
+/**
+ * What bliss does on one network: switch itself on, off, or neither; the
+ * server to take there, «Автовыбор» or none; and a preset. Each tap saves.
+ */
 @Composable
 fun NetworkSheet(frame: Frame, id: String, name: String, c: Commands, close: () -> Unit) {
     val own = frame.networks.firstOrNull { it.id == id }
     val inherited = frame.network?.takeIf { it.id == id }
     var connect by remember { mutableStateOf(own?.connect ?: inherited?.connect ?: "") }
     var preset by remember { mutableStateOf(own?.preset ?: inherited?.preset) }
-    fun save() = c("set_network", "id" to id, "connect" to connect, "preset" to preset)
+    var server by remember { mutableStateOf(own?.server ?: inherited?.server) }
+    var picking by remember { mutableStateOf(false) }
+    fun save() = c("set_network", "id" to id, "connect" to connect, "preset" to preset, "server" to server)
     BlissSheet(close) {
         Column(Modifier.padding(horizontal = 20.dp).padding(top = 6.dp, bottom = 10.dp)) {
             Text(name, style = T.sheet, maxLines = 1)
-            Text(if (id == "wifi") "для каждого Wi-Fi без своего правила" else "что делать в этой сети", style = T.small)
+            Text(if (id == "wifi") "для любого Wi-Fi, у которого нет своей настройки" else "когда телефон переходит в эту сеть", style = T.small)
         }
-        for ((key, label) in listOf("on" to "Подключаться самому", "off" to "Не подключаться", "" to "Как решит сердечко")) {
+        for ((key, label) in listOf("on" to "Включать bliss", "off" to "Выключать bliss", "" to "Не включать и не выключать")) {
             MenuRow(if (connect == key) Icons.Check else Icons.Circle,
                 label, if (connect == key) C.Accent else C.N300) { connect = key; save() }
         }
+        if (frame.servers.isNotEmpty()) {
+            val serverName = when (server) {
+                null -> "не менять"
+                "auto" -> "автовыбор"
+                else -> frame.servers.firstOrNull { it.key == server }?.name ?: "удалён — выберите другой"
+            }
+            Row(
+                Modifier.padding(horizontal = 8.dp, vertical = 4.dp).fillMaxWidth().heightIn(min = 56.dp)
+                    .clip(RoundedCornerShape(14.dp)).clickable { picking = !picking }.padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Сервер", style = T.body)
+                    Text(serverName, style = T.small.copy(color = if (server != null) C.Accent else C.N400), maxLines = 1)
+                }
+                Ico(if (picking) Icons.Up else Icons.Down, C.N500)
+            }
+            if (picking) {
+                // Starred first, as in the list; the rest keep their order.
+                val choices = buildList {
+                    add(null to "Не менять")
+                    if (frame.servers.size > 1) add("auto" to "Автовыбор")
+                    for (s in frame.servers.sortedByDescending { it.favorite }) add(s.key to (if (s.favorite) "★ " else "") + s.name)
+                }
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 260.dp).scrollsInSheet()) {
+                    items(choices.size) { i ->
+                        val (key, label) = choices[i]
+                        MenuRow(if (server == key) Icons.Check else Icons.Circle, label, if (server == key) C.Accent else C.N300) {
+                            server = key; picking = false; save()
+                        }
+                    }
+                }
+            }
+        }
         if (frame.presets.isNotEmpty()) {
-            Text("Пресет здесь", style = T.small.copy(color = C.N400), modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp))
+            Text("Пресет", style = T.small.copy(color = C.N400), modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp))
             Row(Modifier.padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()),
                 horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
                 Chip("Не менять", preset == null) { preset = null; save() }
                 for (p in frame.presets) Chip(p, preset == p) { preset = p; save() }
             }
         }
-        Text("Подключаюсь и отключаюсь сам, пока bliss включён или ждёт другой сети; в Wi-Fi, который просит войти, — после входа.",
+        Text("Срабатывает, когда телефон переходит в эту сеть. Если Wi-Fi просит войти на своей странице — после входа.",
             style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 8.dp))
     }
 }

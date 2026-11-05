@@ -59,6 +59,10 @@ pub struct NetworkRule {
     /// The preset to apply here; none leaves the rules as they are.
     #[serde(default)]
     pub preset: Option<String>,
+    /// The server to take here: a server's key (`protocol::server_key`),
+    /// or "auto" for «Автовыбор»; none leaves the choice as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 /// The rule that speaks for `seen`: its own, else the one for any Wi-Fi.
@@ -72,10 +76,10 @@ pub fn rule_for<'a>(rules: &'a [NetworkRule], seen: &Seen) -> Option<&'a Network
 }
 
 /// Write `rule` in place of the one with its id, or add it; a rule that
-/// says nothing (no connect, no preset) is taken away instead.
+/// says nothing (no connect, no preset, no server) is taken away instead.
 pub fn put(rules: &mut Vec<NetworkRule>, rule: NetworkRule) {
     rules.retain(|r| r.id != rule.id);
-    if rule.connect.is_empty() && rule.preset.is_none() {
+    if rule.connect.is_empty() && rule.preset.is_none() && rule.server.is_none() {
         return;
     }
     rules.push(rule);
@@ -103,11 +107,13 @@ mod tests {
                 id: "wifi".to_owned(),
                 connect: "on".to_owned(),
                 preset: None,
+                server: None,
             },
             NetworkRule {
                 id: "wifi:Дом".to_owned(),
                 connect: "off".to_owned(),
                 preset: Some("Дома".to_owned()),
+                server: None,
             },
         ];
         assert_eq!(rule_for(&rules, &wifi(Some("Дом"))).unwrap().connect, "off");
@@ -132,6 +138,7 @@ mod tests {
                     id: format!("wifi:n{n}"),
                     connect: "on".to_owned(),
                     preset: None,
+                    server: None,
                 },
             );
         }
@@ -143,6 +150,7 @@ mod tests {
                 id: "wifi:n6".to_owned(),
                 connect: String::new(),
                 preset: None,
+                server: None,
             },
         );
         assert!(!rules.iter().any(|r| r.id == "wifi:n6"));

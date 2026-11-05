@@ -53,7 +53,15 @@ import androidx.compose.ui.unit.sp
 fun Servers(frame: Frame, c: Commands, add: () -> Unit, menu: (Int) -> Unit, group: (String) -> Unit) {
     val probing = frame.servers.any { it.ping == "probing" }
     val checking = frame.servers.any { it.check == "probing" }
-    val own = frame.servers.withIndex().filter { it.value.group == null }
+    val starred = frame.servers.withIndex().filter { it.value.favorite }
+    val own = frame.servers.withIndex().filter { it.value.group == null && !it.value.favorite }
+    @Composable
+    fun Line(i: Int, s: ServerRow) = ServerLine(
+        s, i == frame.current,
+        onClick = { c("select", "index" to i, "key" to s.key) },
+        onMore = { menu(i) },
+        onStar = { c("favorite", "key" to s.key, "on" to !s.favorite) },
+    )
     Box(Modifier.fillMaxSize().statusBarsPadding()) {
         PullToRefreshBox(isRefreshing = probing, onRefresh = { c("ping") }, modifier = Modifier.fillMaxSize()) {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
@@ -71,16 +79,18 @@ fun Servers(frame: Frame, c: Commands, add: () -> Unit, menu: (Int) -> Unit, gro
                 }
                 if (frame.servers.isEmpty() && frame.groups.isEmpty()) item { Empty(add) }
                 if (frame.servers.size > 1) item { AutoLine(frame, c) }
-                if (own.isNotEmpty()) item { Kicker("Свои", Modifier.padding(start = 12.dp, top = 6.dp, bottom = 4.dp)) }
-                items(own, key = { "s${it.index}:${it.value.name}" }) { (i, s) ->
-                    ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key) }, onMore = { menu(i) })
+                // Starred servers go first, wherever they came from, and are
+                // not shown a second time in their own group.
+                if (starred.isNotEmpty()) {
+                    item { Kicker("Избранное", Modifier.padding(start = 12.dp, top = 6.dp, bottom = 4.dp)) }
+                    items(starred, key = { "f${it.index}:${it.value.key}" }) { (i, s) -> Line(i, s) }
                 }
+                if (own.isNotEmpty()) item { Kicker("Свои", Modifier.padding(start = 12.dp, top = 6.dp, bottom = 4.dp)) }
+                items(own, key = { "s${it.index}:${it.value.name}" }) { (i, s) -> Line(i, s) }
                 for (g in frame.groups) {
                     item(key = "g" + g.id) { GroupHead(g, frame.servers.count { it.group == g.id }, c, group) }
-                    val rows = frame.servers.withIndex().filter { it.value.group == g.id }
-                    items(rows, key = { "g${g.id}:${it.index}" }) { (i, s) ->
-                        ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key) }, onMore = { menu(i) })
-                    }
+                    val rows = frame.servers.withIndex().filter { it.value.group == g.id && !it.value.favorite }
+                    items(rows, key = { "g${g.id}:${it.index}" }) { (i, s) -> Line(i, s) }
                 }
                 item { Spacer(Modifier.height(96.dp)) }
             }
@@ -103,7 +113,7 @@ private fun Empty(add: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(top = 8.dp).card().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Image(painterResource(R.drawable.cat), null, Modifier.size(220.dp, 190.dp))
         Text("Здесь пока тихо", style = T.sheet)
-        Text("Добавьте сервер — ссылкой или подпиской. Дальше всё делает одно сердечко.",
+        Text("Добавьте сервер — ссылкой или подпиской. Потом подключайтесь одной кнопкой на главном экране.",
             style = T.body.copy(fontSize = 14.sp, color = C.N400), modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
         Btn("Добавить", icon = Icons.Plus, modifier = Modifier.fillMaxWidth(), onClick = add)
     }
@@ -139,7 +149,7 @@ fun AutoLine(frame: Frame, c: Commands) {
 }
 
 @Composable
-fun ServerLine(s: ServerRow, current: Boolean, onClick: () -> Unit, onMore: (() -> Unit)?) {
+fun ServerLine(s: ServerRow, current: Boolean, onClick: () -> Unit, onMore: (() -> Unit)?, onStar: (() -> Unit)? = null) {
     val shape = RoundedCornerShape(16.dp)
     Row(
         Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(shape)
@@ -151,6 +161,8 @@ fun ServerLine(s: ServerRow, current: Boolean, onClick: () -> Unit, onMore: (() 
         Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (current) { Ico(Icons.HeartFilled, C.Accent, 14.dp); Spacer(Modifier.width(7.dp)) }
+                // Where the star cannot be tapped, it is still shown.
+                if (s.favorite && onStar == null) { Ico(Icons.StarFilled, C.Accent, 14.dp); Spacer(Modifier.width(7.dp)) }
                 Text(s.name, style = T.body, maxLines = 1)
             }
             Text(listOf(s.kind, s.address).filter { it.isNotEmpty() }.joinToString(" · "), style = T.tiny.copy(fontSize = 12.5.sp), maxLines = 1)
@@ -164,6 +176,8 @@ fun ServerLine(s: ServerRow, current: Boolean, onClick: () -> Unit, onMore: (() 
                 Text("отклик ${pingText(s)}", style = T.tiny.copy(fontSize = 11.5.sp, color = pingColor(s).copy(alpha = 0.8f)))
             } else Text(pingText(s), style = T.small.copy(color = pingColor(s)))
         }
+        if (onStar != null) IconBtn(if (s.favorite) Icons.StarFilled else Icons.Star,
+            if (s.favorite) C.Accent else C.N500, if (s.favorite) "Убрать из избранного" else "В избранное", onStar)
         if (onMore != null) IconBtn(Icons.More, C.N500, "Действия с сервером", onMore)
     }
 }
@@ -267,7 +281,8 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
         }
         LazyColumn(Modifier.heightIn(max = 380.dp).scrollsInSheet().padding(horizontal = 8.dp)) {
             if (frame.servers.size > 1) item { AutoLine(frame, c) }
-            items(frame.servers.withIndex().toList(), key = { it.index }) { (i, s) ->
+            // Starred first; the rest keep their order.
+            items(frame.servers.withIndex().sortedByDescending { it.value.favorite }, key = { it.index }) { (i, s) ->
                 ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key); close() }, onMore = null)
             }
         }
@@ -367,6 +382,9 @@ fun ServerMenu(frame: Frame, index: Int, c: Commands, close: () -> Unit) {
             Text(listOf(s.detail, s.address).filter { it.isNotEmpty() }.joinToString(" · "), style = T.small, maxLines = 2)
         }
         MenuRow(Icons.Check, "Подключаться через него", C.N300) { c("select", "index" to at, "key" to key); close() }
+        MenuRow(if (s.favorite) Icons.StarFilled else Icons.Star, if (s.favorite) "Убрать из избранного" else "В избранное", C.N300) {
+            c("favorite", "key" to key, "on" to !s.favorite); close()
+        }
         MenuRow(Icons.Shield, "Проверить доступ через него", C.N300) { c("check", "index" to at, "key" to key); close() }
         MenuRow(Icons.Trash, "Удалить", C.BadText) { c("delete", "index" to at, "key" to key); close() }
     }

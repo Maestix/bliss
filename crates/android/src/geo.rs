@@ -84,6 +84,9 @@ pub struct Settings {
     pub auto_server: bool,
     /// What bliss does on each network (networks.rs).
     pub networks: Vec<crate::networks::NetworkRule>,
+    /// The servers marked with a star, by key (`protocol::server_key`),
+    /// oldest first; the list puts them above the rest.
+    pub favorites: Vec<String>,
 }
 
 impl Default for Settings {
@@ -96,6 +99,7 @@ impl Default for Settings {
             quic_rule: false,
             auto_server: false,
             networks: Vec::new(),
+            favorites: Vec::new(),
         }
     }
 }
@@ -276,6 +280,7 @@ mod tests {
             quic_rule: true,
             auto_server: true,
             networks: Vec::new(),
+            favorites: Vec::new(),
         };
         settings.save(&dir);
         let back = Settings::load(&dir);

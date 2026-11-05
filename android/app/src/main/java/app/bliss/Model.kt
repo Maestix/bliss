@@ -55,11 +55,17 @@ data class Frame(
     val connected: Boolean = false,
 )
 
-/** A network: "mobile", "wifi" (any Wi-Fi), "wifi:<name>"; `connect` "on", "off" or "". */
-data class NetView(val id: String, val name: String, val connect: String, val preset: String?, val own: Boolean)
+/**
+ * A network: "mobile", "wifi" (any Wi-Fi), "wifi:<name>"; `connect` "on", "off" or "";
+ * `server` a server's key, "auto", or none, and `serverName` its name (none when it is gone).
+ */
+data class NetView(
+    val id: String, val name: String, val connect: String, val preset: String?, val own: Boolean,
+    val server: String? = null, val serverName: String? = null,
+)
 
 private fun netView(o: JSONObject) = NetView(o.getString("id"), o.getString("name"), o.optString("connect"),
-    if (o.isNull("preset")) null else o.optString("preset"), o.optBoolean("own"))
+    o.str("preset"), o.optBoolean("own"), o.str("server"), o.str("server_name"))
 
 data class GeoSource(val key: String, val name: String, val about: String)
 data class GeoView(
@@ -80,6 +86,8 @@ data class ServerRow(
     val group: String?, val ping: String, val ms: Int?,
     /** The real check: a page fetched through the server ("ok", "down", "probing", "unknown"). */
     val check: String = "unknown", val checkMs: Int? = null,
+    /** Marked with a star: the lists put it above the rest. */
+    val favorite: Boolean = false,
 )
 data class GroupRow(
     val id: String, val name: String, val host: String, val updated: Long?, val used: Long?,
@@ -129,7 +137,7 @@ fun applyPatch(prev: Frame, o: JSONObject): Frame {
             "servers" -> f.copy(servers = o.optJSONArray(key).map {
                 ServerRow(it.optString("key"), it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
                     it.str("group"), it.getString("ping"), it.int("ms"),
-                    it.optString("check", "unknown"), it.int("check_ms"))
+                    it.optString("check", "unknown"), it.int("check_ms"), it.optBoolean("favorite"))
             })
             "groups" -> f.copy(groups = o.optJSONArray(key).map {
                 GroupRow(it.getString("id"), it.getString("name"), it.getString("host"), it.long("updated"), it.long("used"),

@@ -585,3 +585,28 @@ The desktop got the name out of the connection under TUN the same day
 
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
+
+## 0.5.1: a server for each network, and stars
+
+Asked for by the user after the first release built by GitHub Actions.
+
+- **A network can name a server**: a server by its key, or «Автовыбор»
+  (`NetworkRule::server`, `"auto"`), taken as the phone moves onto the
+  network the way a tap in the list takes it — switching a tunnel that is
+  up, said in a line. A server deleted since is passed over, and the sheet
+  says it is gone (`server_name` none). The sheet picks it from a list
+  that opens under «Сервер», starred servers first.
+- **Stars**: `favorites` in android.json, by key, so a refreshed list keeps
+  them; a star on a server that is gone is dropped as the next one is set,
+  and past 256 the oldest (`a_network_takes_its_server_and_stars_have_a_cap`,
+  seen failing with the cap taken out). The list shows them under
+  «Избранное» above everything and not again in their group; the quick
+  sheet puts them first.
+- **No more «сердечко» in words.** The networks' choices read «Решает
+  сердечко», which the user needed many tries to understand: the heart is
+  the main button, and nothing on screen calls it that. They are now
+  «Включать bliss», «Выключать bliss», «Не включать и не выключать», with a
+  summary of what a network does («включаю · сервер X · пресет «Дома»», or
+  «ничего не делаю»), and the card's text says in one sentence what it does
+  and that it works until bliss is switched off by its button. The main
+  screen says «нажмите, чтобы подключиться».

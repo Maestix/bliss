@@ -84,6 +84,10 @@ pub struct NetView {
     /// "on", "off" or "": this network's own rule, or the one it falls under.
     pub connect: String,
     pub preset: Option<String>,
+    /// The server taken here: a key, "auto", or none.
+    pub server: Option<String>,
+    /// That server's name, as the list shows it; none when it is gone.
+    pub server_name: Option<String>,
     /// Whether the rule shown is this network's own (else «любой Wi-Fi»'s, or none).
     pub own: bool,
 }
@@ -150,6 +154,8 @@ pub struct ServerRow {
     /// "unknown".
     pub check: &'static str,
     pub check_ms: Option<u32>,
+    /// Marked with a star: the list puts it above the rest.
+    pub favorite: bool,
 }
 
 /// A server's key in the frame (`ServerRow::key`): FNV-1a over its link, so
@@ -326,6 +332,14 @@ pub enum UiCommand {
         connect: String,
         #[serde(default)]
         preset: Option<String>,
+        /// A server's key, "auto", or none to leave the choice alone.
+        #[serde(default)]
+        server: Option<String>,
+    },
+    /// A server's star, by its key.
+    Favorite {
+        key: String,
+        on: bool,
     },
     /// «Поделиться журналом»: the journal with every secret taken out,
     /// written to `journal.txt` beside the profile (`Frame::journal`).
@@ -459,6 +473,7 @@ mod tests {
             ms: None,
             check: "unknown",
             check_ms: None,
+            favorite: false,
         };
         let json = serde_json::to_string(&row).unwrap();
         assert!(!json.contains("11111111"), "{json}");

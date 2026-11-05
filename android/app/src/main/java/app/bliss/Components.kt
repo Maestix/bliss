@@ -70,6 +70,9 @@ private fun icon(name: String, vararg paths: String, stroke: Float = 1.6f, fill:
 object Icons {
     private const val HEART = "M12 20.4 C10.4 19 4.2 14.9 4.2 10.4 A4.4 4.4 0 0 1 12 7.8 A4.4 4.4 0 0 1 19.8 10.4 C19.8 14.9 13.6 19 12 20.4 Z"
     val Heart = icon("heart", HEART, stroke = 1.7f)
+    private const val STAR = "M12 3.8 14.4 8.9 19.9 9.6 15.9 13.4 16.9 18.9 12 16.2 7.1 18.9 8.1 13.4 4.1 9.6 9.6 8.9 Z"
+    val Star = icon("star", STAR, stroke = 1.6f)
+    val StarFilled = icon("starFilled", STAR, stroke = 1.6f, fill = true)
     val HeartFilled = icon("heartFilled", HEART, stroke = 1.7f, fill = true)
     val Globe = icon("globe", circle(12f, 12f, 8.6f), "M3.4 12 H20.6", "M12 3.4 a13 13 0 0 1 0 17.2 a13 13 0 0 1 0-17.2")
     val Split = icon("split", "M4 19 C10 19 8 5 20 5", "M4 5 C10 5 8 19 20 19", "M16.6 2.2 20 5 16.6 7.8", "M16.6 16.2 20 19 16.6 21.8")

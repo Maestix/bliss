@@ -511,7 +511,8 @@ These cost the most time on this project. None of them announce themselves.
   `MAX_LINE` in its engine, read through `take` so a frame between two
   reads keeps what was read) and the commands a screen holds while the
   tunnel's process starts (32, the oldest dropped, `EngineClient`), and
-  the networks with a rule of their own (32, `MAX_NETWORKS`).
+  the networks with a rule of their own (32, `MAX_NETWORKS`), and the
+  servers with a star (256, `MAX_FAVORITES`, the oldest dropped).
 - **bliss.log has a cap while bliss runs, not only when it starts**: one run
   writes at most 16 MB into it (`logs::RUN_LIMIT`, a line saying so, then
   nothing; `the_file_stops_at_its_limit`), and at start a file past 2 MB is
