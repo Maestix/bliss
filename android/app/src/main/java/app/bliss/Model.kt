@@ -89,58 +89,71 @@ private fun JSONObject.int(key: String): Int? = if (isNull(key) || !has(key)) nu
 private inline fun <T> JSONArray?.map(f: (JSONObject) -> T): List<T> =
     if (this == null) emptyList() else (0 until length()).map { f(getJSONObject(it)) }
 
-fun parseFrame(text: String): Frame {
-    val o = JSONObject(text)
-    val n = o.optJSONObject("numbers") ?: JSONObject()
-    return Frame(
-        state = o.optString("state", "off"),
-        step = o.optInt("step"),
-        error = o.str("error"),
-        suggest = o.optJSONObject("suggest")?.let { Suggest(it.getInt("index"), it.getString("name"), it.getInt("ping")) },
-        since = o.long("since"),
-        current = o.int("current"),
-        servers = o.optJSONArray("servers").map {
-            ServerRow(it.optString("key"), it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
-                it.str("group"), it.getString("ping"), it.int("ms"),
-                it.optString("check", "unknown"), it.int("check_ms"))
-        },
-        groups = o.optJSONArray("groups").map {
-            GroupRow(it.getString("id"), it.getString("name"), it.getString("host"), it.long("updated"), it.long("used"),
-                it.long("total"), it.long("expire"), it.optBoolean("fetching"), it.str("problem"))
-        },
-        rules = o.optJSONArray("rules").map {
-            RuleRow(it.getString("name"), it.getString("conditions"), it.getString("action"), it.optBoolean("enabled"),
-                it.optBoolean("named"), it.optString("text"), it.str("app"))
-        },
-        fallback = o.optString("fallback", "proxy"),
-        presets = o.optJSONArray("presets")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
-        preset = o.str("preset"),
-        drifted = o.optBoolean("drifted"),
-        warnings = o.optJSONArray("warnings")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
-        numbers = Numbers(n.optLong("down_rate"), n.optLong("up_rate"), n.optLong("down_total"), n.optLong("up_total"),
-            n.optInt("active"), n.optLong("opened"), n.int("latency")),
-        history = o.optJSONArray("history")?.let { a -> (0 until a.length()).map { a.getLong(it) } } ?: emptyList(),
-        table = if (o.isNull("table")) null else o.optJSONArray("table").map {
-            ConnRow(it.getString("target"), it.getString("route"), it.getString("rule"), it.optLong("up"), it.optLong("down"),
-                it.optBoolean("closed"), it.str("app"))
-        },
-        log = if (o.isNull("log")) null else o.optJSONArray("log")?.let { a -> (0 until a.length()).map { a.getString(it) } },
-        toast = o.optJSONObject("toast")?.let { Toast(it.getLong("id"), it.getString("text"), it.optBoolean("bad"), it.optBoolean("undo")) },
-        engine = o.optString("engine"),
-        canRestore = o.optBoolean("can_restore"),
-        ticket = o.optLong("ticket"),
-        holding = o.optBoolean("holding"),
-        geo = o.optJSONObject("geo")?.let { g ->
-            GeoView(
-                g.optString("source"),
-                g.optJSONArray("sources").map { GeoSource(it.getString("key"), it.getString("name"), it.getString("about")) },
-                g.optBoolean("auto", true), g.long("ip"), g.long("site"), g.long("updated"), g.long("fetching"), g.str("problem"),
-            )
-        } ?: GeoView(),
-        categories = if (o.isNull("categories") || !o.has("categories")) null
-            else o.optJSONArray("categories")?.let { a -> (0 until a.length()).map { a.getString(it) } },
-        connected = true,
-    )
+private fun JSONArray?.strings(): List<String> =
+    if (this == null) emptyList() else (0 until length()).map { getString(it) }
+
+/**
+ * A line from the engine laid over the frame before it. A line holds only
+ * the parts that changed since the last one (`Sent` in the engine), so the
+ * server list and the rules are parsed — and handed to the screens as new
+ * lists — only when they did change, not with every tick of the numbers.
+ */
+fun applyPatch(prev: Frame, o: JSONObject): Frame {
+    var f = prev
+    for (key in o.keys()) {
+        f = when (key) {
+            "state" -> f.copy(state = o.optString(key, "off"))
+            "step" -> f.copy(step = o.optInt(key))
+            "error" -> f.copy(error = o.str(key))
+            "suggest" -> f.copy(suggest = o.optJSONObject(key)?.let { Suggest(it.getInt("index"), it.getString("name"), it.getInt("ping")) })
+            "since" -> f.copy(since = o.long(key))
+            "current" -> f.copy(current = o.int(key))
+            "servers" -> f.copy(servers = o.optJSONArray(key).map {
+                ServerRow(it.optString("key"), it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
+                    it.str("group"), it.getString("ping"), it.int("ms"),
+                    it.optString("check", "unknown"), it.int("check_ms"))
+            })
+            "groups" -> f.copy(groups = o.optJSONArray(key).map {
+                GroupRow(it.getString("id"), it.getString("name"), it.getString("host"), it.long("updated"), it.long("used"),
+                    it.long("total"), it.long("expire"), it.optBoolean("fetching"), it.str("problem"))
+            })
+            "rules" -> f.copy(rules = o.optJSONArray(key).map {
+                RuleRow(it.getString("name"), it.getString("conditions"), it.getString("action"), it.optBoolean("enabled"),
+                    it.optBoolean("named"), it.optString("text"), it.str("app"))
+            })
+            "fallback" -> f.copy(fallback = o.optString(key, "proxy"))
+            "presets" -> f.copy(presets = o.optJSONArray(key).strings())
+            "preset" -> f.copy(preset = o.str(key))
+            "drifted" -> f.copy(drifted = o.optBoolean(key))
+            "warnings" -> f.copy(warnings = o.optJSONArray(key).strings())
+            "numbers" -> {
+                val n = o.optJSONObject(key) ?: JSONObject()
+                f.copy(numbers = Numbers(n.optLong("down_rate"), n.optLong("up_rate"), n.optLong("down_total"), n.optLong("up_total"),
+                    n.optInt("active"), n.optLong("opened"), n.int("latency")))
+            }
+            "history" -> f.copy(history = o.optJSONArray(key)?.let { a -> (0 until a.length()).map { a.getLong(it) } } ?: emptyList())
+            "table" -> f.copy(table = if (o.isNull(key)) null else o.optJSONArray(key).map {
+                ConnRow(it.getString("target"), it.getString("route"), it.getString("rule"), it.optLong("up"), it.optLong("down"),
+                    it.optBoolean("closed"), it.str("app"))
+            })
+            "log" -> f.copy(log = if (o.isNull(key)) null else o.optJSONArray(key).strings())
+            "toast" -> f.copy(toast = o.optJSONObject(key)?.let { Toast(it.getLong("id"), it.getString("text"), it.optBoolean("bad"), it.optBoolean("undo")) })
+            "engine" -> f.copy(engine = o.optString(key))
+            "can_restore" -> f.copy(canRestore = o.optBoolean(key))
+            "ticket" -> f.copy(ticket = o.optLong(key))
+            "holding" -> f.copy(holding = o.optBoolean(key))
+            "geo" -> f.copy(geo = o.optJSONObject(key)?.let { g ->
+                GeoView(
+                    g.optString("source"),
+                    g.optJSONArray("sources").map { GeoSource(it.getString("key"), it.getString("name"), it.getString("about")) },
+                    g.optBoolean("auto", true), g.long("ip"), g.long("site"), g.long("updated"), g.long("fetching"), g.str("problem"),
+                )
+            } ?: GeoView())
+            "categories" -> f.copy(categories = if (o.isNull(key)) null else o.optJSONArray(key).strings())
+            else -> f
+        }
+    }
+    return if (f.connected) f else f.copy(connected = true)
 }
 
 /**
@@ -190,9 +203,15 @@ class EngineClient(private val path: String, private val full: Boolean) {
                     }
                     wait = 100L
                     val reader = BufferedReader(InputStreamReader(s.inputStream, Charsets.UTF_8))
+                    // A new connection starts from nothing: the engine sends
+                    // every part first, then what changes.
+                    var frame = Frame()
                     while (running && generation == mine) {
                         val line = reader.readLine() ?: break
-                        try { _frames.value = parseFrame(line) } catch (_: Exception) { }
+                        try {
+                            frame = applyPatch(frame, JSONObject(line))
+                            _frames.value = frame
+                        } catch (_: Exception) { }
                     }
                 } catch (_: Exception) {
                 }

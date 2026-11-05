@@ -52,9 +52,16 @@ fn the_screens_drive_the_engine_over_its_socket() {
         out.write_all(line.as_bytes()).unwrap();
         out.write_all(b"\n").unwrap();
     };
-    let mut frames = BufReader::new(stream)
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap());
+    // Each line holds the parts that changed; the screens merge them into
+    // what they have, and so does this.
+    let mut whole = serde_json::Map::new();
+    let mut frames = BufReader::new(stream).lines().map(|line| {
+        let Value::Object(patch) = serde_json::from_str::<Value>(&line.unwrap()).unwrap() else {
+            panic!("a line that is not an object");
+        };
+        whole.extend(patch);
+        Value::Object(whole.clone())
+    });
 
     send(r#"{"cmd":"hello","full":true}"#);
     let first = wait_for(&mut frames, "the first frame", |f| f["state"] == "off");
