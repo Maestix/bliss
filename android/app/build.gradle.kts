@@ -53,8 +53,8 @@ android {
         applicationId = "app.bliss"
         minSdk = 29
         targetSdk = 36
-        versionCode = 21
-        versionName = "0.5.5"
+        versionCode = 22
+        versionName = "0.5.6"
         ndk { abiFilters += "arm64-v8a" }
     }
 
