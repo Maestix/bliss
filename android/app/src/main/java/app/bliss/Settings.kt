@@ -186,11 +186,32 @@ fun netSummary(n: NetView?): String {
 private fun NetworksCard(frame: Frame, open: (String, String) -> Unit) {
     val context = LocalContext.current
     var allowed by remember { mutableStateOf(canReadWifiNames(context)) }
+    var always by remember { mutableStateOf(canReadWifiNamesAlways(context)) }
+    // Back from Android's settings, where «Разрешить всегда» is chosen.
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        val was = allowed to always
+        allowed = canReadWifiNames(context)
+        always = canReadWifiNamesAlways(context)
+        if ((allowed to always) != was) TunnelService.rewatch()
+        onPauseOrDispose { }
+    }
     val ask = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
     ) {
         allowed = canReadWifiNames(context)
-        if (allowed) TunnelService.reportNetwork(context)
+        if (allowed) TunnelService.rewatch()
+    }
+    // Android 11 and later answer this by opening its own page for bliss's
+    // location, where «Разрешить всегда» is; one that will not ask again is
+    // sent there directly.
+    val askAlways = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        always = canReadWifiNamesAlways(context)
+        if (granted) TunnelService.rewatch()
+        else context.startActivity(
+            Intent(AndroidSettings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:${context.packageName}")),
+        )
     }
     Section("Сети") {
         Text("Когда телефон переходит в сеть, bliss может сам включиться или выключиться, сменить сервер и пресет. " +
@@ -218,12 +239,23 @@ private fun NetworksCard(frame: Frame, open: (String, String) -> Unit) {
             Btn("Различать Wi-Fi по имени", accent = false, modifier = Modifier.fillMaxWidth()) {
                 ask.launch(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION))
             }
+        } else if (!always) {
+            Text("Пока bliss свёрнут, Android прячет имя Wi-Fi, и для любой сети Wi-Fi срабатывает правило «Любой Wi-Fi». " +
+                "Чтобы правила для своих сетей срабатывали и с телефоном в кармане, выберите в настройках «Разрешить всегда».",
+                style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
+            Btn("Различать Wi-Fi и в фоне", accent = false, modifier = Modifier.fillMaxWidth()) {
+                askAlways.launch(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            }
         }
     }
 }
 
 fun canReadWifiNames(context: android.content.Context) =
     context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+/** Wi-Fi names with bliss out of sight too: location «всегда». */
+fun canReadWifiNamesAlways(context: android.content.Context) =
+    context.checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
 @Composable
 private fun NetLine(title: String, hint: String, current: Boolean, onClick: () -> Unit) {

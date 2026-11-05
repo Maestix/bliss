@@ -79,8 +79,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var client: EngineClient
     private var bound = false
     private val keepAlive = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {}
-        override fun onServiceDisconnected(name: ComponentName?) {}
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            TunnelService.link = service
+            // On screen now: a Wi-Fi's name is given again (`rewatch`).
+            TunnelService.rewatch()
+        }
+        override fun onServiceDisconnected(name: ComponentName?) { TunnelService.link = null }
     }
     /** A sheet something outside asked for: a shared link, the notification. */
     private var pending by mutableStateOf<Sheet?>(null)
@@ -142,6 +146,7 @@ class MainActivity : ComponentActivity() {
         client.stop()
         if (bound) unbindService(keepAlive)
         bound = false
+        TunnelService.link = null
         super.onStop()
     }
 

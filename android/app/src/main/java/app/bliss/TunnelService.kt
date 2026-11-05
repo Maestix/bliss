@@ -49,8 +49,10 @@ class TunnelService : VpnService() {
         const val PAUSE = "app.bliss.PAUSE"
         const val RESUME = "app.bliss.RESUME"
         const val REBUILD = "app.bliss.REBUILD"
-        /** Say the network again: the person just let bliss read Wi-Fi names. */
-        const val NETWORK = "app.bliss.NETWORK"
+        /** Over the screens' binding: watch the networks afresh (`rewatch`). */
+        private const val REWATCH = IBinder.FIRST_CALL_TRANSACTION
+        /** The screens' binding to this service, while they are up. */
+        @Volatile var link: IBinder? = null
         /** The phone's DNS server: inside the TUN's /30, answered by the
          *  engine itself, which is what lets rules see sites by name
          *  (`DNS_ADDRESS` in crates/android/src/engine.rs). */
@@ -74,8 +76,17 @@ class TunnelService : VpnService() {
             context.startService(Intent(context, TunnelService::class.java).setAction(REBUILD))
         }
 
-        fun reportNetwork(context: Context) {
-            context.startService(Intent(context, TunnelService::class.java).setAction(NETWORK))
+        /**
+         * Ask the service to read the network again, now that the screens are
+         * up or Wi-Fi names were just allowed: Android gives a Wi-Fi's name
+         * to an app in sight, and says a network only when it changes. Over
+         * the binding the screens hold, not `startService`, which left a
+         * started service behind with the tunnel off.
+         */
+        fun rewatch() {
+            val binder = link ?: return
+            val data = android.os.Parcel.obtain()
+            try { binder.transact(REWATCH, data, null, IBinder.FLAG_ONEWAY) } catch (_: Exception) { } finally { data.recycle() }
         }
     }
 
@@ -127,6 +138,17 @@ class TunnelService : VpnService() {
      * stops giving it to an app that is out of sight without background
      * location, and the network has not changed for that.
      */
+    /** Watch afresh: Android answers a new watch at once with every network as it is now. */
+    private fun rewatch() {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        for (callback in listOfNotNull(networks, others)) {
+            try { manager.unregisterNetworkCallback(callback) } catch (_: Exception) { }
+        }
+        networks = null
+        others = null
+        watchNetwork()
+    }
+
     private fun watchNetwork() {
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
         fun callback(seen: (Network, NetworkCapabilities) -> Unit, lost: (Network) -> Unit) =
@@ -231,7 +253,13 @@ class TunnelService : VpnService() {
     }
 
     override fun onBind(intent: Intent?): IBinder? =
-        if (intent?.action == SERVICE_INTERFACE) super.onBind(intent) else Binder()
+        if (intent?.action == SERVICE_INTERFACE) super.onBind(intent) else object : Binder() {
+            override fun onTransact(code: Int, data: android.os.Parcel, reply: android.os.Parcel?, flags: Int): Boolean {
+                if (code != REWATCH) return super.onTransact(code, data, reply, flags)
+                handler.post { rewatch() }
+                return true
+            }
+        }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -243,11 +271,14 @@ class TunnelService : VpnService() {
                 if (wasResting) leaveForeground()
             }
             PAUSE -> pause()
-            NETWORK -> { lastNetwork = ""; handler.removeCallbacks(settled); report() }
             REBUILD -> if (foreground && resumeAt == null && (lastState == "on" || lastState == "busy")) connect()
             // CONNECT, RESUME, or null when Android's always-on VPN starts the service.
             else -> connect()
         }
+        // A command that left nothing running — a switch-off, a rebuild with
+        // the tunnel down — must not leave a started service behind: it
+        // goes once the screens unbind.
+        if (!foreground) stopSelf(startId)
         return START_NOT_STICKY
     }
 
