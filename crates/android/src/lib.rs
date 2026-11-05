@@ -16,6 +16,7 @@
 pub mod engine;
 pub mod geo;
 pub mod logs;
+pub mod networks;
 pub mod protocol;
 pub mod report;
 pub mod ui;

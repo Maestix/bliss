@@ -61,6 +61,8 @@ sealed interface Sheet {
     data object Permission : Sheet
     data class App(val pkg: String, val label: String) : Sheet
     data class RuleEdit(val index: Int?) : Sheet
+    /** What bliss does on one network. */
+    data class Network(val id: String, val name: String) : Sheet
     /** The QR scanner: a screen of its own, over everything. */
     data object Scan : Sheet
 }
@@ -211,7 +213,8 @@ fun App(
                             Tab.Servers -> Servers(frame, c = c, add = { sheet = Sheet.Add() },
                                 menu = { sheet = Sheet.ServerMenu(it) }, group = { sheet = Sheet.Group(it) })
                             Tab.Rules -> Rules(frame, c = c, open = { sheet = it })
-                            Tab.Settings -> Settings(frame, c = c, openTraffic = { traffic = true })
+                            Tab.Settings -> Settings(frame, c = c, openTraffic = { traffic = true },
+                                openNetwork = { id, name -> sheet = Sheet.Network(id, name) })
                         }
                     }
                 }
@@ -225,6 +228,7 @@ fun App(
             null -> {}
             Sheet.Server -> ServerSheet(frame, c = c, close = { sheet = null }, all = { sheet = null; tab = Tab.Servers })
             is Sheet.Add -> AddSheet(s.text, c = c, close = { sheet = null }, scan = { sheet = Sheet.Scan })
+            is Sheet.Network -> NetworkSheet(frame, s.id, s.name, c = c, close = { sheet = null })
             Sheet.Scan -> Scanner(back = { sheet = Sheet.Add() }, found = { c("import", "text" to it); sheet = null })
             is Sheet.ServerMenu -> ServerMenu(frame, s.index, c = c, close = { sheet = null })
             is Sheet.Group -> GroupMenu(frame, s.id, c = c, close = { sheet = null })

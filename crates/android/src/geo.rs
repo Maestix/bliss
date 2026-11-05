@@ -82,6 +82,8 @@ pub struct Settings {
     /// «Автовыбор»: the fastest server that answers, and the next one when
     /// it stops (engine.rs, `auto_pick`).
     pub auto_server: bool,
+    /// What bliss does on each network (networks.rs).
+    pub networks: Vec<crate::networks::NetworkRule>,
 }
 
 impl Default for Settings {
@@ -93,6 +95,7 @@ impl Default for Settings {
             block_quic: true,
             quic_rule: false,
             auto_server: false,
+            networks: Vec::new(),
         }
     }
 }
@@ -272,6 +275,7 @@ mod tests {
             block_quic: false,
             quic_rule: true,
             auto_server: true,
+            networks: Vec::new(),
         };
         settings.save(&dir);
         let back = Settings::load(&dir);

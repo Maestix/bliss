@@ -44,9 +44,22 @@ data class Frame(
     val categories: List<String>? = null,
     /** Counts the journals written for sharing; a new number: journal.txt is ready. */
     val journal: Long = 0,
+    /** The network the phone is on, and what bliss does there. */
+    val network: NetView? = null,
+    /** Every network with a rule of its own. */
+    val networks: List<NetView> = emptyList(),
+    /** What the network asks of the service: "on", "off", "back"; once per `wishId`. */
+    val wish: String? = null,
+    val wishId: Long = 0,
     /** Not from the engine: whether the socket is up at all. */
     val connected: Boolean = false,
 )
+
+/** A network: "mobile", "wifi" (any Wi-Fi), "wifi:<name>"; `connect` "on", "off" or "". */
+data class NetView(val id: String, val name: String, val connect: String, val preset: String?, val own: Boolean)
+
+private fun netView(o: JSONObject) = NetView(o.getString("id"), o.getString("name"), o.optString("connect"),
+    if (o.isNull("preset")) null else o.optString("preset"), o.optBoolean("own"))
 
 data class GeoSource(val key: String, val name: String, val about: String)
 data class GeoView(
@@ -155,6 +168,10 @@ fun applyPatch(prev: Frame, o: JSONObject): Frame {
                 )
             } ?: GeoView())
             "journal" -> f.copy(journal = o.optLong(key))
+            "network" -> f.copy(network = o.optJSONObject(key)?.let(::netView))
+            "networks" -> f.copy(networks = o.optJSONArray(key).map(::netView))
+            "wish" -> f.copy(wish = o.str(key))
+            "wish_id" -> f.copy(wishId = o.optLong(key))
             "categories" -> f.copy(categories = if (o.isNull(key)) null else o.optJSONArray(key).strings())
             else -> f
         }

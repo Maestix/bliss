@@ -227,6 +227,16 @@ pub fn handle() -> Option<&'static Handle> {
 
 // --- the socket -------------------------------------------------------------
 
+/// A network rule's id as a person reads it.
+fn net_name(id: &str) -> String {
+    match id {
+        "wifi" => "Любой Wi-Fi".to_owned(),
+        "mobile" => "Мобильная сеть".to_owned(),
+        "ethernet" => "Кабель".to_owned(),
+        other => other.strip_prefix("wifi:").unwrap_or(other).to_owned(),
+    }
+}
+
 /// The state in the journal's words.
 fn state_word(state: State) -> &'static str {
     match state {
@@ -510,6 +520,11 @@ struct Engine {
     categories: Option<Vec<String>>,
     /// Journals written for sharing so far (`Frame::journal`).
     journals: u64,
+    /// The phone's network, as the service last said.
+    network: Option<crate::networks::Seen>,
+    /// What the network asks of the service (`Frame::wish`).
+    wish: Option<&'static str>,
+    wishes: u64,
 }
 
 impl Engine {
@@ -579,6 +594,9 @@ impl Engine {
             geo_problem: None,
             categories: None,
             journals: 0,
+            network: None,
+            wish: None,
+            wishes: 0,
         };
         engine.bridge = free_port().unwrap_or(engine.profile.engine.bridge_port);
         engine.settle_protocols();
@@ -827,6 +845,34 @@ impl Engine {
             UiCommand::Log { open } => self.log_open = open,
             UiCommand::ShareLog => self.share_log(),
             UiCommand::Auto { on } => self.set_auto(on),
+            UiCommand::Network {
+                kind,
+                ssid,
+                captive,
+            } => self.network_changed(kind.map(|kind| crate::networks::Seen {
+                kind,
+                ssid,
+                captive,
+            })),
+            UiCommand::SetNetwork {
+                id,
+                connect,
+                preset,
+            } => {
+                let connect = match &*connect {
+                    "on" | "off" => connect,
+                    _ => String::new(),
+                };
+                crate::networks::put(
+                    &mut self.settings.networks,
+                    crate::networks::NetworkRule {
+                        id,
+                        connect,
+                        preset,
+                    },
+                );
+                self.settings.save(&self.paths.files);
+            }
             UiCommand::SaveRule {
                 index,
                 name,
@@ -1822,6 +1868,82 @@ impl Engine {
             })
     }
 
+    // --- networks ------------------------------------------------------------
+
+    /// The phone moved to another network, or the one it is on changed
+    /// (a captive portal signed into). Its preset applies at once, said in
+    /// a line; whether to connect is asked of the service through the frame.
+    /// The same network reported again — Android calls back on every change
+    /// of its capabilities — changes nothing, so a preset or the heart
+    /// chosen by hand lasts until the network does.
+    fn network_changed(&mut self, seen: Option<crate::networks::Seen>) {
+        if seen == self.network {
+            return;
+        }
+        let moved = seen.as_ref().map(|s| s.id()) != self.network.as_ref().map(|s| s.id());
+        self.network = seen.clone();
+        let Some(seen) = seen else {
+            return;
+        };
+        let rule = crate::networks::rule_for(&self.settings.networks, &seen)
+            .cloned()
+            .unwrap_or_else(|| crate::networks::NetworkRule {
+                id: seen.id(),
+                connect: String::new(),
+                preset: None,
+            });
+        if moved
+            && let Some(preset) = &rule.preset
+            && self.profile.routing.current_preset.as_ref() != Some(preset)
+            && self
+                .profile
+                .routing
+                .presets
+                .iter()
+                .any(|p| &p.name == preset)
+        {
+            self.apply_preset(preset);
+            self.toast(
+                &format!("{} — пресет «{preset}»", seen.name()),
+                false,
+                false,
+            );
+        }
+        let wish = match &*rule.connect {
+            "on" if seen.captive => {
+                // A network that leads nowhere until signed into: wait for
+                // it to be validated, which comes as another change.
+                self.toast(
+                    &format!("{} просит войти — подключусь после", seen.name()),
+                    false,
+                    false,
+                );
+                None
+            }
+            "on" => Some("on"),
+            "off" => Some("off"),
+            // A network that asks nothing, moved onto: a tunnel that waited
+            // out the last one comes back (the service's `waitingOn`).
+            _ if moved => Some("back"),
+            _ => None,
+        };
+        if wish.is_some() {
+            self.wish = wish;
+            self.wishes += 1;
+        }
+    }
+
+    fn net_view(&self, seen: &crate::networks::Seen) -> crate::protocol::NetView {
+        let rule = crate::networks::rule_for(&self.settings.networks, seen);
+        crate::protocol::NetView {
+            id: seen.id(),
+            name: seen.name(),
+            connect: rule.map(|r| r.connect.clone()).unwrap_or_default(),
+            preset: rule.and_then(|r| r.preset.clone()),
+            own: rule.is_some_and(|r| r.id == seen.id()),
+        }
+    }
+
     // --- the journal, shared ----------------------------------------------------
 
     /// Write the journal for «Поделиться журналом»: a few lines on the state
@@ -2134,6 +2256,21 @@ impl Engine {
             },
             categories: self.categories.clone(),
             journal: self.journals,
+            network: self.network.as_ref().map(|seen| self.net_view(seen)),
+            networks: self
+                .settings
+                .networks
+                .iter()
+                .map(|rule| crate::protocol::NetView {
+                    id: rule.id.clone(),
+                    name: net_name(&rule.id),
+                    connect: rule.connect.clone(),
+                    preset: rule.preset.clone(),
+                    own: true,
+                })
+                .collect(),
+            wish: self.wish,
+            wish_id: self.wishes,
         };
         let _ = self.frames.send(frame);
     }
@@ -2769,6 +2906,70 @@ mod tests {
         );
         let saved = std::fs::read_to_string(paths2.profile()).unwrap();
         assert!(!saved.contains("protocol"), "{saved}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A network's preset applies as the phone moves onto it, and what it
+    /// asks of the service — connect, stay off — is asked once per move; the
+    /// same network reported again changes nothing, and a Wi-Fi that wants
+    /// a sign-in is connected only once it is signed into.
+    #[tokio::test]
+    async fn a_network_applies_its_preset_and_asks_once() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-net-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        let mut home = engine.profile.routing.snapshot("Дома");
+        home.fallback = Action::Direct;
+        engine.profile.routing.presets.push(home);
+        engine.ui(UiCommand::SetNetwork {
+            id: "wifi:Дом".to_owned(),
+            connect: "off".to_owned(),
+            preset: Some("Дома".to_owned()),
+        });
+        engine.ui(UiCommand::SetNetwork {
+            id: "mobile".to_owned(),
+            connect: "on".to_owned(),
+            preset: None,
+        });
+        let seen = |kind: &str, ssid: Option<&str>, captive: bool| UiCommand::Network {
+            kind: Some(kind.to_owned()),
+            ssid: ssid.map(str::to_owned),
+            captive,
+        };
+        engine.ui(seen("wifi", Some("Дом"), false));
+        assert_eq!(
+            engine.profile.routing.current_preset.as_deref(),
+            Some("Дома")
+        );
+        assert_eq!(engine.profile.routing.fallback, Action::Direct);
+        assert_eq!((engine.wish, engine.wishes), (Some("off"), 1));
+        engine.ui(seen("wifi", Some("Дом"), false));
+        assert_eq!(engine.wishes, 1, "the same network again asks nothing");
+        engine.ui(seen("mobile", None, false));
+        assert_eq!((engine.wish, engine.wishes), (Some("on"), 2));
+        // A Wi-Fi of «любой Wi-Fi»'s rule that wants a sign-in first.
+        engine.ui(UiCommand::SetNetwork {
+            id: "wifi".to_owned(),
+            connect: "on".to_owned(),
+            preset: None,
+        });
+        engine.ui(seen("wifi", Some("Кафе"), true));
+        assert_eq!(engine.wishes, 2, "not into a network that leads nowhere");
+        engine.ui(seen("wifi", Some("Кафе"), false));
+        assert_eq!((engine.wish, engine.wishes), (Some("on"), 3));
+        // And the rules outlive the process.
+        let saved = geo::Settings::load(&dir);
+        assert_eq!(saved.networks.len(), 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 
