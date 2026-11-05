@@ -456,7 +456,8 @@ These cost the most time on this project. None of them announce themselves.
   tried first (8). Android added a command line from a screen (4 MB,
   `MAX_LINE` in its engine, read through `take` so a frame between two
   reads keeps what was read) and the commands a screen holds while the
-  tunnel's process starts (32, the oldest dropped, `EngineClient`).
+  tunnel's process starts (32, the oldest dropped, `EngineClient`), and
+  the networks with a rule of their own (32, `MAX_NETWORKS`).
 - **bliss.log has a cap while bliss runs, not only when it starts**: one run
   writes at most 16 MB into it (`logs::RUN_LIMIT`, a line saying so, then
   nothing; `the_file_stops_at_its_limit`), and at start a file past 2 MB is
@@ -1551,13 +1552,20 @@ table.
   and no recovery path. `Tun` holds the routes and the device, in that
   declaration order, so dropping it takes the routes away first.
 - **A TUN destination is always an address.** The name the program looked up
-  is gone by the time a packet exists, so `domain` and `geosite` rules do not
-  match TUN traffic at all; `ip`, `geoip`, `port` and `process` do. Answering
-  the DNS query and handing out an address bliss can recognise again — fake-IP
-  — is what makes the rest of the rules work. It exists on Android only
-  (`names.rs`, given to the stack as `Carrying::names`), where the VPN
-  service names bliss's own DNS address; the desktop's adapter does not
-  answer DNS yet. **A name's address comes from the name** (FNV-1a over
+  is gone by the time a packet exists, so a `domain` or `geosite` rule sees
+  only what names itself in the connection; `ip`, `geoip`, `port` and
+  `process` see everything. Two ways back to the name. **Fake-IP** —
+  answering the DNS query and handing out an address bliss can recognise
+  again — exists on Android only (`names.rs`, given to the stack as
+  `Carrying::names`), where the VPN service names bliss's own DNS address.
+  The desktop's adapter does not answer DNS, on purpose: bliss's own
+  lookups and xray's would get the pool's addresses too, and the user's DNS
+  is dnscrypt-proxy on loopback, which no adapter sees. **The name out of
+  the connection** works on both (`sniff.rs`, below): on the desktop
+  whenever the table has a rule of names (`Carrying::sniff`,
+  `Router::has_name_rules`, `the_desktop_reads_a_name_out_of_the_connection`),
+  which is HTTPS and HTTP on the ports sites are on, with QUIC refused so
+  the browser takes TCP. **A name's address comes from the name** (FNV-1a over
   198.18.0.0/16, the next free on a clash): handed out in turn, the
   addresses meant other names after the tunnel's process restarted while a
   browser kept its answers, and Google closed on the user
@@ -1604,13 +1612,11 @@ table.
   sends elsewhere (`until_rerouted`, `Serving::router_changes`): an app
   keeps its connections for minutes, and the user's `geosite:reddit` rule
   read as one that did not work (`a_bare_address_is_decided_by_the_name_it_says`,
-  seen failing with the reroute taken out). While the adapter is on, the routing screen names the rules this silences
-  (`blind_under_tun`): the ones whose only conditions are domains and geosite
-  sets. A rule that also has an address, a port or a program still decides
-  with those, so it is left out rather than buried in the list. The user's own
-  DNS is `dnscrypt-proxy` on loopback, which never enters the adapter, so
-  intercepting port 53 would see none of it: for that machine the next step is
-  the name out of the connection itself (SNI, `Host:`), not fake-IP.
+  seen failing with the reroute taken out). While the adapter is on, the routing screen names the rules that see
+  only HTTPS and HTTP through it (`blind_under_tun`): the ones whose only
+  conditions are domains and geosite sets. A rule that also has an address,
+  a port or a program still decides with those, so it is left out rather
+  than buried in the list.
 - **Datagrams have their own port table.** `name_for_port` reads the TCP
   table; a flow's program comes from `name_for_datagram_port`, which reads the
   UDP one. Without it `process:Discord.exe` would match everything Discord
@@ -2001,8 +2007,9 @@ user's to make.
 
 **Open:** UDP through the SOCKS inbound (`UDP ASSOCIATE` is implemented for
 the *outbound* side only, so a program pointed at the SOCKS port still has no
-UDP); the name out of the connection itself (SNI, `Host:`) so domain rules
-reach TUN traffic, and fake-IP after it; a privileged helper or service
+UDP); fake-IP on the desktop's adapter, which first needs bliss's own
+lookups and xray's kept off it (the name out of the connection, SNI and
+`Host:`, is there since 5 November); a privileged helper or service
 that owns the adapter and the routes, so TUN no longer needs all of bliss
 elevated; IPv6 in the TUN, either carried or blocked; renaming servers;
 turning a link that asks for an unchecked certificate into a pinned one (xray
