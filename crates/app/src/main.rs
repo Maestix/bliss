@@ -15,6 +15,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod clipboard;
+mod countries;
 mod engine;
 mod icons;
 #[cfg(target_os = "linux")]
