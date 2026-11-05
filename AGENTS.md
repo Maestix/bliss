@@ -908,8 +908,12 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     is the part of Noto Color Emoji that Google Fonts serves for U+1F1E6–1F1FF,
     259 flags, resubset with fontTools to drop `vhea`/`vmtx`; Google's own
     GitHub was not reachable from the container. theme.css declares it as a
-    second face of "Comfortaa", for that range alone and at every weight, so
-    nothing else in the window names it; `THEME_STYLES` inlines it as it does
+    second face of "Comfortaa", for that range alone and with Comfortaa's own
+    weights (`300 700`): Chromium joins a family's faces by unicode-range only
+    within one set of weights, and the first build's `100 900` kept the flags
+    from ever loading — the user still saw «NL», and headless Chromium showed
+    the face `unloaded` (Playwright, a page with theme.css and both fonts
+    inlined). So nothing else in the window names it; `THEME_STYLES` inlines it as it does
     Comfortaa, and `OFL-NotoColorEmoji.txt` stays beside it. A geoip entry in
     a rule reads as the phone's does, flag and Russian name (`countries.rs`,
     CLDR's names through Babel, its pseudo regions left out).

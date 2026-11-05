@@ -4756,6 +4756,20 @@ mod tests {
             "the flags were not inlined"
         );
         assert!(THEME.contains("unicode-range: U+1F1E6-1F1FF;"));
+        // With weights of its own the flags' face is a set apart, and
+        // Chromium never loaded it: the user saw «NL» still. One set.
+        let weights: Vec<&str> = THEME
+            .split("@font-face")
+            .skip(1)
+            .filter(|face| face.contains("font-family: \"Comfortaa\""))
+            .filter_map(|face| face.split("font-weight:").nth(1)?.split(';').next())
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            weights,
+            ["300 700", "300 700"],
+            "the flags' weights are Comfortaa's"
+        );
         assert_eq!(&FLAGS[..4], b"wOF2");
         const FLAG_LICENCE: &str = include_str!("../assets/OFL-NotoColorEmoji.txt");
         assert!(
