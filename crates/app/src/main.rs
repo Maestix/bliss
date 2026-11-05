@@ -418,10 +418,11 @@ fn window_setup() -> Result<engine::Setup> {
     for (i, err) in &failed {
         tracing::warn!("server #{} in the profile is unusable - {err}", i + 1);
     }
+    let work_dir = work_dir()?;
     Ok(engine::Setup {
         servers,
-        selected: 0,
-        work_dir: work_dir()?,
+        selected: engine::remembered_selection(&profile, &work_dir),
+        work_dir,
         profile_path: path,
         engine_log: bliss_xray::LogLevel::Warning,
         autostart: true,
@@ -473,7 +474,7 @@ fn prepare(path: Option<PathBuf>, want: Option<String>, engine_log: &str) -> Res
                 ),
             }
         }
-        None => 0,
+        None => engine::remembered_selection(&profile, &work_dir()?),
     };
 
     Ok(engine::Setup {

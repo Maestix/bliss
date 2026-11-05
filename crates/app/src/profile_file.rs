@@ -200,6 +200,7 @@ pub fn add_server(profile: &mut Profile, link: &str) -> Result<ServerConfig, Str
         link: link.to_owned(),
         name: None,
         group: None,
+        favorite: false,
     });
     Ok(config)
 }
@@ -333,6 +334,7 @@ pub fn import_servers(profile: &mut Profile, text: &str) -> Result<Imported, Str
             link,
             name: None,
             group: None,
+            favorite: false,
         });
         imported.added.push(config);
     }
@@ -726,6 +728,13 @@ pub fn apply_subscription(
     // Everything before the first of them is not theirs, so after they are
     // taken out this is still where they began.
     let place = profile.servers.iter().position(|s| s.group == group);
+    // A star stays on a server the list still brings.
+    let starred: std::collections::HashSet<String> = profile
+        .servers
+        .iter()
+        .filter(|s| s.group == group && s.favorite)
+        .map(|s| s.link.trim().to_owned())
+        .collect();
     profile.servers.retain(|s| s.group != group);
 
     let room = MAX_PROFILE_SERVERS.saturating_sub(profile.servers.len());
@@ -744,6 +753,7 @@ pub fn apply_subscription(
             link: link.clone(),
             name: None,
             group: group.clone(),
+            favorite: starred.contains(link.trim()),
         })
         .collect();
     let refreshed = |name: String| Refreshed {
@@ -1135,6 +1145,7 @@ mod tests {
                     link: server_link(&format!("h{n}.example")),
                     name: None,
                     group: None,
+                    favorite: false,
                 })
                 .collect(),
             ..Profile::default()
@@ -1272,10 +1283,15 @@ mod tests {
         assert_eq!(groups, [None, None, Some("abc"), Some("abc")]);
 
         // The list changes: one server gone, one new, in the same place.
+        // A star on a server it still lists stays; one it drops goes with it.
+        for entry in profile.servers.iter_mut().filter(|e| e.group.is_some()) {
+            entry.favorite = true;
+        }
         profile.servers.push(ServerEntry {
             link: server_link("mine.example"),
             name: None,
             group: None,
+            favorite: false,
         });
         let second = [server_link("s2.example"), server_link("s3.example")];
         let refreshed =
@@ -1301,6 +1317,12 @@ mod tests {
             ]
         );
         assert_eq!(profile.subscriptions[0].updated, Some(200));
+        let stars: Vec<bool> = profile.servers.iter().map(|s| s.favorite).collect();
+        assert_eq!(
+            stars,
+            [false, false, true, false, false],
+            "s2 keeps its star"
+        );
 
         delete_subscription(&mut profile, "abc").expect("deleted");
         assert!(profile.subscriptions.is_empty());

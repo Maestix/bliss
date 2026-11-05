@@ -45,7 +45,9 @@ const SERVERS: usize = 30;
 pub struct Model {
     status: String,
     on: bool,
-    servers: Vec<(String, bool)>,
+    /// Name, whether in use, and the place in the frame's list a click
+    /// selects: the starred servers come first, so the two orders differ.
+    servers: Vec<(String, bool, usize)>,
     /// Servers past `SERVERS`.
     more: usize,
     presets: Vec<(String, bool)>,
@@ -61,11 +63,10 @@ pub fn model(frame: &Frame) -> Model {
     Model {
         status: tray_tooltip(frame),
         on: frame.state.is_on(),
-        servers: frame
-            .servers
-            .iter()
+        servers: super::favorites_first(&frame.servers)
+            .into_iter()
             .take(SERVERS)
-            .map(|server| (server.tag.clone(), server.current))
+            .map(|(index, server)| (server.tag.clone(), server.current, index))
             .collect(),
         more: frame.servers.len().saturating_sub(SERVERS),
         presets: frame
@@ -286,7 +287,11 @@ impl Items {
             "Подключить"
         });
 
-        let names: Vec<String> = model.servers.iter().map(|(tag, _)| tag.clone()).collect();
+        let names: Vec<String> = model
+            .servers
+            .iter()
+            .map(|(tag, _, index)| format!("{index}:{tag}"))
+            .collect();
         if names != self.listed || model.more != self.more_count {
             for item in self.server_items.drain(..) {
                 let _ = self.servers.remove(&item);
@@ -294,7 +299,7 @@ impl Items {
             if let Some(more) = self.more.take() {
                 let _ = self.servers.remove(&more);
             }
-            for (index, (tag, _)) in model.servers.iter().enumerate() {
+            for (tag, _, index) in &model.servers {
                 let item = CheckMenuItem::with_id(
                     format!("{SERVER}{index}"),
                     label(tag),
@@ -314,7 +319,7 @@ impl Items {
             self.listed = names;
             self.more_count = model.more;
         }
-        for (item, (_, current)) in self.server_items.iter().zip(&model.servers) {
+        for (item, (_, current, _)) in self.server_items.iter().zip(&model.servers) {
             item.set_checked(*current);
         }
 

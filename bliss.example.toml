@@ -174,6 +174,7 @@ enabled = false
 #
 # [[server]]
 # link = "vless://…paste yours here…"
+# favorite = true   # the window's star: listed above the rest
 
 # A work VPN beside the tunnel: the OpenVPN profile (.ovpn) a workplace hands
 # out, added in the window — Settings, "Рабочий VPN", or Ctrl+V with the file's

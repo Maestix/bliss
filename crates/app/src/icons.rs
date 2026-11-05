@@ -105,6 +105,24 @@ pub fn Globe(size: u32, color: String) -> Element {
 }
 
 /// The broadcast arcs used for subscriptions.
+/// A server's star: an outline while it is not among the favourites, filled
+/// once it is. The phone's own path (android Components.kt).
+#[component]
+pub fn Star(size: u32, color: String, filled: bool) -> Element {
+    let fill = if filled {
+        color.clone()
+    } else {
+        "none".to_owned()
+    };
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "{fill}",
+            stroke: "{color}", stroke_width: STROKE, stroke_linejoin: "round",
+            path { d: "M12 3.8 14.4 8.9 19.9 9.6 15.9 13.4 16.9 18.9 12 16.2 7.1 18.9 8.1 13.4 4.1 9.6 9.6 8.9 Z" }
+        }
+    }
+}
+
 #[component]
 pub fn Rss(size: u32, color: String) -> Element {
     rsx! {

@@ -118,7 +118,8 @@ Runtime paths on Windows:
   after every change made in the window, and never on launch; bliss runs
   without it
 - work dir: `%LOCALAPPDATA%\bliss\data` — `xray.exe`, `geoip.dat`,
-  `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`, and
+  `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`,
+  `selected` (the server in use, by key), and
   `openvpn\`: `profile.ovpn` while OpenVPN starts, and OpenVPN's own
   `openvpn.log`, written over at every start
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
@@ -129,7 +130,7 @@ Runtime paths on Linux, the same calls (`directories`) giving XDG's folders:
 - profile: `~/.config/bliss/bliss.toml`
 - work dir: `~/.local/share/bliss` — `xray` (no `.exe`, unpacked with its
   exec bit), the rule sets, `xray.json`, `bliss.log`,
-  `system-proxy-backup.txt`; no `openvpn\` files: the profile goes to OpenVPN
+  `system-proxy-backup.txt`, `selected`; no `openvpn\` files: the profile goes to OpenVPN
   on its standard input
 - WebKit's own data: `~/.cache/<exe stem>/webview` (`linux_config` in ui.rs)
   — left to itself WebKit writes into `~/.local/share/<program>`, which for
@@ -646,6 +647,23 @@ These cost the most time on this project. None of them announce themselves.
 
 **The profile and the work dir**
 
+- **The server in use outlives a restart, by key** (`remembered_selection`,
+  `remember_selection`): `selected` in the work dir holds
+  `bliss_proto::link_key` of its link — never the link, which lives in the
+  profile alone — written whenever the choice moves (a click, a list that
+  moved under it), and looked for among the servers that parse at start.
+  bliss started on the first server every time; the user found the choice
+  lost between runs, and on the phone too, where `selected` was written on a
+  tap alone and «Автовыбор», a failover or a network's rule moved the server
+  without it (`remember` in its engine). `bliss run` without `--server` takes
+  it up as well (`the_server_in_use_outlives_a_restart`, both platforms).
+- **A star is `favorite = true` on a `[[server]]`**, written only when set;
+  the list shows starred servers under «Избранное» first and not again in
+  their section (`server_sections`), the tray's menus put them first
+  (`favorites_first`), and a subscription's update keeps the star on the
+  servers it still lists (`apply_subscription`). The phone keeps its stars
+  by key in android.json instead, since its subscriptions are refreshed by
+  its own engine.
 - **The profile schema is a compatibility surface.** The structs are
   `#[serde(deny_unknown_fields)]`, so renaming or removing a key breaks every
   existing `bliss.toml`. Add keys with `#[serde(default)]`; never rename.

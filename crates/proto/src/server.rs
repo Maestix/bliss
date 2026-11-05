@@ -24,6 +24,21 @@ pub struct ServerEntry {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Marked with a star in the window: listed above the rest. Written only
+    /// when set. A subscription's update keeps it on the servers it still
+    /// lists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub favorite: bool,
+}
+
+/// A server's key: FNV-1a over its link, the same in every run, and nothing
+/// of the link to be read back from it — what a server is remembered by
+/// outside the profile (the server in use, the phone's stars).
+pub fn link_key(link: &str) -> String {
+    let hash = link.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 impl ServerEntry {

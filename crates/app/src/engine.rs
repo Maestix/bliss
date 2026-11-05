@@ -86,6 +86,8 @@ pub struct ServerRow {
     pub group: Option<String>,
     /// The same subscription by id, which two subscriptions cannot share.
     pub group_id: Option<String>,
+    /// Marked with a star: listed above the rest.
+    pub favorite: bool,
 }
 
 /// One rule, as the routing screen shows it.
@@ -429,6 +431,12 @@ pub enum Command {
         index: usize,
         tag: String,
     },
+    /// A star on the server at this place, or off it; the tag as for a delete.
+    Favorite {
+        index: usize,
+        tag: String,
+        on: bool,
+    },
     /// A fetch finished. Only the engine sends this, to itself.
     Fetched(FetchDone),
     /// Show one of bliss's own folders to the user.
@@ -662,6 +670,12 @@ fn initial_frame(setup: &Setup) -> Frame {
 /// subscription it came from.
 fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> Vec<ServerRow> {
     // In step with `servers`, which holds the entries that parse, in order.
+    let stars: Vec<bool> = profile
+        .servers
+        .iter()
+        .filter(|entry| entry.parse().is_ok())
+        .map(|entry| entry.favorite)
+        .collect();
     let groups: Vec<Option<(String, String)>> = profile
         .servers
         .iter()
@@ -689,10 +703,40 @@ fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> 
                 current: i == selected,
                 group_id: group.as_ref().map(|(id, _)| id.clone()),
                 group: group.map(|(_, name)| name),
+                favorite: stars.get(i).copied().unwrap_or(false),
             }
         })
         .collect()
 }
+
+/// The server in use as the last run left it: its key in the work dir's
+/// `selected`, looked for among the servers that parse. The first when there
+/// is none, or it is gone. bliss started on the first server every time, so
+/// a server picked in the window lasted only until bliss closed.
+pub fn remembered_selection(profile: &Profile, work_dir: &Path) -> usize {
+    let Ok(key) = std::fs::read_to_string(work_dir.join(SELECTED)) else {
+        return 0;
+    };
+    links_of(profile)
+        .iter()
+        .position(|link| bliss_proto::link_key(link) == key.trim())
+        .unwrap_or(0)
+}
+
+/// Keep the server in use for the next run (`remembered_selection`). Its key,
+/// not its link: a link is a credential, and the profile is the one place
+/// it is kept.
+fn remember_selection(setup: &Setup, selected: usize) {
+    let Some(link) = links_of(&setup.profile).get(selected).cloned() else {
+        return;
+    };
+    if let Err(e) = std::fs::write(setup.work_dir.join(SELECTED), bliss_proto::link_key(&link)) {
+        tracing::warn!("the server in use was not remembered: {e}");
+    }
+}
+
+/// The file in the work dir that holds the server in use.
+const SELECTED: &str = "selected";
 
 /// The links of the servers that parse, in the order `parse_servers` keeps.
 fn links_of(profile: &Profile) -> Vec<String> {
@@ -936,6 +980,7 @@ async fn drive(
                                 parts.stop().await;
                             }
                             selected = index;
+                            remember_selection(&setup, selected);
                             let server = &setup.servers[selected];
                             tracing::info!("server is now {}", server.tag);
                             frames.send_modify(|f| {
@@ -1349,6 +1394,35 @@ async fn drive(
                                 true,
                             ),
                             None => toaster.show(&frames, "этой подписки уже нет", true),
+                        }
+                    }
+                    Command::Favorite { index, tag, on } => {
+                        let links = links_of(&setup.profile);
+                        let Some(link) = setup
+                            .servers
+                            .get(index)
+                            .filter(|server| server.tag == tag)
+                            .and(links.get(index))
+                            .cloned()
+                        else {
+                            toaster.show(&frames, "этого сервера уже нет — список успел измениться", true);
+                            continue;
+                        };
+                        let mut next = setup.profile.clone();
+                        for entry in next.servers.iter_mut().filter(|e| e.link == link) {
+                            entry.favorite = on;
+                        }
+                        match save_profile(&mut store, &next) {
+                            Ok(()) => {
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                frames.send_modify(|f| {
+                                    if let Some(row) = f.servers.get_mut(index) {
+                                        row.favorite = on;
+                                    }
+                                });
+                            }
+                            Err(e) => toaster.show(&frames, e, true),
                         }
                     }
                     Command::DeleteServer { index, tag } => {
@@ -2333,6 +2407,7 @@ fn reload_servers(
     let lost = was.is_some() && found.is_none();
     *selected = found.unwrap_or(0);
     setup.servers = servers;
+    remember_selection(setup, *selected);
     let rows = server_rows(&setup.profile, &setup.servers, *selected);
     let server = setup.server(*selected);
     frames.send_modify(|f| {
@@ -3460,6 +3535,60 @@ async fn measure_latency(outbound: &dyn bliss_core::Outbound) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server in use is kept by key in the work dir and found again by
+    /// it: after a restart, after the list moved under it, and the first
+    /// when it is gone or nothing was kept.
+    #[test]
+    fn the_server_in_use_outlives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("bliss-selected-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link =
+            |n: u8| format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=a.example#s{n}");
+        let entry = |l: String| bliss_proto::ServerEntry {
+            link: l,
+            name: None,
+            group: None,
+            favorite: false,
+        };
+        let mut profile = Profile {
+            servers: vec![entry(link(1)), entry(link(2)), entry(link(3))],
+            ..Profile::default()
+        };
+        assert_eq!(remembered_selection(&profile, &dir), 0, "nothing kept yet");
+        let setup = Setup {
+            servers: profile.parse_servers().0,
+            selected: 0,
+            work_dir: dir.clone(),
+            profile_path: dir.join("bliss.toml"),
+            engine_log: bliss_xray::LogLevel::Warning,
+            autostart: false,
+            tun: false,
+            profile: profile.clone(),
+            problem: None,
+        };
+        remember_selection(&setup, 2);
+        let kept = std::fs::read_to_string(dir.join(SELECTED)).unwrap();
+        assert!(
+            !kept.contains("PPPP") && !kept.contains("203.0.113"),
+            "a key, not the link: {kept}"
+        );
+        assert_eq!(remembered_selection(&profile, &dir), 2);
+        // The list moved: a server in front of it, and one that does not parse.
+        profile
+            .servers
+            .insert(0, entry("vless://broken".to_owned()));
+        profile.servers.insert(0, entry(link(9)));
+        assert_eq!(
+            remembered_selection(&profile, &dir),
+            3,
+            "among the servers that parse"
+        );
+        profile.servers.retain(|e| e.link != link(3));
+        assert_eq!(remembered_selection(&profile, &dir), 0, "gone: the first");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// A table nobody is looking at is not copied into the frame, and the
     /// count of live connections does not need it.
