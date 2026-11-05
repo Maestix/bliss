@@ -21,6 +21,7 @@ import android.content.ComponentName
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -111,42 +112,96 @@ class TunnelService : VpnService() {
     }
 
     /**
-     * The phone's default network, watched rather than polled, said to the
-     * engine on every change: its kind, a Wi-Fi's name when bliss may read
-     * it — Android gives an app the SSID only with location permission —
-     * and whether it wants a sign-in. bliss's own app is left out of its
-     * VPN, so this is the network under the tunnel, not the tunnel.
+     * The phone's network, watched rather than polled, said to the engine on
+     * every change: its kind, a Wi-Fi's name when bliss may read it —
+     * Android gives an app the SSID only with location permission — and
+     * whether it wants a sign-in.
+     *
+     * Two watches, because the default network is not always the one under
+     * the tunnel: with a VPN up — bliss's own included — Android can name
+     * the VPN, which says it is a Wi-Fi and carries no Wi-Fi's details, and
+     * the user saw their network's name turn into a bare «Wi-Fi» as the
+     * tunnel came up. So every network that is not a VPN is watched too,
+     * and a VPN as the default stands for the best of those. And a name,
+     * once read, is kept for as long as that network is connected: Android
+     * stops giving it to an app that is out of sight without background
+     * location, and the network has not changed for that.
      */
     private fun watchNetwork() {
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
-        val callback = if (Build.VERSION.SDK_INT >= 31) {
-            object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
-                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = said(caps)
-                override fun onLost(network: Network) = said(null)
+        fun callback(seen: (Network, NetworkCapabilities) -> Unit, lost: (Network) -> Unit) =
+            if (Build.VERSION.SDK_INT >= 31) {
+                object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
+                    override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = seen(network, caps)
+                    override fun onLost(network: Network) = lost(network)
+                }
+            } else {
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = seen(network, caps)
+                    override fun onLost(network: Network) = lost(network)
+                }
             }
-        } else {
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = said(caps)
-                override fun onLost(network: Network) = said(null)
-            }
-        }
+        val default = callback(
+            { network, caps -> defaultNet = network; defaultCaps = caps; learn(network, caps); said() },
+            { network -> if (network == defaultNet) { defaultNet = null; defaultCaps = null }; said() },
+        )
+        val all = callback(
+            { network, caps -> below[network] = caps; learn(network, caps); said() },
+            { network -> below.remove(network); names.remove(network); said() },
+        )
         try {
-            manager.registerDefaultNetworkCallback(callback, handler)
-            networks = callback
+            manager.registerDefaultNetworkCallback(default, handler)
+            networks = default
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            manager.registerNetworkCallback(request, all, handler)
+            others = all
         } catch (_: Exception) { }
     }
 
-    private var lastCaps: NetworkCapabilities? = null
-    private val settled = Runnable { report(lastCaps) }
+    private var defaultNet: Network? = null
+    private var defaultCaps: NetworkCapabilities? = null
+    /** Every network that is not a VPN, as it last said. */
+    private val below = HashMap<Network, NetworkCapabilities>()
+    /** A Wi-Fi's name as last read, for as long as that network is there. */
+    private val names = HashMap<Network, String>()
+    private var others: ConnectivityManager.NetworkCallback? = null
+    private val settled = Runnable { report() }
+
+    private fun learn(network: Network, caps: NetworkCapabilities) {
+        wifiName(caps)?.let { names[network] = it }
+    }
+
+    /**
+     * The network under everything: the default one, unless that is a VPN;
+     * then the one Android would carry it over — a working Wi-Fi before a
+     * cable before mobile data, as Android itself prefers them.
+     */
+    private fun current(): Pair<Network?, NetworkCapabilities?> {
+        val caps = defaultCaps
+        if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return defaultNet to caps
+        val best = below.entries.maxByOrNull { (_, c) ->
+            val working = if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 10 else 0
+            working + when {
+                c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 3
+                c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 2
+                c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
+                else -> 0
+            }
+        }
+        return best?.let { it.key to it.value } ?: (null to null)
+    }
 
     /** A change, said once the network has held for `SETTLE_MS`. */
-    private fun said(caps: NetworkCapabilities?) {
-        lastCaps = caps
+    private fun said() {
         handler.removeCallbacks(settled)
         handler.postDelayed(settled, SETTLE_MS)
     }
 
-    private fun report(caps: NetworkCapabilities?) {
+    private fun report() {
+        val (network, caps) = current()
         val kind = when {
             caps == null -> null
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
@@ -154,7 +209,7 @@ class TunnelService : VpnService() {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
             else -> "other"
         }
-        val ssid = if (kind == "wifi") wifiName(caps) else null
+        val ssid = if (kind == "wifi") wifiName(caps) ?: network?.let { names[it] } else null
         val captive = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true &&
             !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         val key = "$kind|$ssid|$captive"
@@ -188,7 +243,7 @@ class TunnelService : VpnService() {
                 if (wasResting) leaveForeground()
             }
             PAUSE -> pause()
-            NETWORK -> { lastNetwork = ""; handler.removeCallbacks(settled); report(lastCaps) }
+            NETWORK -> { lastNetwork = ""; handler.removeCallbacks(settled); report() }
             REBUILD -> if (foreground && resumeAt == null && (lastState == "on" || lastState == "busy")) connect()
             // CONNECT, RESUME, or null when Android's always-on VPN starts the service.
             else -> connect()
@@ -461,7 +516,9 @@ class TunnelService : VpnService() {
 
     override fun onDestroy() {
         handler.removeCallbacks(resume)
-        networks?.let { try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) } catch (_: Exception) { } }
+        for (callback in listOfNotNull(networks, others)) {
+            try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback) } catch (_: Exception) { }
+        }
         watching?.cancel()
         watcher?.stop()
         scope.cancel()

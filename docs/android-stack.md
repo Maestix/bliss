@@ -636,3 +636,16 @@ until the person switches bliss on again (`held_off`,
 it). The network's own «off», a pause and another VPN taking over do not
 hold it (`Native.disconnect(byHand)`). Not reproduced on a phone: the
 sequence is read from the code.
+
+## 0.5.3: the Wi-Fi's name under the tunnel
+
+The user found the networks card naming their Wi-Fi with the tunnel off
+and a bare «Wi-Fi» once it was on. The service watched the default
+network alone, and with a VPN up Android can hand that out as the VPN
+itself, which reports Wi-Fi among its transports and no Wi-Fi's details;
+and an app out of sight without background location gets the name
+redacted. Now every network that is not a VPN is watched as well, a VPN
+as the default stands for the best of them (a working Wi-Fi, then a
+cable, then mobile data), and a name once read is kept for as long as
+that network is connected. Not seen on a phone: which of the two the
+user met is not known, and both are covered.
