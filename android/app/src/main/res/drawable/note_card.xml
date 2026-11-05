@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The notification card: the surface colour of theme.css, as on the desktop status card. -->
+<!-- No ground of its own: the notification's own shows through, which is
+     bliss's surface colour in a light shade as in a dark one — the service
+     colorizes it (setColorized, TunnelService.build), so the light words
+     never stand on white (seen on the user's Pixel 7). The scene fades out
+     by itself (note_picture.xml). -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#1E1629" />
-    <corners android:radius="18dp" />
+    <solid android:color="#00000000" />
 </shape>

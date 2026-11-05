@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- No ground of its own in a dark shade: the shade's own shows through
-     (drawable-night/note_picture.xml). A light shade keeps the card, or its
-     light words would stand on white. -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#00000000" />
-</shape>

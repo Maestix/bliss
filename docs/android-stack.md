@@ -699,3 +699,12 @@ made opaque in its body and faded to nothing over the left 42%, the top
 dark forest went see-through and took the shade's red. A light shade keeps
 the card, or its light words would stand on white. Remake the PNG when
 status-card.jpg changes.
+
+**0.5.8–0.5.9.** With the box gone nothing seemed to move: the content
+still started under the app's name, 73dp in, with 16dp on the right. The
+words now start there and the right keeps as much free (`note_end`), which
+sets the block in the notification's middle, and the scene fades less.
+And the light shade's card went too: the service colorizes its
+notification (`setColorized` with the surface colour), so its ground is
+bliss's dark plum in a light shade as in a dark one — the user's Pixel 7
+in a light theme showed the card as a box inside it. One look for both.

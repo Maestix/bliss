@@ -4,12 +4,10 @@
      edge here either), the state, the server, the clock, and three pills.
      Android 12 and later start this view under the app's name and keep the
      column under its icon, some 73dp, for themselves: nothing drawn there
-     is shown. In a dark shade, with no card, the words start where the
-     app's name does and as much is left free on the right (values-night's
-     `note_start`, `note_end`), which sets the content in the notification's
-     middle with the scene in the room on the right; measured on the user's
-     Pixel 7. A light shade keeps the card and the same room on both sides
-     inside it. -->
+     is shown. With no card of its own, the words start where the app's name
+     does and as much is left free on the right (`note_start`, `note_end`),
+     which sets the content in the notification's middle with the scene in
+     the room on the right; measured on the user's Pixel 7. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
