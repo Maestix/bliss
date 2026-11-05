@@ -649,3 +649,18 @@ as the default stands for the best of them (a working Wi-Fi, then a
 cable, then mobile data), and a name once read is kept for as long as
 that network is connected. Not seen on a phone: which of the two the
 user met is not known, and both are covered.
+
+**And with the phone in a pocket.** Android gives a Wi-Fi's name to an
+app in sight, or to one allowed location «всегда»; the tunnel's service
+is `specialUse`, so out of sight every Wi-Fi was nameless and met the rule
+for any Wi-Fi rather than its own. The networks card now asks for
+`ACCESS_BACKGROUND_LOCATION` once Wi-Fi names are allowed, in words that
+say why, and sends a person whom Android will not ask again to bliss's
+own settings page. And a network is read again whenever the screens come
+up (`TunnelService.rewatch`, over the binding they already hold — a new
+watch is answered at once with every network as it is): Android says a
+network only when it changes, so a name allowed or shown later never
+arrived. `reportNetwork` used `startService`, which with the tunnel off
+left a started service behind; so did `rebuild`. A command that leaves
+nothing running now stops it (`stopSelf(startId)`), and the binding keeps
+it while the screens are up.

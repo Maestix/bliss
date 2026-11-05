@@ -11,6 +11,10 @@
          bliss never reads where the phone is. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- The same name with bliss out of sight, so a network's rule meets the
+         Wi-Fi it is for with the phone in a pocket; asked for separately,
+         from Настройки → Сети, as Android wants it. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <!-- QR import only, asked for on the first scan. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
