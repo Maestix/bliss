@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -214,6 +215,28 @@ fun ago(unix: Long): String {
 
 // --- sheets ------------------------------------------------------------------------
 
+/**
+ * What a list inside a sheet has left over at its ends — the rest of a
+ * drag past the top, a fling that hit the bottom — stays with the list.
+ * Handed on, it moved the sheet, which sprang back to where it stands: the
+ * quick server sheet shook as the user scrolled it up and down. The sheet
+ * is still dragged by its handle and its head, and closed by a tap outside
+ * or by «назад».
+ */
+private val KeepScroll = object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+    override fun onPostScroll(
+        consumed: androidx.compose.ui.geometry.Offset,
+        available: androidx.compose.ui.geometry.Offset,
+        source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
+    ) = available
+
+    override suspend fun onPostFling(consumed: androidx.compose.ui.unit.Velocity, available: androidx.compose.ui.unit.Velocity) =
+        available
+}
+
+/** For a scrolling list inside a `BlissSheet`: see `KeepScroll`. */
+fun Modifier.scrollsInSheet(): Modifier = this.nestedScroll(KeepScroll)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BlissSheet(close: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
@@ -242,7 +265,7 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
             }
             Image(painterResource(R.drawable.bunny), null, Modifier.padding(end = 12.dp).size(96.dp, 90.dp))
         }
-        LazyColumn(Modifier.heightIn(max = 380.dp).padding(horizontal = 8.dp)) {
+        LazyColumn(Modifier.heightIn(max = 380.dp).scrollsInSheet().padding(horizontal = 8.dp)) {
             if (frame.servers.size > 1) item { AutoLine(frame, c) }
             items(frame.servers.withIndex().toList(), key = { it.index }) { (i, s) ->
                 ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key); close() }, onMore = null)
