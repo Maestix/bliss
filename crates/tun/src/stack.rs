@@ -47,6 +47,13 @@ pub struct Carrying {
     /// one inside the tunnel): that address, and the names it handed out.
     /// Connections to those addresses are then decided by name.
     pub names: Option<(SocketAddr, Arc<FakeNames>)>,
+    /// Where bliss is not the DNS server (the desktop's adapter): read a
+    /// site's name out of its connection — a ClientHello's `server_name`, a
+    /// request's `Host:` — whenever a rule decides by names. The machine's
+    /// own lookups never reach bliss there (the user's DNS is dnscrypt-proxy
+    /// on loopback, which no adapter sees), so this is the one way domain
+    /// and geosite rules reach the adapter's traffic.
+    pub sniff: bool,
     /// Who holds a connection, where the system has to be asked rather than
     /// a table read (Android: `getConnectionOwnerUid`). Without it, the
     /// machine's own tables (`bliss_core::name_for_connection`).
@@ -77,6 +84,7 @@ impl Carrying {
             serving,
             gateway,
             names: None,
+            sniff: false,
             owner: None,
             addresses: Arc::new(Addresses::new()),
             answers: std::sync::OnceLock::new(),
@@ -178,6 +186,13 @@ impl Carrying {
         {
             let _ = answers.send(packet);
         }
+    }
+
+    /// Whether a bare address's first bytes are read for the site's name:
+    /// always where bliss hands out the names (the phone), and where it does
+    /// not, whenever a rule decides by one.
+    fn reads_names(&self) -> bool {
+        self.names.is_some() || (self.sniff && self.serving.router().has_name_rules())
     }
 
     /// Carry a connection until it ends — or, where bliss names sites (the
@@ -541,7 +556,7 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     // kept), and its first bytes are asked for the name instead.
     let mut first = Vec::new();
     let mut seen = None;
-    if carrying.names.is_some()
+    if carrying.reads_names()
         && let Target::Socket(addr) = target
         && (forgotten || SNIFFED_PORTS.contains(&addr.port()))
     {
@@ -698,7 +713,7 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     };
     let mut client = client;
     let mut first = Vec::new();
-    if carrying.names.is_some()
+    if carrying.reads_names()
         && let Target::Socket(_) = target
         && target.port() == 443
     {
@@ -1332,6 +1347,116 @@ mod tests {
         }
         assert_eq!(echoed.await.unwrap(), hello);
         stack.abort();
+    }
+
+    /// The desktop's adapter, where bliss is not the DNS server: a
+    /// connection to a bare address is still decided by the name its
+    /// ClientHello says, whenever a rule decides by names — so a domain rule
+    /// reaches traffic through the adapter, which before this it never did
+    /// (the routing screen said so under TUN).
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_desktop_reads_a_name_out_of_the_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Ok(echo) = tokio::net::TcpListener::bind("127.0.0.1:8080").await else {
+            eprintln!("127.0.0.1:8080 is taken here; not run");
+            return;
+        };
+        let echoed = tokio::spawn(async move {
+            let (mut socket, _) = echo.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut got = Vec::new();
+            while let Ok(n) = socket.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                socket.write_all(&buf[..n]).await.unwrap();
+            }
+            got
+        });
+        let mut reddit = bliss_proto::Rule {
+            name: Some("Reddit".to_owned()),
+            action: bliss_proto::Action::Direct,
+            ..bliss_proto::Rule::default()
+        };
+        reddit.domain = vec!["reddit.com".to_owned()];
+        let routing = bliss_proto::Routing {
+            fallback: bliss_proto::Action::Proxy,
+            rules: vec![reddit],
+            ..bliss_proto::Routing::default()
+        };
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().expect("an address"),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::build(
+                &routing,
+                std::path::Path::new("/nonexistent"),
+            )),
+        ));
+        // As `Tun::up` makes it: no names handed out, names read.
+        let mut carrying = Carrying::new(Arc::clone(&serving), Gateway::for_tests());
+        carrying.sniff = true;
+        let (machine, device) = tokio::io::duplex(256 * 1024);
+        let stack = tokio::spawn(serve(device, Arc::new(carrying)));
+        let mut machine = Packets {
+            pipe: machine,
+            held: Vec::new(),
+        };
+        let app: SocketAddr = "10.66.0.1:40002".parse().unwrap();
+        let far: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        const SYN: u8 = 0x02;
+        const ACK: u8 = 0x10;
+        const PSH: u8 = 0x08;
+        const FIN: u8 = 0x01;
+        const RST: u8 = 0x04;
+        machine.send(&tcp_packet(app, far, 1000, 0, SYN, &[])).await;
+        let (flags, theirs, _) = machine.segment().await;
+        assert_eq!(flags & (SYN | ACK), SYN | ACK);
+        let ours = 1001;
+        let mut acked = theirs.wrapping_add(1);
+        machine
+            .send(&tcp_packet(app, far, ours, acked, ACK, &[]))
+            .await;
+        let hello = crate::sniff::tests::client_hello("old.reddit.com");
+        machine
+            .send(&tcp_packet(app, far, ours, acked, PSH | ACK, &hello))
+            .await;
+        let ours = ours + hello.len() as u32;
+        let mut back = Vec::new();
+        while back.len() < hello.len() {
+            let (flags, seq, payload) = machine.segment().await;
+            assert_eq!(
+                flags & (FIN | RST),
+                0,
+                "closed: {:?}",
+                serving.tracker.table()
+            );
+            if !payload.is_empty() {
+                acked = seq.wrapping_add(payload.len() as u32);
+                back.extend_from_slice(&payload);
+                machine
+                    .send(&tcp_packet(app, far, ours, acked, ACK, &[]))
+                    .await;
+            }
+        }
+        assert_eq!(back, hello);
+        let rows = serving.tracker.table();
+        assert_eq!(rows[0].target, "old.reddit.com:8080");
+        assert_eq!(
+            (rows[0].route, rows[0].rule.as_str()),
+            (Route::Direct, "Reddit")
+        );
+        stack.abort();
+        echoed.abort();
     }
 
     /// A pool address bliss has forgotten — a browser's answer kept from

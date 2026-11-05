@@ -551,6 +551,15 @@ impl Router {
         false
     }
 
+    /// Whether any rule decides by a site's name: a domain or a geosite
+    /// category. Without one, a TUN has no reason to read names out of
+    /// connections (`Carrying::sniff` in bliss-tun).
+    pub fn has_name_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| !rule.domains.is_empty() || !rule.sites.is_empty())
+    }
+
     /// Whether any rule could decide a site by its public address.
     pub fn has_address_rules(&self) -> bool {
         self.rules.iter().any(|rule| rule.sees_sites)

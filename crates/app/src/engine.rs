@@ -2237,20 +2237,19 @@ fn blind_under_tun(rules: &[Rule]) -> Option<String> {
         return None;
     }
     let (many, list) = (blind.len() > 1, blind.join(", "));
-    let head = if many {
-        format!("правила {list} не сработают")
+    let (head, them) = if many {
+        (format!("правила {list} узнают"), "их не поймают")
     } else {
-        format!("правило {list} не сработает")
+        (format!("правило {list} узнаёт"), "его не поймает")
     };
-    let tail = if many {
-        "они работают"
-    } else {
-        "оно работает"
-    };
+    // The adapter reads the name out of the connection itself (`sniff` in
+    // bliss-tun): a ClientHello's server_name, a request's Host:, on the
+    // ports sites are on. What else goes through it is an address alone.
     Some(format!(
-        "Включён режим TUN: в пакете виден только адрес, а не имя сайта, поэтому {head} \
-         для трафика через адаптер. Для программ, которые ходят через порты SOCKS и HTTP, \
-         {tail} как раньше."
+        "Включён режим TUN: {head} сайт по имени из самого соединения — для HTTPS и HTTP \
+         на портах 443, 80, 8443 и 8080. Прочий трафик через адаптер виден только по адресу, \
+         и {them}. QUIC к таким сайтам отклоняется, и браузер уходит на обычный HTTPS. Для \
+         программ, которые ходят через порты SOCKS и HTTP, всё как раньше."
     ))
 }
 
@@ -3708,11 +3707,11 @@ mod tests {
         );
     }
 
-    /// A rule made of names alone decides nothing that comes through the
-    /// adapter, because a packet holds an address. The user was told this once
-    /// already about `geoip:ru` from the other side, and found it by watching
-    /// traffic go the wrong way for days; the same mistake in the other
-    /// direction gets said out loud rather than discovered.
+    /// A rule made of names alone sees through the adapter only what names
+    /// itself in the connection — HTTPS and HTTP, read by the stack — since a
+    /// packet holds an address. The user was told this once already about
+    /// `geoip:ru` from the other side, and found it by watching traffic go
+    /// the wrong way for days; what such a rule cannot see is said out loud.
     #[test]
     fn rules_of_names_alone_are_named_under_tun() {
         let rule = |name: &str, domain: Vec<&str>, ip: Vec<&str>| Rule {
@@ -3727,8 +3726,8 @@ mod tests {
         let addresses = rule("адреса", vec![], vec!["203.0.113.7"]);
 
         let note = blind_under_tun(std::slice::from_ref(&names)).expect("a rule of names is named");
-        assert!(note.contains("правило #1"), "{note}");
-        assert!(note.contains("не сработает"), "{note}");
+        assert!(note.contains("правило #1 узнаёт"), "{note}");
+        assert!(note.contains("HTTPS"), "{note}");
 
         // Half of this one still decides, so naming it would bury the ones
         // that decide nothing at all.
@@ -3736,8 +3735,8 @@ mod tests {
 
         let two = blind_under_tun(&[names.clone(), addresses, names])
             .expect("two of them are named together");
-        assert!(two.contains("правила #1, #3"), "{two}");
-        assert!(two.contains("не сработают"), "{two}");
+        assert!(two.contains("правила #1, #3 узнают"), "{two}");
+        assert!(two.contains("их не поймают"), "{two}");
         assert_eq!(blind_under_tun(&[]), None, "nothing to warn about");
 
         // A switched-off rule decides nothing anywhere, so it is not named.
