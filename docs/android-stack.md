@@ -620,3 +620,19 @@ on the one picked by hand before. Every change now goes through `remember`,
 and a deleted server takes the file with it
 (`the_server_in_use_outlives_a_restart`). The desktop learnt the same, and
 stars, in the same release (AGENTS.md §5).
+
+**And the heart, overruled.** The user found bliss switching on and off
+in a blink when the heart was pressed while the phone moved between
+networks. Moving, Android calls back several times — the old network
+lost, the new one, at times the old one again — and each was said to the
+engine at once, a move with its rule acted on; a heart pressed off in
+between was switched back on by the next «Включать bliss», and a second
+start could land on a first still under way. Now the service says a
+network once it has held for 1.5 s (`SETTLE_MS`), starts nothing while a
+TUN it handed over is unanswered (`starting`), and a heart pressed off —
+or the tile, or the notification's «Выкл.» — holds every rule's «on» back
+until the person switches bliss on again (`held_off`,
+`the_heart_switched_off_outweighs_a_networks_rule`, seen failing without
+it). The network's own «off», a pause and another VPN taking over do not
+hold it (`Native.disconnect(byHand)`). Not reproduced on a phone: the
+sequence is read from the code.

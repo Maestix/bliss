@@ -21,7 +21,9 @@ object Native {
     external fun start(files: String, libs: String, socket: String): Boolean
     /** Answers the ticket the engine's frames name this TUN by, or 0. */
     external fun connect(fd: Int): Long
-    external fun disconnect()
+    /** `byHand`: the person switched it off (the tile, the notification's
+     *  «Выкл.»), and no network's rule switches it back on until they do. */
+    external fun disconnect(byHand: Boolean)
 
     fun ensure(context: Context): Boolean {
         app = context.applicationContext

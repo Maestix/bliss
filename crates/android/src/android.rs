@@ -91,11 +91,17 @@ pub extern "system" fn Java_app_bliss_Native_connect(
 
 /// Take the tunnel down, from the notification's button or the tile.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_bliss_Native_disconnect(_env: JNIEnv, _class: JClass) {
+pub extern "system" fn Java_app_bliss_Native_disconnect(
+    _env: JNIEnv,
+    _class: JClass,
+    by_hand: jni::sys::jboolean,
+) {
     if let Some(handle) = engine::handle() {
         let _ = handle
             .commands
-            .send(Cmd::Ui(crate::protocol::UiCommand::Disconnect));
+            .send(Cmd::Ui(crate::protocol::UiCommand::Disconnect {
+                by_hand: by_hand != 0,
+            }));
     }
 }
 

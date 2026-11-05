@@ -254,7 +254,12 @@ pub enum UiCommand {
         #[serde(default)]
         key: Option<String>,
     },
-    Disconnect,
+    /// `by_hand` false when the tunnel's service takes it down for a
+    /// network's rule, a pause or another VPN; the heart's is by hand.
+    Disconnect {
+        #[serde(default = "yes")]
+        by_hand: bool,
+    },
     Rule {
         index: usize,
         on: bool,
@@ -341,6 +346,10 @@ pub enum UiCommand {
     /// «Поделиться журналом»: the journal with every secret taken out,
     /// written to `journal.txt` beside the profile (`Frame::journal`).
     ShareLog,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// The action a word names; anything unknown goes through the tunnel.
