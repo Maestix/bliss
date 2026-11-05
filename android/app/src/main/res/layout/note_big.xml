@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The notification open: the night scene of the status card on the right
      (faded to the card's colour at its left and top edges, so it has no
-     edge here either), the state, the server, the clock, and three pills. -->
+     edge here either), the state, the server, the clock, and three pills.
+     The content sits 8dp left of the card's middle: Android's decorated
+     frame puts more room on its left than on its right, and at 16 and 14dp
+     the user saw it stand off centre. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -29,9 +32,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="16dp"
+        android:paddingStart="8dp"
         android:paddingTop="14dp"
-        android:paddingEnd="14dp"
+        android:paddingEnd="22dp"
         android:paddingBottom="12dp">
 
         <LinearLayout
