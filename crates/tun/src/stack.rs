@@ -1663,7 +1663,9 @@ mod tests {
     /// The connections that follow a lookup wait for the one question
     /// already asked: a page opens several at once, and each asked again
     /// through the server. Here the "server" never answers, and counts how
-    /// often it was asked.
+    /// often it was asked. Linux's alone, as the tests around it: Windows'
+    /// `Gateway` has no stand-in for tests.
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_name_is_asked_once_however_many_wait() {
         let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
