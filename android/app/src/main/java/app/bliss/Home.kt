@@ -63,6 +63,12 @@ fun Home(frame: Frame, heart: () -> Unit, openServer: () -> Unit, openTraffic: (
                 Image(painterResource(R.drawable.mark), null, Modifier.size(30.dp))
                 Spacer(Modifier.size(10.dp))
                 Text("bliss", style = T.body.copy(fontWeight = FontWeight.Bold, fontSize = 22.sp))
+                Spacer(Modifier.weight(1f))
+                // The network the phone is on; what bliss does there is in Настройки → Сети.
+                frame.network?.let { net ->
+                    Text(net.name, style = T.small.copy(color = C.N300), maxLines = 1,
+                        modifier = Modifier.clip(RoundedCornerShape(14.dp)).background(C.Tint).padding(horizontal = 12.dp, vertical = 6.dp))
+                }
             }
             TrafficCard(frame, openTraffic)
             Spacer(Modifier.weight(1f))

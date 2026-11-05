@@ -62,6 +62,30 @@ pub struct Frame {
     /// Counts the journals written for sharing: a new number means
     /// `journal.txt` is ready to be sent.
     pub journal: u64,
+    /// The network the phone is on, and what bliss does there.
+    pub network: Option<NetView>,
+    /// Every network with a rule.
+    pub networks: Vec<NetView>,
+    /// What the network asks of the tunnel's service — "on", "off", or
+    /// "back" from a network that asks nothing — with
+    /// a number that moves at each network change that asks something, so
+    /// the service acts once per change and a heart pressed after is the
+    /// person's.
+    pub wish: Option<&'static str>,
+    pub wish_id: u64,
+}
+
+/// A network as the screens show it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NetView {
+    /// "mobile", "wifi", "wifi:<name>".
+    pub id: String,
+    pub name: String,
+    /// "on", "off" or "": this network's own rule, or the one it falls under.
+    pub connect: String,
+    pub preset: Option<String>,
+    /// Whether the rule shown is this network's own (else «любой Wi-Fi»'s, or none).
+    pub own: bool,
 }
 
 /// The rule sets: where from, what is here, and a fetch under way.
@@ -283,6 +307,25 @@ pub enum UiCommand {
     /// «Автовыбор» on or off. Picking a server by hand turns it off.
     Auto {
         on: bool,
+    },
+    /// The phone's network changed, from the tunnel's service: its kind
+    /// ("mobile", "wifi", …, none for no network at all), a Wi-Fi's name
+    /// when bliss may read it, and whether it wants a sign-in first.
+    Network {
+        kind: Option<String>,
+        #[serde(default)]
+        ssid: Option<String>,
+        #[serde(default)]
+        captive: bool,
+    },
+    /// What bliss does on a network, from the screens: `connect` "on",
+    /// "off" or "" (the heart decides), and a preset or none.
+    SetNetwork {
+        id: String,
+        #[serde(default)]
+        connect: String,
+        #[serde(default)]
+        preset: Option<String>,
     },
     /// «Поделиться журналом»: the journal with every secret taken out,
     /// written to `journal.txt` beside the profile (`Frame::journal`).

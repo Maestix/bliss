@@ -18,6 +18,12 @@ import android.view.View
 import android.widget.RemoteViews
 import android.service.quicksettings.TileService
 import android.content.ComponentName
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
+import android.os.Build
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,6 +48,8 @@ class TunnelService : VpnService() {
         const val PAUSE = "app.bliss.PAUSE"
         const val RESUME = "app.bliss.RESUME"
         const val REBUILD = "app.bliss.REBUILD"
+        /** Say the network again: the person just let bliss read Wi-Fi names. */
+        const val NETWORK = "app.bliss.NETWORK"
         /** The phone's DNS server: inside the TUN's /30, answered by the
          *  engine itself, which is what lets rules see sites by name
          *  (`DNS_ADDRESS` in crates/android/src/engine.rs). */
@@ -58,6 +66,10 @@ class TunnelService : VpnService() {
         fun rebuild(context: Context) {
             context.startService(Intent(context, TunnelService::class.java).setAction(REBUILD))
         }
+
+        fun reportNetwork(context: Context) {
+            context.startService(Intent(context, TunnelService::class.java).setAction(NETWORK))
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -73,6 +85,14 @@ class TunnelService : VpnService() {
     private val resume = Runnable { connect() }
     /** What the notification shows now, so a frame that changes nothing posts nothing. */
     private var shown = ""
+    /** Off because the network asked it (`Frame.wish` "off"): the service
+     *  stays in the foreground, waiting, to see the next network. */
+    private var waitingOn: String? = null
+    /** The last network wish acted on, so each is acted on once. */
+    private var lastWish = 0L
+    /** The network as last said to the engine, so a repeat is not sent. */
+    private var lastNetwork = ""
+    private var networks: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -81,6 +101,65 @@ class TunnelService : VpnService() {
         client.start()
         watcher = client
         watching = scope.launch { client.frames.collect { onFrame(it) } }
+        watchNetwork()
+    }
+
+    /**
+     * The phone's default network, watched rather than polled, said to the
+     * engine on every change: its kind, a Wi-Fi's name when bliss may read
+     * it — Android gives an app the SSID only with location permission —
+     * and whether it wants a sign-in. bliss's own app is left out of its
+     * VPN, so this is the network under the tunnel, not the tunnel.
+     */
+    private fun watchNetwork() {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = if (Build.VERSION.SDK_INT >= 31) {
+            object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = said(caps)
+                override fun onLost(network: Network) = said(null)
+            }
+        } else {
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = said(caps)
+                override fun onLost(network: Network) = said(null)
+            }
+        }
+        try {
+            manager.registerDefaultNetworkCallback(callback, handler)
+            networks = callback
+        } catch (_: Exception) { }
+    }
+
+    private var lastCaps: NetworkCapabilities? = null
+
+    private fun said(caps: NetworkCapabilities?) {
+        lastCaps = caps
+        val kind = when {
+            caps == null -> null
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            else -> "other"
+        }
+        val ssid = if (kind == "wifi") wifiName(caps) else null
+        val captive = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true &&
+            !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val key = "$kind|$ssid|$captive"
+        if (key == lastNetwork) return
+        lastNetwork = key
+        watcher?.command("network", "kind" to kind, "ssid" to ssid, "captive" to captive)
+    }
+
+    /** The Wi-Fi's name, or none when Android will not say it. */
+    private fun wifiName(caps: NetworkCapabilities?): String? {
+        val raw = if (Build.VERSION.SDK_INT >= 31) {
+            (caps?.transportInfo as? WifiInfo)?.ssid
+        } else {
+            @Suppress("DEPRECATION")
+            applicationContext.getSystemService(WifiManager::class.java)?.connectionInfo?.ssid
+        }
+        val name = raw?.removeSurrounding("\"")
+        return name?.takeIf { it.isNotBlank() && it != WifiManager.UNKNOWN_SSID.removeSurrounding("\"") && it != "<unknown ssid>" }
     }
 
     override fun onBind(intent: Intent?): IBinder? =
@@ -89,12 +168,14 @@ class TunnelService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             DISCONNECT -> {
-                val wasPaused = resumeAt != null
+                val wasResting = resumeAt != null || waitingOn != null
                 stopPause()
+                waitingOn = null
                 Native.disconnect()
-                if (wasPaused) leaveForeground()
+                if (wasResting) leaveForeground()
             }
             PAUSE -> pause()
+            NETWORK -> { lastNetwork = ""; said(lastCaps) }
             REBUILD -> if (foreground && resumeAt == null && (lastState == "on" || lastState == "busy")) connect()
             // CONNECT, RESUME, or null when Android's always-on VPN starts the service.
             else -> connect()
@@ -125,6 +206,7 @@ class TunnelService : VpnService() {
 
     private fun connect() {
         stopPause()
+        waitingOn = null
         enterForeground(Note.Busy(""))
         if (prepare(this) != null) {
             // No consent yet: only the screens can ask for it.
@@ -172,8 +254,32 @@ class TunnelService : VpnService() {
             lastState = frame.state
             TileService.requestListeningState(this, ComponentName(this, Tile::class.java))
         }
+        // What the network asks — connect, or stay off — once per network.
+        if (frame.wishId > lastWish) {
+            lastWish = frame.wishId
+            val name = frame.network?.name ?: ""
+            when (frame.wish) {
+                "on" -> if (frame.state != "on" && frame.state != "busy" && resumeAt == null && prepare(this) == null) {
+                    connect()
+                    return
+                }
+                "back" -> if (waitingOn != null && prepare(this) == null) {
+                    connect()
+                    return
+                }
+                "off" -> if (!isLockdownEnabled && (frame.state == "on" || frame.state == "busy" || waitingOn != null)) {
+                    ticket = 0
+                    waitingOn = name
+                    Native.disconnect()
+                    enterForeground(Note.Waiting(name))
+                    return
+                }
+            }
+        }
         // Paused: the engine is off on purpose, and the notification counts down.
         if (resumeAt != null) return
+        // Waiting out a network bliss was told to stay off on.
+        if (waitingOn != null) return
         val server = frame.current?.let { frame.servers.getOrNull(it) }
         val name = server?.name ?: ""
         // The engine has let go of the TUN this service handed it: failed,
@@ -192,6 +298,7 @@ class TunnelService : VpnService() {
         data class Busy(val server: String) : Note
         data class On(val server: String, val since: Long, val latency: Int?) : Note
         data class Paused(val until: Long) : Note
+        data class Waiting(val network: String) : Note
     }
 
     private fun enterForeground(note: Note) {
@@ -277,6 +384,20 @@ class TunnelService : VpnService() {
                 pill(0, "Продолжить", service(RESUME, 4))
                 pill(1, "Выкл.", service(DISCONNECT, 1))
             }
+            is Note.Waiting -> {
+                title = "Ждёт другой сети"
+                big.setImageViewResource(R.id.picture, R.drawable.bunny)
+                for (views in listOf(small, big)) {
+                    views.setTextViewText(R.id.title, title)
+                    views.setViewVisibility(R.id.clock, View.GONE)
+                }
+                small.setTextViewText(R.id.detail, "в «${note.network}» — без туннеля")
+                big.setTextViewText(R.id.detail, "В «${note.network}» не подключаюсь, вернусь в другой сети")
+                big.setTextViewText(R.id.clock_word, "")
+                big.setTextViewText(R.id.latency, "")
+                pill(0, "Подключить", service(CONNECT, 5))
+                pill(1, "Выкл.", service(DISCONNECT, 1))
+            }
         }
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_heart)
@@ -323,6 +444,7 @@ class TunnelService : VpnService() {
 
     override fun onDestroy() {
         handler.removeCallbacks(resume)
+        networks?.let { try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) } catch (_: Exception) { } }
         watching?.cancel()
         watcher?.stop()
         scope.cancel()

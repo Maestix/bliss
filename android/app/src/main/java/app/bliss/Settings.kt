@@ -25,6 +25,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -34,7 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun Settings(frame: Frame, c: Commands, openTraffic: () -> Unit) {
+fun Settings(frame: Frame, c: Commands, openTraffic: () -> Unit, openNetwork: (String, String) -> Unit) {
     val context = LocalContext.current
     Column(
         Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
@@ -45,6 +50,7 @@ fun Settings(frame: Frame, c: Commands, openTraffic: () -> Unit) {
             Line("Весь телефон", "VPN-сервис Android: каждое приложение, UDP, звонки и игры. " +
                 "IPv6 пока отклоняется, и приложения уходят на IPv4 — мимо туннеля не идёт ничего.")
         }
+        NetworksCard(frame, openNetwork)
         GeoCard(frame.geo, c)
         Section("Запуск и защита") {
             Row(
@@ -156,5 +162,104 @@ private fun GeoCard(geo: GeoView, c: Commands) {
             }
             Toggle(geo.auto) { c("geo_auto", "on" to it) }
         }
+    }
+}
+
+/** In words: what bliss does on a network. */
+fun netSummary(connect: String, preset: String?): String {
+    val what = when (connect) { "on" -> "подключаюсь сам"; "off" -> "не подключаюсь"; else -> "решает сердечко" }
+    return if (preset != null) "$what · пресет «$preset»" else what
+}
+
+/**
+ * Networks: bliss follows the phone. The one it is on, then «любой Wi-Fi»
+ * and mobile data, then every Wi-Fi with a rule of its own. A Wi-Fi is told
+ * from another only by its name, which Android gives with location
+ * permission alone — asked for here, on a tap, and never at install.
+ */
+@Composable
+private fun NetworksCard(frame: Frame, open: (String, String) -> Unit) {
+    val context = LocalContext.current
+    var allowed by remember { mutableStateOf(canReadWifiNames(context)) }
+    val ask = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        allowed = canReadWifiNames(context)
+        if (allowed) TunnelService.reportNetwork(context)
+    }
+    Section("Сети") {
+        Text("Что делать в каждой сети: подключаться самому, не подключаться или оставить сердечку, и какой пресет включить. " +
+            "Работает, пока bliss включён или ждёт другой сети.",
+            style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(bottom = 6.dp))
+        val now = frame.network
+        if (now != null) {
+            NetLine("Сейчас: ${now.name}", netSummary(now.connect, now.preset) + if (!now.own && now.connect.isNotEmpty()) " (как у любого Wi-Fi)" else "", true) {
+                open(now.id, now.name)
+            }
+        }
+        val listed = mutableListOf<Pair<String, String>>()
+        listed += "wifi" to "Любой Wi-Fi"
+        listed += "mobile" to "Мобильная сеть"
+        for (n in frame.networks) if (listed.none { it.first == n.id }) listed += n.id to n.name
+        for ((id, name) in listed) {
+            if (id == now?.id) continue
+            val rule = frame.networks.firstOrNull { it.id == id }
+            NetLine(name, netSummary(rule?.connect ?: "", rule?.preset), false) { open(id, name) }
+        }
+        if (!allowed) {
+            Text("Чтобы различать сети Wi-Fi по имени, Android просит доступ к местоположению. " +
+                "bliss читает только имя сети и никогда — где телефон.",
+                style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
+            Btn("Различать Wi-Fi по имени", accent = false, modifier = Modifier.fillMaxWidth()) {
+                ask.launch(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION))
+            }
+        }
+    }
+}
+
+fun canReadWifiNames(context: android.content.Context) =
+    context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+@Composable
+private fun NetLine(title: String, hint: String, current: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp)).clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+            Text(title, style = T.body.copy(color = if (current) C.Accent else C.Text), maxLines = 1)
+            Text(hint, style = T.tiny.copy(fontSize = 12.5.sp), maxLines = 2)
+        }
+        Ico(Icons.Right, C.N600)
+    }
+}
+
+/** What bliss does on one network: connect, stay off or leave it to the heart, and a preset. */
+@Composable
+fun NetworkSheet(frame: Frame, id: String, name: String, c: Commands, close: () -> Unit) {
+    val own = frame.networks.firstOrNull { it.id == id }
+    val inherited = frame.network?.takeIf { it.id == id }
+    var connect by remember { mutableStateOf(own?.connect ?: inherited?.connect ?: "") }
+    var preset by remember { mutableStateOf(own?.preset ?: inherited?.preset) }
+    fun save() = c("set_network", "id" to id, "connect" to connect, "preset" to preset)
+    BlissSheet(close) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(top = 6.dp, bottom = 10.dp)) {
+            Text(name, style = T.sheet, maxLines = 1)
+            Text(if (id == "wifi") "для каждого Wi-Fi без своего правила" else "что делать в этой сети", style = T.small)
+        }
+        for ((key, label) in listOf("on" to "Подключаться самому", "off" to "Не подключаться", "" to "Как решит сердечко")) {
+            MenuRow(if (connect == key) Icons.Check else Icons.Circle,
+                label, if (connect == key) C.Accent else C.N300) { connect = key; save() }
+        }
+        if (frame.presets.isNotEmpty()) {
+            Text("Пресет здесь", style = T.small.copy(color = C.N400), modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp))
+            Row(Modifier.padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                Chip("Не менять", preset == null) { preset = null; save() }
+                for (p in frame.presets) Chip(p, preset == p) { preset = p; save() }
+            }
+        }
+        Text("Подключаюсь и отключаюсь сам, пока bliss включён или ждёт другой сети; в Wi-Fi, который просит войти, — после входа.",
+            style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 8.dp))
     }
 }
