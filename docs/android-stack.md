@@ -685,3 +685,17 @@ settings, the traffic screen, the tile. What was found:
   or was dropped from a rule that had another condition; it is saved with
   the rest. A `network:` line written in «Текстом» no longer gets a second
   one from the switch.
+
+## 0.5.7: the notification without a box
+
+Android 12 and later start a decorated notification's content under the
+app's name and keep the column under its icon, so bliss's card stood as a
+box right of the notification's middle (seen on the user's Pixel 7).
+Asked for by the user: in a dark shade the card has no ground of its own
+(`drawable-night/note_card.xml` is clear, `note_fade` too) and the scene
+fades out by itself — `note_scene_night.png`, the status card's picture
+made opaque in its body and faded to nothing over the left 42%, the top
+30%, the bottom 22% and the right 5%. Keyed out by colour instead, the
+dark forest went see-through and took the shade's red. A light shade keeps
+the card, or its light words would stand on white. Remake the PNG when
+status-card.jpg changes.

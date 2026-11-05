@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- In a dark shade the card has no ground of its own (note_card is clear
+     here), so the scene carries its edges itself: opaque in its body, faded
+     to nothing over the left 42%, the top 30%, the bottom 22% and the right
+     5% — note_scene_night.png, made from crates/app/assets/status-card.jpg.
+     Asked for by the user, whose card stood as a box off the notification's
+     middle (Android keeps the column under the app's icon). -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/note_scene_night" />
