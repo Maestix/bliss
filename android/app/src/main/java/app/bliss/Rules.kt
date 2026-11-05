@@ -328,7 +328,7 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                 IconBtn(Icons.Trash, C.BadText, "Удалить") { c("delete_rule", "index" to index); close() }
             }
         }
-        LazyColumn(Modifier.heightIn(max = 470.dp).padding(horizontal = 16.dp)) {
+        LazyColumn(Modifier.heightIn(max = 470.dp).scrollsInSheet().padding(horizontal = 16.dp)) {
             item {
                 Field(name, "Название, например «Работа»") { name = it }
                 Row(Modifier.padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
