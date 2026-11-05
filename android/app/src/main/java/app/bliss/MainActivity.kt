@@ -279,9 +279,16 @@ fun NavBar(tab: Tab, pick: (Tab) -> Unit) {
 fun Snack(frame: Frame, restore: () -> Unit, modifier: Modifier = Modifier) {
     var shown by remember { mutableStateOf<Toast?>(null) }
     var seen by remember { mutableStateOf<Long>(-1) }
+    // The engine's first frame says what it said before the screen opened,
+    // which is not shown again. Taken from the first toast instead, the
+    // first line ever said — «Добавлен …» on a first run — was taken for an
+    // old one and never shown.
+    LaunchedEffect(frame.connected) {
+        if (frame.connected && seen == -1L) seen = frame.toast?.id ?: 0
+    }
     LaunchedEffect(frame.toast?.id) {
         val t = frame.toast ?: return@LaunchedEffect
-        if (seen == -1L) { seen = t.id; return@LaunchedEffect } // not one from before the screen opened
+        if (seen == -1L) return@LaunchedEffect
         if (t.id == seen) return@LaunchedEffect
         seen = t.id
         shown = t

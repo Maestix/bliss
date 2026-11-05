@@ -664,3 +664,24 @@ arrived. `reportNetwork` used `startService`, which with the tunnel off
 left a started service behind; so did `rebuild`. A command that leaves
 nothing running now stops it (`stopSelf(startId)`), and the binding keeps
 it while the screens are up.
+
+## 0.5.4: a first run, walked through
+
+At the user's ask, the code read in the order a new person meets it — the
+first launch, the first server, the consent, the rules, the apps, the
+settings, the traffic screen, the tile. What was found:
+
+- **The first line ever said was never shown.** The snack took the first
+  toast it saw for one from before the screen opened; on a first run that
+  was «Добавлен …». The engine's first frame now marks what came before.
+- **A server already listed read as «no link here»**, and so did a full
+  list: a paste now says «Этот сервер уже есть в списке», «Все эти серверы
+  уже есть», or that the list is full (`a_paste_says_what_it_found`). The
+  first of new servers is the one chosen, not the last.
+- **«Полностью мимо VPN» did not show in the apps list** until a rule
+  changed: the list read the bypass file on a rule change alone; it now
+  follows `Bypass.version`.
+- **A site typed in the rule editor and not added** kept «Сохранить» grey,
+  or was dropped from a rule that had another condition; it is saved with
+  the rest. A `network:` line written in «Текстом» no longer gets a second
+  one from the switch.

@@ -105,7 +105,9 @@ private fun AppList(frame: Frame, open: (Sheet) -> Unit) {
     val context = LocalContext.current
     val apps by produceState<List<AppInfo>?>(null) { value = Apps.load(context) }
     var query by rememberSaveable { mutableStateOf("") }
-    val bypass = remember(frame.rules) { Bypass.read(context) }
+    // Read again when a switch in an app's sheet moves it: the rules do not
+    // change for that, and the list went on saying «напрямую».
+    val bypass = remember(frame.rules, Bypass.version) { Bypass.read(context) }
     val ruled = frame.rules.mapNotNull { r -> r.app?.let { it.lowercase() to r } }.toMap()
     val all = apps
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
@@ -315,6 +317,10 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
     var asText by remember { mutableStateOf(false) }
     var text by remember { mutableStateOf("") }
     var adding by remember { mutableStateOf(Adding.None) }
+    // What is typed in a site or address box and not yet added: «Сохранить»
+    // takes it too. Before, a rule typed as «youtube.com» and saved at once
+    // could not be saved, or lost the site without a word.
+    var draft by remember { mutableStateOf("") }
     DisposableEffect(Unit) {
         c("geo_names", "open" to true)
         onDispose { c("geo_names", "open" to false) }
@@ -368,16 +374,20 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
                         for ((kind, word) in listOf(Adding.Site to "+ Сайт", Adding.App to "+ Приложение",
                             Adding.Sites to "+ Список сайтов", Adding.Country to "+ Страна",
                             Adding.Address to "+ Адрес или порт")) {
-                            Chip(word, adding == kind) { adding = if (adding == kind) Adding.None else kind }
+                            Chip(word, adding == kind) { adding = if (adding == kind) Adding.None else kind; draft = "" }
                         }
                     }
                 }
                 item {
-                    val add = { value: String -> if (value.isNotBlank() && value !in lines) lines.add(value.trim()); adding = Adding.None }
+                    val add = { value: String ->
+                        if (value.isNotBlank() && value.trim() !in lines) lines.add(value.trim())
+                        adding = Adding.None
+                        draft = ""
+                    }
                     when (adding) {
                         Adding.None -> {}
-                        Adding.Site -> Entry("example.com — и всё под ним", add)
-                        Adding.Address -> Entry("1.2.3.4, 10.0.0.0/8 или port:443", add)
+                        Adding.Site -> Entry(draft, { draft = it }, "example.com — и всё под ним", add)
+                        Adding.Address -> Entry(draft, { draft = it }, "1.2.3.4, 10.0.0.0/8 или port:443", add)
                         Adding.App -> AppPicker { add("app:$it") }
                         Adding.Sites -> CategoryPicker(frame, c, "geosite:", add)
                         Adding.Country -> CategoryPicker(frame, c, "geoip:", add)
@@ -387,8 +397,12 @@ fun RuleEditor(frame: Frame, index: Int?, c: Commands, close: () -> Unit) {
         }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Btn("Отмена", accent = false, modifier = Modifier.weight(1f), onClick = close)
-            val conditions = listOfNotNull(if (asText) text else lines.joinToString("\n"),
-                network.takeIf { it.isNotEmpty() }?.let { "network:$it" }).filter { it.isNotBlank() }.joinToString("\n")
+            // In «Текстом» a network line typed there wins over the switch, so
+            // the rule does not get two.
+            val typed = if (asText) text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                else lines + listOfNotNull(draft.trim().takeIf { it.isNotEmpty() && it !in lines })
+            val net = network.takeIf { it.isNotEmpty() && typed.none(isNetwork) }?.let { "network:$it" }
+            val conditions = (typed + listOfNotNull(net)).joinToString("\n")
             Btn("Сохранить", modifier = Modifier.weight(1.4f), enabled = conditions.isNotBlank()) {
                 c("save_rule", "index" to index, "name" to name, "action" to action, "text" to conditions)
                 close()
@@ -433,10 +447,9 @@ private fun Field(value: String, hint: String, change: (String) -> Unit) {
 }
 
 @Composable
-private fun Entry(hint: String, add: (String) -> Unit) {
-    var value by remember { mutableStateOf("") }
+private fun Entry(value: String, change: (String) -> Unit, hint: String, add: (String) -> Unit) {
     Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.weight(1f)) { Field(value, hint) { value = it } }
+        Box(Modifier.weight(1f)) { Field(value, hint, change) }
         Spacer(Modifier.width(8.dp))
         Btn("Добавить", enabled = value.isNotBlank(), modifier = Modifier.padding(top = 8.dp)) { add(value) }
     }

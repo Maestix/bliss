@@ -1331,12 +1331,16 @@ impl Engine {
         }
         let found = subscription::links_in(text);
         let mut added = 0;
+        let (mut known, mut full) = (0, false);
+        let first = self.profile.servers.len();
         for link in found.links {
-            if MAX_PROFILE_SERVERS <= self.profile.servers.len() {
-                break;
-            }
             if self.profile.servers.iter().any(|entry| entry.link == link) {
+                known += 1;
                 continue;
+            }
+            if MAX_PROFILE_SERVERS <= self.profile.servers.len() {
+                full = true;
+                break;
             }
             self.profile.servers.push(ServerEntry {
                 link,
@@ -1347,18 +1351,27 @@ impl Engine {
             added += 1;
         }
         if added == 0 {
-            let why = if found.foreign > 0 {
-                "Такой протокол движок xray не знает"
+            // Said by what was found: a link already in the list used to
+            // read as «no link here», which sent the person looking for one.
+            let why = if full {
+                format!("В списке уже {MAX_PROFILE_SERVERS} серверов — больше не поместится")
+            } else if known == 1 {
+                "Этот сервер уже есть в списке".to_owned()
+            } else if known > 1 {
+                "Все эти серверы уже есть в списке".to_owned()
+            } else if found.foreign > 0 {
+                "Такой протокол движок xray не знает".to_owned()
             } else if found.broken > 0 {
-                "Ссылка не читается"
+                "Ссылка не читается".to_owned()
             } else {
-                "Здесь нет ссылки на сервер или подписку"
+                "Здесь нет ссылки на сервер или подписку".to_owned()
             };
-            self.toast(why, true, false);
+            self.toast(&why, known == 0 || full, false);
             return;
         }
         if self.selected.is_none() {
-            self.selected = self.profile.servers.last().map(|e| e.link.clone());
+            // The first of them: it is the one on top of what was added.
+            self.selected = self.profile.servers.get(first).map(|e| e.link.clone());
         }
         self.save();
         self.reparse();
@@ -3173,6 +3186,51 @@ mod tests {
         // And the screens' heart is by hand without saying so.
         let c: UiCommand = serde_json::from_str(r#"{"cmd":"disconnect"}"#).unwrap();
         assert!(matches!(c, UiCommand::Disconnect { by_hand: true }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A paste says what it found: a server already listed is named as
+    /// such, not as «no link here», and the first of new ones is chosen.
+    #[tokio::test]
+    async fn a_paste_says_what_it_found() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-paste-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        let link = |n: u8| {
+            format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}")
+        };
+        engine.import(&[link(1), link(2)].join("\n"));
+        assert_eq!(
+            engine.selected.as_deref(),
+            Some(link(1).as_str()),
+            "the first added"
+        );
+        let said = |e: &Engine| e.toast.as_ref().map(|t| (t.text.clone(), t.bad));
+        engine.import(&link(1));
+        assert_eq!(
+            said(&engine),
+            Some(("Этот сервер уже есть в списке".to_owned(), false))
+        );
+        engine.import(&[link(1), link(2)].join("\n"));
+        assert_eq!(
+            said(&engine).unwrap().0,
+            "Все эти серверы уже есть в списке"
+        );
+        engine.import("просто текст");
+        assert_eq!(
+            said(&engine),
+            Some(("Здесь нет ссылки на сервер или подписку".to_owned(), true))
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -101,6 +101,10 @@ fun AppIcon(pkg: String, label: String, size: Dp = 40.dp) {
 object Bypass {
     private fun file(context: Context) = File(context.filesDir, "bypass.txt")
 
+    /** Moves with every change, so a screen that shows the list reads it again. */
+    private val changes = androidx.compose.runtime.mutableIntStateOf(0)
+    val version: Int get() = changes.intValue
+
     fun read(context: Context): Set<String> = try {
         file(context).readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     } catch (_: Exception) {
@@ -114,6 +118,7 @@ object Bypass {
         val tmp = File(context.filesDir, "bypass.txt.new")
         tmp.writeText(now.sorted().joinToString("\n"))
         tmp.renameTo(target)
+        changes.intValue++
         TunnelService.rebuild(context)
     }
 }
