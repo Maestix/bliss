@@ -555,5 +555,33 @@ and for what turned up to be fixed. What was, each in a commit of its own:
 Left as found: the frame still carries the whole server list every second
 while a screen is open.
 
+## 0.4.0: following the phone
+
+Asked for by the user after 0.3.0, as the design had them:
+
+- **A frame is sent in parts.** A line holds only the top-level parts that
+  changed since the screen's last one (`Sent`), the first after a hello
+  holds all; the screen lays each over what it has (`applyPatch`), so the
+  server list and the rules are parsed, and recomposed, only when they
+  change — no longer with every tick of the numbers.
+- **«Поделиться журналом»** on the journal tab: the engine writes
+  journal.txt with every server address, SNI, subscription host, link,
+  UUID and key taken out (report.rs), and the screen hands it to Android's
+  share sheet. 0.2.9's Google is why: nobody could tell which change
+  brought it back.
+- **«Автовыбор»**: the fastest server a page loads through, the next one
+  over the same TUN when it fails at a start, a switch, or when a screen
+  comes on and nothing answers. Measured then and never on a timer.
+- **Networks** (networks.rs): connect, stay off or leave it to the heart,
+  and a preset, per network — mobile data, any Wi-Fi, a Wi-Fi by name with
+  location permission, asked for on a tap. The service watches the default
+  network with a callback; told to stay off, it keeps «Ждёт другой сети»
+  so it sees the next one. A Wi-Fi behind a captive portal is connected
+  once signed into. None of it works with bliss off and no screen open:
+  no process of bliss's is there to see the network.
+
+The desktop got the name out of the connection under TUN the same day
+(AGENTS.md §9).
+
 Build: `ANDROID_NDK_HOME=… android/build-native.sh`, then
 `gradle assembleRelease` in `android/` (AGP 8.13, Gradle 8.14, JDK 17+).
