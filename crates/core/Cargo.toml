@@ -2,6 +2,7 @@
 name = "bliss-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Inbounds, routing, relay and the connection table — everything that stays when the engine is swapped"
 

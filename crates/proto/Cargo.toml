@@ -2,6 +2,7 @@
 name = "bliss-proto"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Wire-level config types shared by the bliss core and its UI"
 

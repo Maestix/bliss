@@ -2,6 +2,7 @@
 name = "bliss-tun"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "The TUN adapter: Wintun, a userspace stack, and its traffic handed to the same outbound as every other inbound"
 
