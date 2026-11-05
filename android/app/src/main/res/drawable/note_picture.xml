@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The notification's night scene in a light shade: the status card's own
+     picture, on the card's own ground (note_card), its edges faded to that
+     ground's colour. drawable-night has the other. -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/scene" />

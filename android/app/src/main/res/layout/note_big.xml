@@ -22,7 +22,7 @@
         android:adjustViewBounds="true"
         android:contentDescription="@null"
         android:scaleType="fitEnd"
-        android:src="@drawable/scene" />
+        android:src="@drawable/note_picture" />
 
     <ImageView
         android:layout_width="170dp"
