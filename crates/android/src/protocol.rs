@@ -57,6 +57,9 @@ pub struct Frame {
     /// Every category in the rule sets, `geosite:…` then `geoip:…`, only
     /// while the rule editor asks (`UiCommand::GeoNames`).
     pub categories: Option<Vec<String>>,
+    /// Counts the journals written for sharing: a new number means
+    /// `journal.txt` is ready to be sent.
+    pub journal: u64,
 }
 
 /// The rule sets: where from, what is here, and a fetch under way.
@@ -275,6 +278,9 @@ pub enum UiCommand {
     GeoNames {
         open: bool,
     },
+    /// «Поделиться журналом»: the journal with every secret taken out,
+    /// written to `journal.txt` beside the profile (`Frame::journal`).
+    ShareLog,
 }
 
 /// The action a word names; anything unknown goes through the tunnel.

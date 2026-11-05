@@ -40,6 +40,8 @@ data class Frame(
     val geo: GeoView = GeoView(),
     /** Every geosite:/geoip: category, only while the rule editor asks. */
     val categories: List<String>? = null,
+    /** Counts the journals written for sharing; a new number: journal.txt is ready. */
+    val journal: Long = 0,
     /** Not from the engine: whether the socket is up at all. */
     val connected: Boolean = false,
 )
@@ -149,6 +151,7 @@ fun applyPatch(prev: Frame, o: JSONObject): Frame {
                     g.optBoolean("auto", true), g.long("ip"), g.long("site"), g.long("updated"), g.long("fetching"), g.str("problem"),
                 )
             } ?: GeoView())
+            "journal" -> f.copy(journal = o.optLong(key))
             "categories" -> f.copy(categories = if (o.isNull(key)) null else o.optJSONArray(key).strings())
             else -> f
         }

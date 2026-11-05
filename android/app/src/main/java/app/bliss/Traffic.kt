@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,6 +107,24 @@ fun Traffic(frame: Frame, c: Commands, back: () -> Unit) {
             }
         } else {
             val lines = frame.log.orEmpty()
+            // Asked here, written by the engine with the secrets taken out
+            // (report.rs), sent through Android's share sheet.
+            var asked by remember { mutableStateOf<Long?>(null) }
+            LaunchedEffect(frame.journal) {
+                val before = asked ?: return@LaunchedEffect
+                if (frame.journal <= before) return@LaunchedEffect
+                asked = null
+                val text = try { java.io.File(context.filesDir, "journal.txt").readText() } catch (_: Exception) { return@LaunchedEffect }
+                val head = "bliss ${BuildConfig.VERSION_NAME} на Android ${android.os.Build.VERSION.RELEASE}\n"
+                val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "Журнал bliss")
+                    .putExtra(android.content.Intent.EXTRA_TEXT, head + text)
+                context.startActivity(android.content.Intent.createChooser(send, "Поделиться журналом"))
+            }
+            Row(Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("ссылки, ключи и адреса серверов не попадут", style = T.tiny.copy(fontSize = 12.sp), modifier = Modifier.weight(1f))
+                Btn("Поделиться", accent = false, icon = Icons.Share) { asked = frame.journal; c("share_log") }
+            }
             LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp).clip(RoundedCornerShape(16.dp)).background(C.Sunk).padding(8.dp)) {
                 items(lines.asReversed()) { line ->
                     val color = when {
