@@ -227,8 +227,16 @@ cargo build -p bliss         # target/debug/bliss.exe
   A key of each run's own would have meant uninstalling for every update.
   Checked here: the `.deb` built from this container's build installed
   through apt with its capability and came off clean, and the APK signed
-  with the committed key. The workflow itself has not run: actionlint could
-  not be installed here, and no tag has been pushed.
+  with the committed key. First run on 5 November, v0.5.0: every job green
+  at the first try (Linux 5 min, Android 8, Windows 14; 9 min in all with
+  the caches warm). **The tag is the user's to push**: from the cloud
+  container a tag push is refused (403) and so is a force push, so a
+  release is `git tag vX.Y.Z <commit> && git push origin vX.Y.Z` on their
+  machine, after the version is raised in Cargo.toml (`[workspace.package]`)
+  and android/app/build.gradle.kts (`versionCode`, `versionName`). Commit
+  messages carry no `Claude-Session:` line: the user asked for the session
+  link to be taken out of every message and the tag's, which took a
+  history rewrite on their side.
 - **Working from Linux, check Windows' build too.** A test in `stack.rs`
   that used `Gateway::for_tests` — Linux's alone — without
   `#[cfg(target_os = "linux")]` passed every run in a Linux container and
