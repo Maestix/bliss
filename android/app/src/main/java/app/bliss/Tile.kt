@@ -51,7 +51,7 @@ class Tile : TileService() {
 
     override fun onClick() {
         if (state == "on" || state == "busy") {
-            Native.disconnect()
+            Native.disconnect(true)
             return
         }
         if (VpnService.prepare(this) != null) {

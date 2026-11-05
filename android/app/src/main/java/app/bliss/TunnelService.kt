@@ -54,6 +54,12 @@ class TunnelService : VpnService() {
          *  engine itself, which is what lets rules see sites by name
          *  (`DNS_ADDRESS` in crates/android/src/engine.rs). */
         const val DNS = "172.19.0.2"
+        /** How long a network has to hold before it is said to the engine.
+         *  Moving between networks Android calls back several times — the
+         *  old one lost, the new one, sometimes the old one again — and each
+         *  said at once was a move with its rule acted on: bliss switched on
+         *  and off and on, and a heart pressed in the middle was overruled. */
+        private const val SETTLE_MS = 1500L
         private const val CHANNEL = "tunnel"
         private const val NOTE = 1
         private const val PAUSE_MS = 5 * 60 * 1000L
@@ -131,9 +137,16 @@ class TunnelService : VpnService() {
     }
 
     private var lastCaps: NetworkCapabilities? = null
+    private val settled = Runnable { report(lastCaps) }
 
+    /** A change, said once the network has held for `SETTLE_MS`. */
     private fun said(caps: NetworkCapabilities?) {
         lastCaps = caps
+        handler.removeCallbacks(settled)
+        handler.postDelayed(settled, SETTLE_MS)
+    }
+
+    private fun report(caps: NetworkCapabilities?) {
         val kind = when {
             caps == null -> null
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
@@ -171,11 +184,11 @@ class TunnelService : VpnService() {
                 val wasResting = resumeAt != null || waitingOn != null
                 stopPause()
                 waitingOn = null
-                Native.disconnect()
+                Native.disconnect(true)
                 if (wasResting) leaveForeground()
             }
             PAUSE -> pause()
-            NETWORK -> { lastNetwork = ""; said(lastCaps) }
+            NETWORK -> { lastNetwork = ""; handler.removeCallbacks(settled); report(lastCaps) }
             REBUILD -> if (foreground && resumeAt == null && (lastState == "on" || lastState == "busy")) connect()
             // CONNECT, RESUME, or null when Android's always-on VPN starts the service.
             else -> connect()
@@ -195,7 +208,7 @@ class TunnelService : VpnService() {
         resumeAt = SystemClock.elapsedRealtime() + PAUSE_MS
         handler.removeCallbacks(resume)
         handler.postDelayed(resume, PAUSE_MS)
-        Native.disconnect()
+        Native.disconnect(false)
         enterForeground(Note.Paused(resumeAt!!))
     }
 
@@ -255,22 +268,26 @@ class TunnelService : VpnService() {
             TileService.requestListeningState(this, ComponentName(this, Tile::class.java))
         }
         // What the network asks — connect, or stay off — once per network.
+        // A TUN handed over that the engine has not answered yet is a start
+        // under way, whatever the frame's state still says: a second start
+        // on top of it restarted the first.
+        val starting = ticket > 0 && frame.ticket < ticket
         if (frame.wishId > lastWish) {
             lastWish = frame.wishId
             val name = frame.network?.name ?: ""
             when (frame.wish) {
-                "on" -> if (frame.state != "on" && frame.state != "busy" && resumeAt == null && prepare(this) == null) {
+                "on" -> if (!starting && frame.state != "on" && frame.state != "busy" && resumeAt == null && prepare(this) == null) {
                     connect()
                     return
                 }
-                "back" -> if (waitingOn != null && prepare(this) == null) {
+                "back" -> if (!starting && waitingOn != null && prepare(this) == null) {
                     connect()
                     return
                 }
                 "off" -> if (!isLockdownEnabled && (frame.state == "on" || frame.state == "busy" || waitingOn != null)) {
                     ticket = 0
                     waitingOn = name
-                    Native.disconnect()
+                    Native.disconnect(false)
                     enterForeground(Note.Waiting(name))
                     return
                 }
@@ -438,7 +455,7 @@ class TunnelService : VpnService() {
     override fun onRevoke() {
         // Another VPN took over, or the person revoked consent.
         stopPause()
-        Native.disconnect()
+        Native.disconnect(false)
         super.onRevoke()
     }
 

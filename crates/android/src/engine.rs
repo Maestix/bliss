@@ -527,6 +527,9 @@ struct Engine {
     /// What the network asks of the service (`Frame::wish`).
     wish: Option<&'static str>,
     wishes: u64,
+    /// Switched off by the person: no network's rule switches the tunnel
+    /// on until they do (`UiCommand::Disconnect`).
+    held_off: bool,
 }
 
 impl Engine {
@@ -599,6 +602,7 @@ impl Engine {
             network: None,
             wish: None,
             wishes: 0,
+            held_off: false,
         };
         engine.bridge = free_port().unwrap_or(engine.profile.engine.bridge_port);
         engine.settle_protocols();
@@ -652,6 +656,7 @@ impl Engine {
         match command {
             Cmd::Connect(fd, ticket) => {
                 self.ticket = self.ticket.max(ticket);
+                self.held_off = false;
                 self.connect(fd);
             }
             Cmd::Ui(command) => self.ui(command),
@@ -812,7 +817,14 @@ impl Engine {
                     self.check_servers(Some(index));
                 }
             }
-            UiCommand::Disconnect => self.disconnect(),
+            UiCommand::Disconnect { by_hand } => {
+                // Switched off by the person: a network's «Включать bliss»
+                // waits until they switch it on again. It used to win at the
+                // next network report, and a heart pressed while the phone
+                // moved between networks was undone at once.
+                self.held_off |= by_hand;
+                self.disconnect();
+            }
             UiCommand::Rule { index, on } => {
                 if let Some(rule) = self.profile.routing.rules.get_mut(index) {
                     rule.enabled = on;
@@ -1940,6 +1952,7 @@ impl Engine {
                 );
                 None
             }
+            "on" if self.held_off => None,
             "on" => Some("on"),
             "off" => Some("off"),
             // A network that asks nothing, moved onto: a tunnel that waited
@@ -3110,6 +3123,56 @@ mod tests {
         drop(engine);
         let engine = load();
         assert_eq!(engine.current().map(|(i, _)| i), Some(0), "gone: the first");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Switched off by hand, bliss stays off whatever a network's rule says,
+    /// until the person switches it on again; the service's own stops — a
+    /// network's «Выключать», a pause — do not hold it off.
+    #[tokio::test]
+    async fn the_heart_switched_off_outweighs_a_networks_rule() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        for id in ["mobile", "wifi"] {
+            engine.ui(UiCommand::SetNetwork {
+                id: id.to_owned(),
+                connect: "on".to_owned(),
+                preset: None,
+                server: None,
+            });
+        }
+        let seen = |kind: &str| UiCommand::Network {
+            kind: Some(kind.to_owned()),
+            ssid: None,
+            captive: false,
+        };
+        engine.ui(UiCommand::Disconnect { by_hand: true });
+        engine.ui(seen("wifi"));
+        engine.ui(seen("mobile"));
+        assert_eq!(engine.wishes, 0, "off by hand: no rule switches it on");
+        // The person switches it on: the rules speak again.
+        let fd = std::os::fd::OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        engine.obey(Cmd::Connect(fd, 1));
+        engine.ui(seen("wifi"));
+        assert_eq!((engine.wish, engine.wishes), (Some("on"), 1));
+        // A stop of the service's own holds nothing off.
+        engine.ui(UiCommand::Disconnect { by_hand: false });
+        engine.ui(seen("mobile"));
+        assert_eq!((engine.wish, engine.wishes), (Some("on"), 2));
+        // And the screens' heart is by hand without saying so.
+        let c: UiCommand = serde_json::from_str(r#"{"cmd":"disconnect"}"#).unwrap();
+        assert!(matches!(c, UiCommand::Disconnect { by_hand: true }));
         let _ = std::fs::remove_dir_all(dir);
     }
 
