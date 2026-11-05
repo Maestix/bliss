@@ -610,3 +610,13 @@ Asked for by the user after the first release built by GitHub Actions.
   «ничего не делаю»), and the card's text says in one sentence what it does
   and that it works until bliss is switched off by its button. The main
   screen says «нажмите, чтобы подключиться».
+
+## 0.5.2: the server in use, kept
+
+The user found the server changing between restarts. `selected` was
+written on a tap alone; «Автовыбор», a failover and a network's rule moved
+the server without it, so the next start of the tunnel's process came back
+on the one picked by hand before. Every change now goes through `remember`,
+and a deleted server takes the file with it
+(`the_server_in_use_outlives_a_restart`). The desktop learnt the same, and
+stars, in the same release (AGENTS.md §5).

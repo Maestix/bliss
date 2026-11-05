@@ -161,10 +161,7 @@ pub struct ServerRow {
 /// A server's key in the frame (`ServerRow::key`): FNV-1a over its link, so
 /// the same in every run and nothing of the link read back from it.
 pub fn server_key(link: &str) -> String {
-    let hash = link.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    });
-    format!("{hash:016x}")
+    bliss_proto::link_key(link)
 }
 
 #[derive(Debug, Clone, Serialize)]

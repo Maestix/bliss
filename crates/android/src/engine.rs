@@ -946,7 +946,7 @@ impl Engine {
             }
             self.tried.clear();
             if let Some(index) = self.auto_pick() {
-                self.selected = Some(self.profile.servers[index].link.clone());
+                self.remember(self.profile.servers[index].link.clone());
             }
         }
         let Some((_, server)) = self.current() else {
@@ -1169,7 +1169,7 @@ impl Engine {
             if let Some(index) = self.auto_pick() {
                 let link = self.profile.servers[index].link.clone();
                 if self.selected.as_deref() != Some(link.as_str()) {
-                    self.selected = Some(link);
+                    self.remember(link);
                     self.switch();
                 }
             }
@@ -1214,7 +1214,7 @@ impl Engine {
         self.checks.insert(link.to_owned(), None);
         match self.auto_pick() {
             Some(index) if self.running.is_some() => {
-                self.selected = Some(self.profile.servers[index].link.clone());
+                self.remember(self.profile.servers[index].link.clone());
                 self.switch();
             }
             _ => {
@@ -1244,6 +1244,16 @@ impl Engine {
         });
     }
 
+    /// The server in use, kept on disk the moment it changes, however it
+    /// changed — a tap, «Автовыбор», a failover, a network's rule — so the
+    /// next start of the tunnel's process shows and takes the same one. It
+    /// was written on a tap alone, and after «Автовыбор» had moved on, a
+    /// restart came back on the server picked by hand days before.
+    fn remember(&mut self, link: String) {
+        let _ = std::fs::write(self.paths.selected(), &link);
+        self.selected = Some(link);
+    }
+
     fn select(&mut self, index: usize) {
         let Some(entry) = self.profile.servers.get(index) else {
             return;
@@ -1252,8 +1262,7 @@ impl Engine {
             self.toast("Эта ссылка не читается", true, false);
             return;
         }
-        self.selected = Some(entry.link.clone());
-        let _ = std::fs::write(self.paths.selected(), &entry.link);
+        self.remember(entry.link.clone());
         if self.running.is_some() {
             self.switch();
         } else if self.state == State::Failed {
@@ -1321,6 +1330,7 @@ impl Engine {
                 link,
                 name: None,
                 group: None,
+                favorite: false,
             });
             added += 1;
         }
@@ -1435,6 +1445,7 @@ impl Engine {
                                 link,
                                 name: None,
                                 group: Some(id.clone()),
+                                favorite: false,
                             }),
                     );
                 if self.selected.is_none() {
@@ -2153,6 +2164,8 @@ impl Engine {
         }
         if let Some(link) = &self.selected {
             let _ = std::fs::write(self.paths.selected(), link);
+        } else {
+            let _ = std::fs::remove_file(self.paths.selected());
         }
     }
 
@@ -3065,6 +3078,38 @@ mod tests {
         // And the rules outlive the process.
         let saved = geo::Settings::load(&dir);
         assert_eq!(saved.networks.len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The server in use is on disk as soon as it changes, and the next
+    /// start of the tunnel's process takes it up; deleted, it is forgotten.
+    #[tokio::test]
+    async fn the_server_in_use_outlives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = || Paths {
+            files: dir.clone(),
+            libs: dir.clone(),
+            socket: dir.join("s"),
+        };
+        let load = || {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (frames, _) = watch::channel(Frame::default());
+            Engine::load(paths(), tx.downgrade(), frames)
+        };
+        let link = |n: u8| {
+            format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}")
+        };
+        let mut engine = load();
+        engine.import(&[link(1), link(2), link(3)].join("\n"));
+        engine.remember(link(3));
+        drop(engine);
+        let mut engine = load();
+        assert_eq!(engine.current().map(|(i, _)| i), Some(2), "taken up again");
+        engine.delete(2);
+        drop(engine);
+        let engine = load();
+        assert_eq!(engine.current().map(|(i, _)| i), Some(0), "gone: the first");
         let _ = std::fs::remove_dir_all(dir);
     }
 

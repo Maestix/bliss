@@ -1169,7 +1169,7 @@ fn TrayMenu(frame: Frame) -> Element {
             div { class: "tray-sep" }
             span { class: "tray-head", "Серверы" }
             div { class: "tray-list",
-                for (index, server) in frame.servers.iter().enumerate() {
+                for (index, server) in favorites_first(&frame.servers) {
                     div {
                         key: "{index}",
                         // Marked by class, as everywhere else here: an inline
@@ -2875,6 +2875,15 @@ fn ServerList(frame: Frame) -> Element {
                     }
                 }
                 for section in sections {
+                    if section.starred {
+                        div {
+                            key: "head-{section.starred}",
+                            style: "display:flex;align-items:center;gap:9px;margin-top:4px;\
+                                    padding:9px 10px",
+                            crate::icons::Star { size: 15, color: ACCENT, filled: true }
+                            span { style: "font-size:14px;font-weight:700", "Избранное" }
+                        }
+                    }
                     // A subscription's servers sit under its name, closed
                     // unless the server in use is among them.
                     if let Some((id, name)) = section.group.clone() {
@@ -5184,6 +5193,34 @@ mod tests {
         let sections = server_sections(&servers, &chosen);
         assert!(!sections[1].open && sections[1].has_current);
         assert!(sections[2].open);
+
+        // A starred server stands first, open, and only there; the tray's
+        // menus list the starred first and keep each server's place.
+        let mut servers = servers;
+        servers[3].favorite = true;
+        servers[4].favorite = true;
+        let sections = server_sections(&servers, &Default::default());
+        let shape: Vec<(bool, Option<&str>, Vec<usize>)> = sections
+            .iter()
+            .map(|s| {
+                (
+                    s.starred,
+                    s.group.as_ref().map(|(id, _)| id.as_str()),
+                    s.rows.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (true, None, vec![3, 4]),
+                (false, None, vec![0]),
+                (false, Some("s1"), vec![1, 2]),
+            ],
+            "«Второй» had only the starred one"
+        );
+        let order: Vec<usize> = favorites_first(&servers).iter().map(|(i, _)| *i).collect();
+        assert_eq!(order, [3, 4, 0, 1, 2]);
     }
 
     #[test]
@@ -6346,10 +6383,10 @@ fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
 /// `CONNECTION_COLUMNS`. This is the shape before the header has measured the
 /// list; after that `ServerColumns` gives it in pixels.
 const SERVER_COLUMNS: &str =
-    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 30px;gap:12px";
+    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 60px;gap:12px";
 const SERVER_KIND: f64 = 136.0;
-/// Ping, the bin, and the four gaps between the five columns.
-const SERVER_FIXED: f64 = 78.0 + 30.0 + 4.0 * 12.0;
+/// Ping, the star and the bin, and the four gaps between the five columns.
+const SERVER_FIXED: f64 = 78.0 + 60.0 + 4.0 * 12.0;
 /// The row's padding on either side, as the header has it.
 const SERVER_PAD: f64 = 10.0;
 /// Narrower than this, a name or an address is no longer worth a column.
@@ -6397,7 +6434,7 @@ impl ServerColumns {
     /// indented by 20px, loses them from the address and not off its end.
     fn css(&self) -> String {
         format!(
-            "grid-template-columns:{}px minmax(0,1fr) {}px 78px 30px;gap:12px",
+            "grid-template-columns:{}px minmax(0,1fr) {}px 78px 60px;gap:12px",
             self.name, self.kind
         )
     }
@@ -6422,9 +6459,12 @@ enum ColumnBorder {
     Kind,
 }
 
-/// A run of the server list: the servers added by hand, or one subscription's.
+/// A run of the server list: the starred servers, the servers added by hand,
+/// or one subscription's.
 #[derive(Clone, Debug, PartialEq)]
 struct Section {
+    /// The starred servers, wherever they came from: always open, first.
+    starred: bool,
     /// The subscription's id and name; `None` for servers added by hand.
     group: Option<(String, String)>,
     /// Places in `frame.servers`, which is what a click selects by.
@@ -6433,8 +6473,20 @@ struct Section {
     has_current: bool,
 }
 
-/// The server list in sections: servers added by hand first, then each
-/// subscription's under its name, in the order they first appear.
+/// The servers with their places in the list, the starred ones first and the
+/// rest in their order: the tray's menus list them so.
+pub(crate) fn favorites_first(
+    servers: &[crate::engine::ServerRow],
+) -> Vec<(usize, &crate::engine::ServerRow)> {
+    let mut rows: Vec<_> = servers.iter().enumerate().collect();
+    rows.sort_by_key(|(_, server)| !server.favorite);
+    rows
+}
+
+/// The server list in sections: the starred ones first, from wherever they
+/// came, then the servers added by hand, then each subscription's under its
+/// name, in the order they first appear. A starred server is not shown again
+/// in its own section.
 ///
 /// A subscription can bring hundreds of servers, so its group starts closed,
 /// unless the server in use is in it; a group someone opened or closed stays
@@ -6443,15 +6495,31 @@ fn server_sections(
     servers: &[crate::engine::ServerRow],
     open: &std::collections::HashMap<String, bool>,
 ) -> Vec<Section> {
+    let starred: Vec<usize> = servers
+        .iter()
+        .enumerate()
+        .filter(|(_, server)| server.favorite)
+        .map(|(i, _)| i)
+        .collect();
     let mine: Vec<usize> = servers
         .iter()
         .enumerate()
-        .filter(|(_, server)| server.group_id.is_none())
+        .filter(|(_, server)| server.group_id.is_none() && !server.favorite)
         .map(|(i, _)| i)
         .collect();
     let mut sections = Vec::new();
+    if !starred.is_empty() {
+        sections.push(Section {
+            starred: true,
+            group: None,
+            rows: starred,
+            open: true,
+            has_current: false,
+        });
+    }
     if !mine.is_empty() {
         sections.push(Section {
+            starred: false,
             group: None,
             rows: mine,
             open: true,
@@ -6459,7 +6527,7 @@ fn server_sections(
         });
     }
     for (i, server) in servers.iter().enumerate() {
-        let Some(id) = &server.group_id else {
+        let Some(id) = server.group_id.as_ref().filter(|_| !server.favorite) else {
             continue;
         };
         let existing = sections
@@ -6471,6 +6539,7 @@ fn server_sections(
                 section.has_current |= server.current;
             }
             None => sections.push(Section {
+                starred: false,
                 group: Some((id.clone(), server.group.clone().unwrap_or_default())),
                 rows: vec![i],
                 open: false,
@@ -6511,6 +6580,9 @@ fn ServerLine(
     });
     let name = elide(&server.tag, name_letters);
     let tag = server.tag.clone();
+    let star = controller.clone();
+    let star_tag = server.tag.clone();
+    let favorite = server.favorite;
     // Indented under its subscription's name. Always present, so a changing
     // value is all the renderer ever sees here (the note at the top).
     let left = if grouped { 30 } else { 10 };
@@ -6561,6 +6633,20 @@ fn ServerLine(
                 },
                 "{ping_text(server.ping)}"
             }
+            div { style: "display:flex;justify-content:flex-end;gap:4px",
+            // Shown in full on a starred server, as the bin is on a hovered row.
+            div { class: if favorite { "srv-star on" } else { "srv-star" },
+                IconButton {
+                    title: if favorite { "Убрать из избранного" } else { "В избранное — выше всех в списке" },
+                    enabled: true,
+                    onclick: move |_| {
+                        star.send(Command::Favorite { index, tag: star_tag.clone(), on: !favorite });
+                    },
+                    icon: rsx! {
+                        crate::icons::Star { size: 14, color: if favorite { ACCENT } else { MUTED }, filled: favorite }
+                    },
+                }
+            }
             div { class: "srv-tools",
                 IconButton {
                     title,
@@ -6578,6 +6664,7 @@ fn ServerLine(
                         crate::icons::Trash { size: 14, color: if arming { BAD } else { MUTED } }
                     },
                 }
+            }
             }
         }
     }

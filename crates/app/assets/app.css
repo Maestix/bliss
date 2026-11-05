@@ -655,3 +655,8 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
   transition: background-color .14s ease, box-shadow .14s ease;
 }
 .check-row.on .check-box { background-color: var(--color-accent); box-shadow: none; }
+
+/* A server's star: faint beside an ordinary row, as the bin is, and in full
+   on a starred server or a hovered row. */
+.srv-star { opacity: .4; transition: opacity .14s ease; }
+.srv-star.on, .srv:hover .srv-star { opacity: 1; }

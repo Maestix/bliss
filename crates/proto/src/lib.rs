@@ -19,5 +19,5 @@ pub use routing::{Action, Preset, Routing, Rule};
 pub use server::{
     Address, Fingerprint, Flow, Hidden, KcpHeader, Login, Long, PrivateKey, Protocol, PublicKey,
     Reality, Security, ServerConfig, ServerEntry, ShortId, TcpHeader, Tls, Transport, UserId,
-    VmessCipher, WireGuard,
+    VmessCipher, WireGuard, link_key,
 };
