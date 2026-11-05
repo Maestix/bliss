@@ -210,6 +210,14 @@ cargo build -p bliss         # target/debug/bliss.exe
   then replace the `.snap` (or rerun that one test with `INSTA_UPDATE=always`).
   Never accept a snapshot you have not read.
 - A running `bliss.exe` locks the binary: close it before `cargo build`.
+- **Working from Linux, check Windows' build too.** A test in `stack.rs`
+  that used `Gateway::for_tests` — Linux's alone — without
+  `#[cfg(target_os = "linux")]` passed every run in a Linux container and
+  broke the user's `cargo test` on Windows on 5 November. With
+  `rustup target add x86_64-pc-windows-gnu` and mingw's gcc (`apt-get
+  install gcc-mingw-w64-x86-64`, for ring's C), `cargo clippy --target
+  x86_64-pc-windows-gnu --all-targets` type-checks every crate, the window
+  included; it links and runs nothing.
 
 **On Linux, in WSL.** The user's WSL Ubuntu 24.04 is the Linux this port was
 built and tested on. Its default Rust (1.86) is too old for the lockfile, so
