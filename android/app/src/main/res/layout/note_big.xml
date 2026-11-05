@@ -2,12 +2,14 @@
 <!-- The notification open: the night scene of the status card on the right
      (faded to the card's colour at its left and top edges, so it has no
      edge here either), the state, the server, the clock, and three pills.
-     The same room on both sides of the content. The card itself stands
-     right of the notification's middle, under the app's name: Android 12
-     and later keep the column under the app's icon for themselves, and
-     nothing drawn there is shown. Moved 8dp left inside the card to make
-     up for it, the content stood off the card's own middle instead (seen
-     on the user's Pixel 7). -->
+     Android 12 and later start this view under the app's name and keep the
+     column under its icon, some 73dp, for themselves: nothing drawn there
+     is shown. In a dark shade, with no card, the words start where the
+     app's name does and as much is left free on the right (values-night's
+     `note_start`, `note_end`), which sets the content in the notification's
+     middle with the scene in the room on the right; measured on the user's
+     Pixel 7. A light shade keeps the card and the same room on both sides
+     inside it. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -35,9 +37,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="14dp"
+        android:paddingStart="@dimen/note_start"
         android:paddingTop="14dp"
-        android:paddingEnd="14dp"
+        android:paddingEnd="@dimen/note_end"
         android:paddingBottom="12dp">
 
         <LinearLayout
