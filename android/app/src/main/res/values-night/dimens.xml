@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- No card in a dark shade: the words start where the app's name does,
+         and the right keeps as much free as Android's column under the icon
+         on the left (about 73dp, less the 16dp Android leaves there), so the
+         content stands in the notification's middle (note_big.xml). -->
+    <dimen name="note_start">0dp</dimen>
+    <dimen name="note_end">57dp</dimen>
+</resources>

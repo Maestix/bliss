@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The open notification's room either side of its content, on the card's
+         own ground in a light shade (note_big.xml). -->
+    <dimen name="note_start">14dp</dimen>
+    <dimen name="note_end">14dp</dimen>
+</resources>
