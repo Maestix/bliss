@@ -234,6 +234,25 @@ cargo +1.97.0 test -p bliss-tun --test netns -- --ignored --nocapture
 cargo +1.97.0 build --release -p bliss   # $HOME/bliss-target/release/bliss, 16 MB
 ```
 
+- **`./build-linux.sh` builds on any common distribution** — asked for by the
+  user, who builds on Arch, after a build that stopped halfway on a library
+  it lacked. It checks a C compiler, pkg-config, WebKitGTK 4.1, GTK 3,
+  libsoup 3, OpenSSL (dioxus-desktop's `native-tls`; missing from the list
+  below, which the user's WSL happened to have), libxdo (by linking `-lxdo`,
+  since Ubuntu's ships no `.pc`) and Rust 1.88+ (the locked dependencies'
+  highest `rust-version`, also `rust-version` in Cargo.toml); offers to
+  install what is missing through apt-get, dnf, pacman or zypper, with the
+  package names of each (Arch's checked against archlinux.org's package
+  search on 5 November, Rust from `pacman -S rust` there rather than
+  rustup); then builds `--release --locked`, with WSL's target dir and
+  kache switched off when run from `/mnt/…`, and names the `setcap` line.
+  `--check` only reports, `--yes` installs without asking, `--debug`.
+  Run whole in this container (Ubuntu 24.04 without the window's
+  libraries): it installed them through apt and built, and the window's
+  103 tests then ran here for the first time. The dnf and zypper names are
+  Tauri's documented lists and were not run. Never edit the script while it
+  runs: bash reads it as it goes, and an edit made during the build had it
+  resume mid-line after cargo finished (a syntax error at line 241).
 - **The window needs GTK's and WebKitGTK's development packages**, which take
   `sudo` and so the user's password: `build-essential pkg-config
   libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libxdo-dev
