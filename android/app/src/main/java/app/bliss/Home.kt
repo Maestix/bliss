@@ -95,7 +95,7 @@ fun Home(frame: Frame, heart: () -> Unit, openServer: () -> Unit, openTraffic: (
                         "busy" -> Steps(frame.step)
                         "on" -> Uptime(frame.since)
                         "failed" -> Text(frame.error ?: "", style = T.body.copy(fontSize = 14.sp, color = C.N400))
-                        else -> Text(if (frame.servers.isEmpty()) "сначала добавьте сервер" else "нажмите на сердечко",
+                        else -> Text(if (frame.servers.isEmpty()) "сначала добавьте сервер" else "нажмите, чтобы подключиться",
                             style = T.body.copy(fontSize = 14.sp, color = C.N400))
                     }
                 }

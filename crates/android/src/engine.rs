@@ -71,6 +71,8 @@ const HISTORY: usize = 22;
 /// Servers in a profile however they arrive: the desktop's cap
 /// (`MAX_PROFILE_SERVERS` in crates/app/src/profile_file.rs).
 const MAX_PROFILE_SERVERS: usize = 5_000;
+/// Servers with a star, at most: anything that grows has a cap (AGENTS.md §5).
+const MAX_FAVORITES: usize = 256;
 /// A server list older than this is fetched again when the engine starts.
 const STALE: i64 = 12 * 3600;
 
@@ -858,6 +860,7 @@ impl Engine {
                 id,
                 connect,
                 preset,
+                server,
             } => {
                 let connect = match &*connect {
                     "on" | "off" => connect,
@@ -869,10 +872,12 @@ impl Engine {
                         id,
                         connect,
                         preset,
+                        server: server.filter(|s| !s.is_empty()),
                     },
                 );
                 self.settings.save(&self.paths.files);
             }
+            UiCommand::Favorite { key, on } => self.favorite(key, on),
             UiCommand::SaveRule {
                 index,
                 name,
@@ -1891,7 +1896,11 @@ impl Engine {
                 id: seen.id(),
                 connect: String::new(),
                 preset: None,
+                server: None,
             });
+        if moved && let Some(server) = &rule.server {
+            self.network_server(&seen, server);
+        }
         if moved
             && let Some(preset) = &rule.preset
             && self.profile.routing.current_preset.as_ref() != Some(preset)
@@ -1933,13 +1942,92 @@ impl Engine {
         }
     }
 
+    /// The server a network asks for, taken as the phone moves onto it:
+    /// «Автовыбор», or one server by its key, the way a tap on it in the
+    /// list takes it — switching a tunnel that is up, said in a line. A
+    /// server deleted since is passed over in silence: the network's rule
+    /// still names it, and the sheet says it is gone.
+    fn network_server(&mut self, seen: &crate::networks::Seen, server: &str) {
+        if server == "auto" {
+            if !self.settings.auto_server && self.profile.servers.len() > 1 {
+                self.set_auto(true);
+                self.toast(
+                    &format!("{} — автовыбор сервера", seen.name()),
+                    false,
+                    false,
+                );
+            }
+            return;
+        }
+        let Some(index) = self.index_of_key(server) else {
+            return;
+        };
+        let link = &self.profile.servers[index].link;
+        if !self.settings.auto_server && self.selected.as_deref() == Some(link.as_str()) {
+            return;
+        }
+        let name = self.server_name(index);
+        self.set_auto(false);
+        self.select(index);
+        self.toast(&format!("{} — сервер {name}", seen.name()), false, false);
+    }
+
+    /// Where the server with this key is in the list now.
+    fn index_of_key(&self, key: &str) -> Option<usize> {
+        self.profile
+            .servers
+            .iter()
+            .position(|e| crate::protocol::server_key(&e.link) == key)
+    }
+
+    /// A server's name as the list shows it.
+    fn server_name(&self, index: usize) -> String {
+        self.servers
+            .get(index)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.tag.clone())
+            .unwrap_or_else(|| "без имени".to_owned())
+    }
+
+    /// The words for the server a network rule names.
+    fn rule_server_name(&self, server: Option<&str>) -> Option<String> {
+        match server? {
+            "auto" => Some("Автовыбор".to_owned()),
+            key => self.index_of_key(key).map(|i| self.server_name(i)),
+        }
+    }
+
+    /// A star on a server or off it. The stars are kept by key, so a list
+    /// refreshed under them keeps them; a key whose server is gone is
+    /// dropped as the next star is set, and past `MAX_FAVORITES` the oldest.
+    fn favorite(&mut self, key: String, on: bool) {
+        let keys: std::collections::HashSet<String> = self
+            .profile
+            .servers
+            .iter()
+            .map(|e| crate::protocol::server_key(&e.link))
+            .collect();
+        let favorites = &mut self.settings.favorites;
+        favorites.retain(|k| k != &key && keys.contains(k));
+        if on && keys.contains(&key) {
+            favorites.push(key);
+        }
+        while favorites.len() > MAX_FAVORITES {
+            favorites.remove(0);
+        }
+        self.settings.save(&self.paths.files);
+    }
+
     fn net_view(&self, seen: &crate::networks::Seen) -> crate::protocol::NetView {
         let rule = crate::networks::rule_for(&self.settings.networks, seen);
+        let server = rule.and_then(|r| r.server.clone());
         crate::protocol::NetView {
             id: seen.id(),
             name: seen.name(),
             connect: rule.map(|r| r.connect.clone()).unwrap_or_default(),
             preset: rule.and_then(|r| r.preset.clone()),
+            server_name: self.rule_server_name(server.as_deref()),
+            server,
             own: rule.is_some_and(|r| r.id == seen.id()),
         }
     }
@@ -2086,6 +2174,7 @@ impl Engine {
             .zip(&self.servers)
             .map(|(entry, server)| {
                 let ping = self.pings.get(&entry.link).copied();
+                let key = crate::protocol::server_key(&entry.link);
                 let (name, kind_, detail, address, udp) = match server {
                     Some(s) => (
                         s.tag.clone(),
@@ -2110,7 +2199,7 @@ impl Engine {
                     (false, None, false) => ("unknown", None),
                 };
                 ServerRow {
-                    key: crate::protocol::server_key(&entry.link),
+                    key: key.clone(),
                     name,
                     kind: kind_,
                     detail,
@@ -2128,6 +2217,7 @@ impl Engine {
                         }
                     },
                     check_ms: self.checks.get(&entry.link).copied().flatten(),
+                    favorite: self.settings.favorites.contains(&key),
                 }
             })
             .collect();
@@ -2266,6 +2356,8 @@ impl Engine {
                     name: net_name(&rule.id),
                     connect: rule.connect.clone(),
                     preset: rule.preset.clone(),
+                    server: rule.server.clone(),
+                    server_name: self.rule_server_name(rule.server.as_deref()),
                     own: true,
                 })
                 .collect(),
@@ -2935,11 +3027,13 @@ mod tests {
             id: "wifi:Дом".to_owned(),
             connect: "off".to_owned(),
             preset: Some("Дома".to_owned()),
+            server: None,
         });
         engine.ui(UiCommand::SetNetwork {
             id: "mobile".to_owned(),
             connect: "on".to_owned(),
             preset: None,
+            server: None,
         });
         let seen = |kind: &str, ssid: Option<&str>, captive: bool| UiCommand::Network {
             kind: Some(kind.to_owned()),
@@ -2962,6 +3056,7 @@ mod tests {
             id: "wifi".to_owned(),
             connect: "on".to_owned(),
             preset: None,
+            server: None,
         });
         engine.ui(seen("wifi", Some("Кафе"), true));
         assert_eq!(engine.wishes, 2, "not into a network that leads nowhere");
@@ -2970,6 +3065,140 @@ mod tests {
         // And the rules outlive the process.
         let saved = geo::Settings::load(&dir);
         assert_eq!(saved.networks.len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A network can name a server: moving onto it takes that server (or
+    /// «Автовыбор»), once per move, and a server deleted since is passed
+    /// over. Stars follow a server by its key, outlive a refresh, are
+    /// dropped with their server, and have a cap.
+    #[tokio::test]
+    async fn a_network_takes_its_server_and_stars_have_a_cap() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-star-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Held, so that a frame sent is a frame kept.
+        let (frames, _seen) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        let link = |n: u8| {
+            format!("trojan://PPPP@203.0.113.{n}:443?security=tls&sni=www.example.net#s{n}")
+        };
+        engine.import(&[link(1), link(2), link(3)].join("\n"));
+        let key = |n: u8| crate::protocol::server_key(&link(n));
+        engine.ui(UiCommand::Select {
+            index: 0,
+            key: Some(key(1)),
+        });
+        engine.ui(UiCommand::SetNetwork {
+            id: "wifi:Дом".to_owned(),
+            connect: String::new(),
+            preset: None,
+            server: Some(key(3)),
+        });
+        engine.ui(UiCommand::SetNetwork {
+            id: "mobile".to_owned(),
+            connect: String::new(),
+            preset: None,
+            server: Some("auto".to_owned()),
+        });
+        let seen = |kind: &str, ssid: Option<&str>| UiCommand::Network {
+            kind: Some(kind.to_owned()),
+            ssid: ssid.map(str::to_owned),
+            captive: false,
+        };
+        engine.ui(seen("wifi", Some("Дом")));
+        assert_eq!(engine.selected.as_deref(), Some(link(3).as_str()));
+        assert!(!engine.settings.auto_server);
+        // Picked by hand afterwards: the same network reported again keeps it.
+        engine.ui(UiCommand::Select {
+            index: 1,
+            key: Some(key(2)),
+        });
+        engine.ui(seen("wifi", Some("Дом")));
+        assert_eq!(engine.selected.as_deref(), Some(link(2).as_str()));
+        engine.ui(seen("mobile", None));
+        assert!(engine.settings.auto_server, "«Автовыбор» on mobile data");
+        // A server deleted since: the rule still names it, and nothing moves.
+        engine.ui(UiCommand::Auto { on: false });
+        engine.delete(2);
+        engine.ui(seen("wifi", Some("Дом")));
+        assert_eq!(engine.selected.as_deref(), Some(link(2).as_str()));
+        engine.publish();
+        let net = engine
+            .frames
+            .borrow()
+            .networks
+            .iter()
+            .find(|n| n.id == "wifi:Дом")
+            .cloned();
+        assert_eq!(
+            net.and_then(|n| n.server_name),
+            None,
+            "the sheet says it is gone"
+        );
+
+        // Stars: by key, shown in the row, and gone with their server.
+        engine.ui(UiCommand::Favorite {
+            key: key(2),
+            on: true,
+        });
+        engine.ui(UiCommand::Favorite {
+            key: key(9),
+            on: true,
+        });
+        assert_eq!(
+            engine.settings.favorites,
+            [key(2)],
+            "only a server that is there"
+        );
+        engine.publish();
+        let rows = engine.frames.borrow().servers.clone();
+        assert!(
+            rows.iter()
+                .find(|r| r.key == key(2))
+                .is_some_and(|r| r.favorite)
+        );
+        assert!(
+            rows.iter()
+                .find(|r| r.key == key(1))
+                .is_some_and(|r| !r.favorite)
+        );
+        engine.ui(UiCommand::Favorite {
+            key: key(2),
+            on: false,
+        });
+        assert!(engine.settings.favorites.is_empty());
+        let many: Vec<String> = (0..MAX_FAVORITES + 10)
+            .map(|n| {
+                format!(
+                    "trojan://PPPP@10.{}.{}.1:443?security=tls&sni=a.example#m{n}",
+                    n / 250,
+                    n % 250
+                )
+            })
+            .collect();
+        engine.import(&many.join("\n"));
+        for l in &many {
+            engine.ui(UiCommand::Favorite {
+                key: crate::protocol::server_key(l),
+                on: true,
+            });
+        }
+        assert_eq!(engine.settings.favorites.len(), MAX_FAVORITES);
+        assert_eq!(
+            engine.settings.favorites[0],
+            crate::protocol::server_key(&many[10]),
+            "the oldest go first"
+        );
+        assert_eq!(geo::Settings::load(&dir).favorites.len(), MAX_FAVORITES);
         let _ = std::fs::remove_dir_all(dir);
     }
 
