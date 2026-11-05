@@ -218,6 +218,37 @@ pub fn handle() -> Option<&'static Handle> {
 
 // --- the socket -------------------------------------------------------------
 
+/// The parts of the frame a screen was last sent, each as its JSON text.
+///
+/// A frame goes out every second while a screen looks, and it carried the
+/// whole server list — up to 5 000 rows — the rules and every subscription
+/// each time, for the numbers' sake; the screen parsed and recomposed all
+/// of it. Now a line holds only the top-level parts that changed since the
+/// last one this screen got, and the screen merges it into what it has. The
+/// first line after a connection or a hello is every part.
+#[derive(Default)]
+struct Sent {
+    parts: HashMap<String, String>,
+}
+
+impl Sent {
+    /// The line to send for `frame`, or none when nothing changed.
+    fn patch(&mut self, frame: &Frame) -> Option<String> {
+        let serde_json::Value::Object(whole) = serde_json::to_value(frame).ok()? else {
+            return None;
+        };
+        let mut changed = serde_json::Map::new();
+        for (key, value) in whole {
+            let text = value.to_string();
+            if self.parts.get(&key) != Some(&text) {
+                self.parts.insert(key.clone(), text);
+                changed.insert(key, value);
+            }
+        }
+        (!changed.is_empty()).then(|| serde_json::Value::Object(changed).to_string())
+    }
+}
+
 /// The longest command a screen may send: an import of a pasted list is the
 /// longest there is, and a subscription's body is held to the same 4 MB.
 const MAX_LINE: usize = 4 << 20;
@@ -254,6 +285,9 @@ async fn listen(
             let mut line = Vec::new();
             let mut frames = frames;
             let mut full = false;
+            // What this screen was last sent, part by part: only parts that
+            // changed go out again (`patch`).
+            let mut sent = Sent::default();
             // The first frame goes out at once; then one per change.
             frames.mark_changed();
             loop {
@@ -285,6 +319,8 @@ async fn listen(
                                     };
                                     let _ = watching.send(n);
                                 }
+                                // A hello is a screen starting over: everything again.
+                                sent = Sent::default();
                                 frames.mark_changed();
                             }
                             Ok(command) => {
@@ -296,7 +332,7 @@ async fn listen(
                     changed = frames.changed() => {
                         if changed.is_err() { break; }
                         let frame = frames.borrow_and_update().clone();
-                        let Ok(mut text) = serde_json::to_string(&frame) else { continue };
+                        let Some(mut text) = sent.patch(&frame) else { continue };
                         text.push('\n');
                         if write.write_all(text.as_bytes()).await.is_err() { break; }
                     }
@@ -2163,6 +2199,24 @@ async fn handshake(host: &str, port: u16) -> Option<u32> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// A screen is sent the whole frame once, then only the parts that
+    /// changed: a tick of the numbers does not carry the server list again.
+    #[test]
+    fn a_screen_gets_only_what_changed() {
+        let mut sent = Sent::default();
+        let mut frame = Frame {
+            state: "on",
+            ..Frame::default()
+        };
+        let first: serde_json::Value = serde_json::from_str(&sent.patch(&frame).unwrap()).unwrap();
+        assert!(first.get("servers").is_some() && first.get("numbers").is_some());
+        assert_eq!(sent.patch(&frame), None, "nothing changed, nothing sent");
+        frame.numbers.down_rate = 1234;
+        let tick: serde_json::Value = serde_json::from_str(&sent.patch(&frame).unwrap()).unwrap();
+        let keys: Vec<_> = tick.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, vec!["numbers".to_owned()]);
+    }
 
     /// Work on the bridge port runs in the order the loop queued it, each
     /// turn after the one before has finished — however long that took. A
