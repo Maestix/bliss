@@ -235,7 +235,11 @@ impl Tun {
             .packets()
             .ok_or_else(|| io::Error::other("the device's packets were taken already"))?;
         let carrying = tokio::spawn(async move {
-            let carrying = Arc::new(stack::Carrying::new(serving, gateway));
+            let mut carrying = stack::Carrying::new(serving, gateway);
+            // Names out of the connections themselves, for domain and
+            // geosite rules: the desktop does not answer the machine's DNS.
+            carrying.sniff = true;
+            let carrying = Arc::new(carrying);
             if let Err(e) = stack::serve(packets, carrying).await {
                 tracing::error!("tun: {e}");
             }
