@@ -2635,7 +2635,13 @@ fn describe_conditions(rule: &bliss_proto::Rule) -> Vec<String> {
     add("домены", &rule.domain);
     add("наборы", &rule.geosite);
     add("адреса", &rule.ip);
-    add("страны", &rule.geoip);
+    // By flag and name, as the phone shows them (countries.rs).
+    let countries: Vec<String> = rule
+        .geoip
+        .iter()
+        .map(|code| crate::countries::label(code))
+        .collect();
+    add("страны", &countries);
     add("порты", &rule.port);
     add("программы", &rule.process);
     add("только", &rule.network);

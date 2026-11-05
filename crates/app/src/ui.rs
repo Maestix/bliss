@@ -105,6 +105,10 @@ const MARK_URL: &str = "url(bliss-mark.png)";
 const FONT: &[u8] = include_bytes!("../assets/comfortaa.woff2");
 /// How theme.css names the font, for `THEME_STYLES` to replace.
 const FONT_URL: &str = "url(comfortaa.woff2)";
+/// Noto Color Emoji's country flags, the phone's: Windows draws a flag as
+/// its two letters.
+const FLAGS: &[u8] = include_bytes!("../assets/noto-flags.woff2");
+const FLAGS_URL: &str = "url(noto-flags.woff2)";
 
 /// A `url(...)` holding the file's bytes, so the file ships inside bliss.exe
 /// the way the stylesheets do instead of having to sit next to it.
@@ -125,8 +129,11 @@ static STYLES: LazyLock<String> = LazyLock::new(|| {
 
 /// theme.css with the font inlined. Nothing is fetched: the window opens before
 /// the tunnel, for people whose network may well block a font CDN.
-static THEME_STYLES: LazyLock<String> =
-    LazyLock::new(|| THEME.replace(FONT_URL, &data_url("font/woff2", FONT)));
+static THEME_STYLES: LazyLock<String> = LazyLock::new(|| {
+    THEME
+        .replace(FONT_URL, &data_url("font/woff2", FONT))
+        .replace(FLAGS_URL, &data_url("font/woff2", FLAGS))
+});
 
 /// This file, so a test can check the styles in it rather than trust a rule to
 /// be remembered. See `radius_literals_match_the_design_tokens`.
@@ -4738,6 +4745,23 @@ mod tests {
         assert!(THEME.contains("--font-body: \"Comfortaa\""));
         const LICENCE: &str = include_str!("../assets/OFL-Comfortaa.txt");
         assert!(LICENCE.contains("SIL Open Font License"));
+        // And the flags, the same way, for the flag letters alone.
+        assert_eq!(
+            THEME.matches(FLAGS_URL).count(),
+            1,
+            "theme.css names the flags once"
+        );
+        assert!(
+            !THEME_STYLES.contains(FLAGS_URL),
+            "the flags were not inlined"
+        );
+        assert!(THEME.contains("unicode-range: U+1F1E6-1F1FF;"));
+        assert_eq!(&FLAGS[..4], b"wOF2");
+        const FLAG_LICENCE: &str = include_str!("../assets/OFL-NotoColorEmoji.txt");
+        assert!(
+            FLAG_LICENCE.contains("SIL Open Font License")
+                && FLAG_LICENCE.contains("Noto Color Emoji")
+        );
     }
 
     /// A table's text columns are `minmax(0, …fr)`, never a bare `fr`. A bare

@@ -902,6 +902,18 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     (д like g, т like m); the user chose it over Nunito, whose Cyrillic is
     conventional, after seeing both in the window.
 
+    **Flags are Noto Color Emoji's, as on the phone.** Windows' emoji font
+    has none, so 🇳🇱 in a server's name came out as the letters «NL»; the
+    user asked for the phone's look. `assets/noto-flags.woff2` (710 KB, COLRv1)
+    is the part of Noto Color Emoji that Google Fonts serves for U+1F1E6–1F1FF,
+    259 flags, resubset with fontTools to drop `vhea`/`vmtx`; Google's own
+    GitHub was not reachable from the container. theme.css declares it as a
+    second face of "Comfortaa", for that range alone and at every weight, so
+    nothing else in the window names it; `THEME_STYLES` inlines it as it does
+    Comfortaa, and `OFL-NotoColorEmoji.txt` stays beside it. A geoip entry in
+    a rule reads as the phone's does, flag and Russian name (`countries.rs`,
+    CLDR's names through Babel, its pseudo regions left out).
+
     **It has no tabular figures**, so every `font-variant-numeric:tabular-nums`
     in `ui.rs` — thirteen of them — has never done anything: the property asks
     for a `tnum` feature the file does not carry. Its digits run 378 to 647
