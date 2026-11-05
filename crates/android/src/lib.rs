@@ -17,6 +17,7 @@ pub mod engine;
 pub mod geo;
 pub mod logs;
 pub mod protocol;
+pub mod report;
 pub mod ui;
 
 /// The desktop's subscription fetch and list reader, used as they are rather

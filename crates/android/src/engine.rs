@@ -218,6 +218,16 @@ pub fn handle() -> Option<&'static Handle> {
 
 // --- the socket -------------------------------------------------------------
 
+/// The state in the journal's words.
+fn state_word(state: State) -> &'static str {
+    match state {
+        State::Off => "выключен",
+        State::Busy => "подключается",
+        State::On => "подключён",
+        State::Failed => "ошибка",
+    }
+}
+
 /// The parts of the frame a screen was last sent, each as its JSON text.
 ///
 /// A frame goes out every second while a screen looks, and it carried the
@@ -482,6 +492,8 @@ struct Engine {
     geo_problem: Option<String>,
     /// The categories, read once the editor asks, until it closes.
     categories: Option<Vec<String>>,
+    /// Journals written for sharing so far (`Frame::journal`).
+    journals: u64,
 }
 
 impl Engine {
@@ -547,6 +559,7 @@ impl Engine {
             geo_fetch: None,
             geo_problem: None,
             categories: None,
+            journals: 0,
         };
         engine.bridge = free_port().unwrap_or(engine.profile.engine.bridge_port);
         engine.settle_protocols();
@@ -757,6 +770,7 @@ impl Engine {
             },
             UiCommand::Table { open } => self.table_open = open,
             UiCommand::Log { open } => self.log_open = open,
+            UiCommand::ShareLog => self.share_log(),
             UiCommand::SaveRule {
                 index,
                 name,
@@ -1643,6 +1657,80 @@ impl Engine {
             })
     }
 
+    // --- the journal, shared ----------------------------------------------------
+
+    /// Write the journal for «Поделиться журналом»: a few lines on the state
+    /// of things, then the log, with servers, subscriptions, links and keys
+    /// taken out (report.rs). Into `journal.txt`, which the screens read and
+    /// hand to Android's share sheet; the frame only says it is ready.
+    fn share_log(&mut self) {
+        let mut servers = Vec::new();
+        for server in self.servers.iter().flatten() {
+            servers.push(
+                server
+                    .address
+                    .to_string()
+                    .trim_matches(['[', ']'])
+                    .to_owned(),
+            );
+            match &server.security {
+                bliss_proto::Security::Tls(tls) => servers.extend(tls.sni.clone()),
+                bliss_proto::Security::Reality(reality) => servers.push(reality.sni.clone()),
+                bliss_proto::Security::None => {}
+            }
+        }
+        let subscriptions: Vec<String> = self
+            .profile
+            .subscriptions
+            .iter()
+            .filter_map(|s| {
+                reqwest::Url::parse(&s.url)
+                    .ok()?
+                    .host_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+        let current = self
+            .current()
+            .map(|(_, s)| crate::protocol::kind(&s))
+            .unwrap_or_default();
+        let mut text = format!(
+            "Состояние: {} · {}\nДвижок: {}\nСерверов: {}, подписок: {}, правил: {} (включено {}), \
+             по умолчанию: {}\nНаборы правил: {}\n\n",
+            state_word(self.state),
+            if current.is_empty() {
+                "сервер не выбран"
+            } else {
+                &current
+            },
+            self.version
+                .map(|v| format!("xray {v}"))
+                .unwrap_or_else(|| "ещё не спрошен".to_owned()),
+            self.profile.servers.len(),
+            self.profile.subscriptions.len(),
+            self.profile.routing.rules.len(),
+            self.profile
+                .routing
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .count(),
+            crate::protocol::action_key(self.profile.routing.fallback),
+            geo::source(&self.settings.geo_source).key,
+        );
+        for line in crate::logs::lines() {
+            text.push_str(&crate::report::redact(&line, &servers, &subscriptions));
+            text.push('\n');
+        }
+        match std::fs::write(self.paths.files.join("journal.txt"), text) {
+            Ok(()) => self.journals += 1,
+            Err(e) => {
+                tracing::warn!("engine: the journal was not written: {e}");
+                self.toast("Журнал не записался", true, false);
+            }
+        }
+    }
+
     // --- numbers -------------------------------------------------------------
 
     fn measure_now(&self) -> (Instant, u64, u64) {
@@ -1879,6 +1967,7 @@ impl Engine {
                 problem: self.geo_problem.clone(),
             },
             categories: self.categories.clone(),
+            journal: self.journals,
         };
         let _ = self.frames.send(frame);
     }
@@ -2509,6 +2598,41 @@ mod tests {
         );
         let saved = std::fs::read_to_string(paths2.profile()).unwrap();
         assert!(!saved.contains("protocol"), "{saved}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The shared journal names no server: its address and the name it shows
+    /// the network are taken out of every line, the engine's own included.
+    #[tokio::test]
+    async fn the_shared_journal_names_no_server() {
+        let dir =
+            std::env::temp_dir().join(format!("bliss-android-journal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        engine.import("vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=www.example.net&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&type=tcp#Test");
+        crate::logs::push(
+            "12:00:00 WARN xray: dial 203.0.113.7:443 for www.example.net failed".to_owned(),
+        );
+        crate::logs::push("12:00:01 INFO tun #3 www.google.com:443: closed".to_owned());
+        engine.share_log();
+        assert_eq!(engine.journals, 1);
+        let text = std::fs::read_to_string(dir.join("journal.txt")).unwrap();
+        assert!(
+            !text.contains("203.0.113.7") && !text.contains("www.example.net"),
+            "{text}"
+        );
+        assert!(!text.contains("11111111"), "{text}");
+        assert!(text.contains("www.google.com:443"), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

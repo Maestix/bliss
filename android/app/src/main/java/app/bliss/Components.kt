@@ -92,6 +92,8 @@ object Icons {
     val Picture = icon("picture", "M5.6 4.6 H18.4 a2 2 0 0 1 2 2 V17.4 a2 2 0 0 1-2 2 H5.6 a2 2 0 0 1-2-2 V6.6 a2 2 0 0 1 2-2 Z",
         circle(9f, 9.4f, 1.6f), "M3.8 16.4 8.6 12.4 12.4 15.6 15.4 13 20.2 17")
     val Torch = icon("torch", "M13.2 2.8 6.4 13.4 H11.6 L10.4 21.2 17.6 10.4 H12.4 Z", stroke = 1.6f)
+    val Share = icon("share", circle(17.6f, 5.6f, 2.4f), circle(6.4f, 12f, 2.4f), circle(17.6f, 18.4f, 2.4f),
+        "M8.5 10.8 15.5 6.8 M8.5 13.2 15.5 17.2", stroke = 1.6f)
     val Shield = icon("shield","M12 2.6 20 5.6 V12 c0 5-3.6 8-8 9.4 C8 20 4.4 17 4.4 12 V5.6 Z", "M8.6 11.8 11.2 14.4 15.6 9.6", stroke = 1.7f)
 }
 
