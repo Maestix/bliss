@@ -9,6 +9,10 @@ default-members = ["crates/proto", "crates/core", "crates/xray", "crates/tun", "
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# The highest any locked dependency asks for (time, libloading, icu), and what
+# the let-chains in the code need: with an older rustc cargo says so in one
+# line instead of failing inside some crate. build-linux.sh checks the same.
+rust-version = "1.88"
 authors = ["Maestix"]
 
 # One table, declared once, used per crate. Entries here are picked deliberately;

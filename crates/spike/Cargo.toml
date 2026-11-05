@@ -2,6 +2,7 @@
 name = "bliss-spike"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Stage 1.0: the same screen under both renderers, to measure rather than guess"
 publish = false

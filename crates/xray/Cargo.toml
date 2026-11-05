@@ -2,6 +2,7 @@
 name = "bliss-xray"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Driving an external xray-core: config, process, version gate"
 
