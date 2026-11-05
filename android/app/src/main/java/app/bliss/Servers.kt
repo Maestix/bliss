@@ -69,6 +69,7 @@ fun Servers(frame: Frame, c: Commands, add: () -> Unit, menu: (Int) -> Unit, gro
                     }
                 }
                 if (frame.servers.isEmpty() && frame.groups.isEmpty()) item { Empty(add) }
+                if (frame.servers.size > 1) item { AutoLine(frame, c) }
                 if (own.isNotEmpty()) item { Kicker("Свои", Modifier.padding(start = 12.dp, top = 6.dp, bottom = 4.dp)) }
                 items(own, key = { "s${it.index}:${it.value.name}" }) { (i, s) ->
                     ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key) }, onMore = { menu(i) })
@@ -104,6 +105,35 @@ private fun Empty(add: () -> Unit) {
         Text("Добавьте сервер — ссылкой или подпиской. Дальше всё делает одно сердечко.",
             style = T.body.copy(fontSize = 14.sp, color = C.N400), modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
         Btn("Добавить", icon = Icons.Plus, modifier = Modifier.fillMaxWidth(), onClick = add)
+    }
+}
+
+/**
+ * «Автовыбор»: the fastest server a page loads through, and the next one
+ * when it stops answering — measured on a start, on a failure and when the
+ * screen comes on, never on a timer. A server picked by hand turns it off.
+ */
+@Composable
+fun AutoLine(frame: Frame, c: Commands) {
+    val shape = RoundedCornerShape(16.dp)
+    val now = frame.current?.let { frame.servers.getOrNull(it) }
+    Row(
+        Modifier.padding(bottom = 6.dp).fillMaxWidth().heightIn(min = 60.dp).clip(shape)
+            .background(if (frame.auto) C.Accent.copy(alpha = 0.10f) else C.Tint)
+            .border(1.dp, if (frame.auto) C.Accent.copy(alpha = 0.24f) else Color(0x14EFE8F5), shape)
+            .clickable { c("auto", "on" to !frame.auto) }.padding(start = 14.dp, end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Ico(Icons.Pulse, if (frame.auto) C.Accent else C.N400, 20.dp)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text("Автовыбор", style = T.body.copy(fontWeight = FontWeight.Bold))
+            Text(
+                if (frame.auto && now != null) "сейчас ${now.name} — сменю, если перестанет отвечать"
+                else "самый быстрый, кто отвечает, и следующий, если он замолчит",
+                style = T.tiny.copy(fontSize = 12.5.sp), maxLines = 2,
+            )
+        }
+        Toggle(frame.auto) { c("auto", "on" to it) }
     }
 }
 
@@ -213,6 +243,7 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
             Image(painterResource(R.drawable.bunny), null, Modifier.padding(end = 12.dp).size(96.dp, 90.dp))
         }
         LazyColumn(Modifier.heightIn(max = 380.dp).padding(horizontal = 8.dp)) {
+            if (frame.servers.size > 1) item { AutoLine(frame, c) }
             items(frame.servers.withIndex().toList(), key = { it.index }) { (i, s) ->
                 ServerLine(s, i == frame.current, onClick = { c("select", "index" to i, "key" to s.key); close() }, onMore = null)
             }

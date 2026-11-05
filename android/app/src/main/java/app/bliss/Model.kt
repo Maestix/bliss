@@ -20,6 +20,8 @@ data class Frame(
     val suggest: Suggest? = null,
     val since: Long? = null,
     val current: Int? = null,
+    /** «Автовыбор» is on: `current` is the server it chose. */
+    val auto: Boolean = false,
     val servers: List<ServerRow> = emptyList(),
     val groups: List<GroupRow> = emptyList(),
     val rules: List<RuleRow> = emptyList(),
@@ -110,6 +112,7 @@ fun applyPatch(prev: Frame, o: JSONObject): Frame {
             "suggest" -> f.copy(suggest = o.optJSONObject(key)?.let { Suggest(it.getInt("index"), it.getString("name"), it.getInt("ping")) })
             "since" -> f.copy(since = o.long(key))
             "current" -> f.copy(current = o.int(key))
+            "auto" -> f.copy(auto = o.optBoolean(key))
             "servers" -> f.copy(servers = o.optJSONArray(key).map {
                 ServerRow(it.optString("key"), it.getString("name"), it.getString("kind"), it.getString("detail"), it.getString("address"),
                     it.str("group"), it.getString("ping"), it.int("ms"),
