@@ -700,6 +700,11 @@ pub struct Refreshed {
     pub servers: usize,
     pub added: usize,
     pub removed: usize,
+    /// Links in the list that bliss cannot read: a protocol xray-core does
+    /// not speak, or a link that does not parse. Left out of the profile;
+    /// said, so a provider's new servers in such a form do not vanish
+    /// without a word.
+    pub skipped: usize,
 }
 
 /// Put a fetched list in the profile.
@@ -757,6 +762,7 @@ pub fn apply_subscription(
         })
         .collect();
     let refreshed = |name: String| Refreshed {
+        skipped: fetched.links.foreign + fetched.links.broken,
         name,
         servers: fresh.len(),
         added: fresh.iter().filter(|e| !before.contains(&e.link)).count(),
@@ -1273,7 +1279,8 @@ mod tests {
                 name: "Провайдер".to_owned(),
                 servers: 2,
                 added: 2,
-                removed: 0
+                removed: 0,
+                skipped: 0
             },
             "a link already in the profile is not added twice"
         );
@@ -1297,6 +1304,16 @@ mod tests {
         let refreshed =
             apply_subscription(&mut profile, "abc", &fetched(&second, None), 200).expect("applied");
         assert_eq!((refreshed.added, refreshed.removed), (1, 1));
+        // A link bliss cannot read is counted, so it is said rather than
+        // lost without a word (refreshed_text, the log).
+        let unread = [
+            server_link("s2.example"),
+            server_link("s3.example"),
+            "tuic://11111111-2222-3333-4444-555555555555:PPPP@a.example:443#tuic".to_owned(),
+        ];
+        let again = apply_subscription(&mut profile.clone(), "abc", &fetched(&unread, None), 200)
+            .expect("applied");
+        assert_eq!((again.servers, again.skipped), (2, 1));
         assert_eq!(
             refreshed.name, "Провайдер",
             "a list without a title keeps the name"
