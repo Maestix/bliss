@@ -1518,8 +1518,8 @@ async fn drive(
                             Ok((refreshed, next)) => {
                                 problems.remove(&done.id);
                                 tracing::info!(
-                                    "subscription {}: {} server(s), {} new, {} gone",
-                                    refreshed.name, refreshed.servers, refreshed.added, refreshed.removed
+                                    "subscription {}: {} server(s), {} new, {} gone, {} unreadable",
+                                    refreshed.name, refreshed.servers, refreshed.added, refreshed.removed, refreshed.skipped
                                 );
                                 let first = setup.servers.is_empty();
                                 let was = links_of(&setup.profile).get(selected).cloned();
@@ -2704,6 +2704,12 @@ fn refreshed_text(refreshed: &crate::profile_file::Refreshed) -> String {
         text.push_str(&format!(
             " — новых {}, убрано {}",
             refreshed.added, refreshed.removed
+        ));
+    }
+    if refreshed.skipped > 0 {
+        text.push_str(&format!(
+            "; ещё {} bliss прочитать не может",
+            plural(refreshed.skipped as u64, "ссылку", "ссылки", "ссылок")
         ));
     }
     text

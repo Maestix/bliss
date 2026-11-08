@@ -1471,6 +1471,10 @@ impl Engine {
                     .retain(|entry| entry.group.as_deref() != Some(id.as_str()));
                 let room = MAX_PROFILE_SERVERS.saturating_sub(self.profile.servers.len());
                 let count = fetched.links.links.len().min(room);
+                // Said, not dropped in silence: a provider's new servers in a
+                // form bliss cannot read would otherwise never be missed.
+                let skipped = fetched.links.foreign + fetched.links.broken;
+                tracing::info!("subscription {name}: {count} server(s), {skipped} unreadable");
                 self.profile
                     .servers
                     .extend(
@@ -1491,9 +1495,17 @@ impl Engine {
                 }
                 self.save();
                 self.reparse();
+                let unread = if skipped > 0 {
+                    format!(
+                        "; ещё {} bliss прочитать не может",
+                        plural(skipped as u64, "ссылку", "ссылки", "ссылок")
+                    )
+                } else {
+                    String::new()
+                };
                 self.toast(
                     &format!(
-                        "«{name}»: {}",
+                        "«{name}»: {}{unread}",
                         plural(count as u64, "сервер", "сервера", "серверов")
                     ),
                     false,
