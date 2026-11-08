@@ -73,8 +73,10 @@ const HISTORY: usize = 22;
 const MAX_PROFILE_SERVERS: usize = 5_000;
 /// Servers with a star, at most: anything that grows has a cap (AGENTS.md §5).
 const MAX_FAVORITES: usize = 256;
-/// A server list older than this is fetched again when the engine starts.
+/// A server list older than this is fetched again: when the engine starts,
+/// and at the next `REFRESH_CHECK` while it runs.
 const STALE: i64 = 12 * 3600;
+const REFRESH_CHECK: Duration = Duration::from_secs(30 * 60);
 
 /// The phone's DNS server as the service names it (`TunnelService.DNS`):
 /// inside the TUN's /30, answered by the stack itself.
@@ -620,6 +622,13 @@ impl Engine {
         self.refresh_stale();
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Lists were fetched when the tunnel's process started and never
+        // after, so a tunnel left on for days kept its first list. Due ones
+        // are fetched while it runs too; whether one is due is the wall
+        // clock's to say, since this one stands still while the phone sleeps.
+        let mut lists =
+            tokio::time::interval_at(tokio::time::Instant::now() + REFRESH_CHECK, REFRESH_CHECK);
+        lists.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut drawn = 0usize;
         loop {
             tokio::select! {
@@ -632,6 +641,10 @@ impl Engine {
                 // then not polled at all, and the process sleeps.
                 _ = ticker.tick(), if drawn > 0 => {
                     self.sample();
+                    self.publish();
+                }
+                _ = lists.tick() => {
+                    self.refresh_stale();
                     self.publish();
                 }
                 changed = watching.changed() => {

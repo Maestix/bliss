@@ -705,6 +705,17 @@ These cost the most time on this project. None of them announce themselves.
     name hands the naming back (`edit_subscription`,
     `a_subscription_is_renamed_and_moved_in_place`, seen failing without the
     flag).
+  - **A list is due by the wall clock, checked every five minutes**
+    (`REFRESH_CHECK`; `REFRESH_AFTER`, 12 hours, decides). The check was
+    hourly on a tokio interval, whose clock stands still while the machine
+    sleeps, so a laptop asleep most of the day went days between updates —
+    the user found the desktop's lists not updating while the phone's did.
+    A fetch on its way for over three minutes is taken as lost and made
+    again (`FETCH_LOST`, `a_lost_fetch_does_not_hold_a_subscription_for_ever`):
+    before, one that never came back held its subscription «on its way»
+    until bliss restarted. Every fetch is said in the log. The phone fetches
+    due lists every half hour while its tunnel's process runs, where it used
+    to only when the process started.
   - **A list from an old address is dropped.** `FetchDone` carries the address
     it fetched; one that lands after an edit moved the subscription is not
     applied to it, and the fetch from the new address keeps the card's

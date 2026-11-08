@@ -853,10 +853,19 @@ async fn drive(
     // Subscriptions with a fetch on its way, and why the last one failed.
     let mut fetching: HashSet<String> = HashSet::new();
     let mut problems: HashMap<String, String> = HashMap::new();
+    // When each fetch on its way began, by the wall clock: one that never
+    // came back would keep its subscription «on its way» for ever (`refresh`).
+    let mut began: HashMap<String, i64> = HashMap::new();
     // Its first tick is immediate, and comes after the tunnel has had its
     // chance to start: lists gone stale while bliss was closed are fetched
-    // through it. Then once an hour.
-    let mut refresher = tokio::time::interval(Duration::from_secs(3600));
+    // through it. Then every few minutes, which only compares two times:
+    // the interval's clock stands still while the machine sleeps (Linux's
+    // monotonic clock, and the timer behind it), so an hourly beat counted
+    // only waking hours, and a laptop that slept most of the day went days
+    // between updates — the user found their lists on the desktop not
+    // updating while the phone's did. Whether a list is due is decided by
+    // the wall clock (`REFRESH_AFTER`).
+    let mut refresher = tokio::time::interval(REFRESH_CHECK);
     refresher.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut running: Option<Running> = None;
     let mut selected = setup.selected;
@@ -1247,6 +1256,7 @@ async fn drive(
                             false,
                             true,
                             &mut fetching,
+                            &mut began,
                             via(running.as_ref()),
                             &own,
                         );
@@ -1334,6 +1344,7 @@ async fn drive(
                                         false,
                                         true,
                                         &mut fetching,
+                                        &mut began,
                                         via(running.as_ref()),
                                         &own,
                                     );
@@ -1481,6 +1492,7 @@ async fn drive(
                         else {
                             // Deleted while the fetch was on its way.
                             fetching.remove(&done.id);
+                        began.remove(&done.id);
                             continue;
                         };
                         if subscription.url != done.url {
@@ -1495,6 +1507,7 @@ async fn drive(
                         }
                         let name = subscription.name.clone();
                         fetching.remove(&done.id);
+                        began.remove(&done.id);
                         let outcome = done.result.and_then(|fetched| {
                             let mut next = setup.profile.clone();
                             let now = jiff::Timestamp::now().as_second();
@@ -1810,7 +1823,7 @@ async fn drive(
             }
             _ = refresher.tick() => {
                 let route = via(running.as_ref());
-                if refresh(&setup.profile, None, true, false, &mut fetching, route, &own) > 0 {
+                if refresh(&setup.profile, None, true, false, &mut fetching, &mut began, route, &own) > 0 {
                     publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
                 }
             }
@@ -2464,15 +2477,25 @@ fn via(running: Option<&Running>) -> Option<SocketAddr> {
     running.map(|parts| parts.bridge)
 }
 
+/// How often the engine loop asks which subscriptions are due.
+const REFRESH_CHECK: Duration = Duration::from_secs(300);
+
+/// A fetch on its way for longer than this has been lost: its two tries
+/// (through the tunnel, then straight) give up within 40 s each.
+const FETCH_LOST: i64 = 180;
+
 /// Start fetching subscriptions: `only` the one named, or all of them; with
 /// `stale_only`, just those not fetched for `REFRESH_AFTER`. One already on
-/// its way is not fetched twice. Returns how many were started.
+/// its way is not fetched twice, unless it has been on its way past
+/// `FETCH_LOST` (`began` says since when). Returns how many were started.
+#[allow(clippy::too_many_arguments)]
 fn refresh(
     profile: &Profile,
     only: Option<&str>,
     stale_only: bool,
     asked: bool,
     fetching: &mut HashSet<String>,
+    began: &mut HashMap<String, i64>,
     via: Option<SocketAddr>,
     own: &mpsc::WeakUnboundedSender<Command>,
 ) -> usize {
@@ -2486,9 +2509,26 @@ fn refresh(
         let stale = subscription
             .updated
             .is_none_or(|at| now.saturating_sub(at) >= stale_after);
-        if (stale_only && !stale) || !fetching.insert(subscription.id.clone()) {
+        if stale_only && !stale {
             continue;
         }
+        if fetching.contains(&subscription.id) {
+            let since = *began.entry(subscription.id.clone()).or_insert(now);
+            if now.saturating_sub(since) < FETCH_LOST {
+                continue;
+            }
+            tracing::warn!(
+                "subscription {}: the last fetch never came back; fetching again",
+                subscription.name
+            );
+        }
+        fetching.insert(subscription.id.clone());
+        began.insert(subscription.id.clone(), now);
+        tracing::info!(
+            "subscription {}: fetching{}",
+            subscription.name,
+            if asked { "" } else { " (due)" }
+        );
         fetch_subscription(
             subscription.id.clone(),
             subscription.url.clone(),
@@ -3535,6 +3575,58 @@ async fn measure_latency(outbound: &dyn bliss_core::Outbound) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A list is due by the wall clock, and a fetch that never came back
+    /// does not keep its subscription «on its way» for ever: past
+    /// `FETCH_LOST` it is fetched again.
+    #[tokio::test]
+    async fn a_lost_fetch_does_not_hold_a_subscription_for_ever() {
+        let now = jiff::Timestamp::now().as_second();
+        let subscription = |updated: Option<i64>| bliss_proto::Subscription {
+            id: "a1".to_owned(),
+            name: "provider".to_owned(),
+            // TEST-NET-3: the fetch this starts goes nowhere.
+            url: "https://203.0.113.1/sub".to_owned(),
+            updated,
+            usage: None,
+            renamed: false,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let own = tx.downgrade();
+        let mut profile = Profile::default();
+        let started = |profile: &Profile,
+                       fetching: &mut HashSet<String>,
+                       began: &mut HashMap<String, i64>| {
+            refresh(profile, None, true, false, fetching, began, None, &own)
+        };
+
+        profile.subscriptions = vec![subscription(Some(now - 60))];
+        let (mut fetching, mut began) = (HashSet::new(), HashMap::new());
+        assert_eq!(
+            started(&profile, &mut fetching, &mut began),
+            0,
+            "fresh: not due"
+        );
+
+        profile.subscriptions = vec![subscription(Some(now - 13 * 3600))];
+        assert_eq!(
+            started(&profile, &mut fetching, &mut began),
+            1,
+            "due by the wall clock"
+        );
+        assert_eq!(
+            started(&profile, &mut fetching, &mut began),
+            0,
+            "on its way: not twice"
+        );
+
+        began.insert("a1".to_owned(), now - FETCH_LOST - 1);
+        assert_eq!(
+            started(&profile, &mut fetching, &mut began),
+            1,
+            "lost: fetched again"
+        );
+    }
 
     /// The server in use is kept by key in the work dir and found again by
     /// it: after a restart, after the list moved under it, and the first
