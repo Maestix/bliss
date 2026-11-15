@@ -416,6 +416,36 @@ fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String,
     }
 }
 
+/**
+ * Android did not give bliss the VPN. Pressed «Отмена», it is a word and
+ * another try; a dialog that closed by itself is nearly always another app
+ * holding «Постоянный VPN» (Samsung's Secure Wi-Fi among them), or bliss
+ * running in a work profile or Secure Folder, where Android lets no VPN be
+ * asked for. Its settings page is one tap away.
+ */
+@Composable
+fun RefusedSheet(fast: Boolean, close: () -> Unit, again: () -> Unit) {
+    val context = LocalContext.current
+    BlissSheet(close) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp)) {
+            Text(if (fast) "Android не показал разрешение" else "VPN не разрешён", style = T.sheet)
+            Text(
+                if (fast) "Окно разрешения закрылось само. Так бывает, когда у другого приложения включён «Постоянный VPN» " +
+                    "(на Samsung — и встроенный Secure Wi-Fi), или bliss открыт в рабочем профиле или Защищённой папке.\n\n" +
+                    "Откройте настройки VPN, выключите «Постоянный VPN» у другого приложения (или выберите bliss) и попробуйте снова."
+                else "Без разрешения Android bliss не может вести трафик телефона. Если нажали «Отмена» случайно — попробуйте ещё раз.",
+                style = T.body.copy(fontSize = 14.sp, color = C.N400), modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Btn("Настройки VPN", accent = false, modifier = Modifier.weight(1f)) {
+                try { context.startActivity(android.content.Intent(android.provider.Settings.ACTION_VPN_SETTINGS)) } catch (_: Exception) { }
+            }
+            Btn("Ещё раз", modifier = Modifier.weight(1f), onClick = again)
+        }
+    }
+}
+
 /** Said before Android's own dialog, so the person knows which button to press. */
 @Composable
 fun PermissionSheet(close: () -> Unit, go: () -> Unit) {

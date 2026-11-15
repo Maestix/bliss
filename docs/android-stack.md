@@ -708,3 +708,15 @@ And the light shade's card went too: the service colorizes its
 notification (`setColorized` with the surface colour), so its ground is
 bliss's dark plum in a light shade as in a dark one — the user's Pixel 7
 in a light theme showed the card as a box inside it. One look for both.
+
+## 0.5.11: when Android does not give the VPN
+
+A user on a Samsung with Android 17 saw no consent dialog at all: the heart
+did nothing. bliss swallowed a consent that did not come. Android closes its
+dialog by itself while another app holds «Постоянный VPN» (Samsung's own
+Secure Wi-Fi is one), and offers none in a work profile or Secure Folder.
+Now a consent that did not come opens `RefusedSheet`: closed within 1.5 s,
+or with no dialog to open (`ActivityNotFoundException`), it says the dialog
+never stayed and why that happens, with a button to Android's VPN settings
+and another try; a refusal pressed by hand gets the short word. Not seen on
+that phone: the cause there is the likeliest one, not a measured one.
