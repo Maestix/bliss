@@ -59,6 +59,9 @@ sealed interface Sheet {
     data class ServerMenu(val index: Int) : Sheet
     data class Group(val id: String) : Sheet
     data object Permission : Sheet
+    /** Android's consent did not come: refused, or the dialog never stayed
+     *  (`fast`: it closed by itself, or none could be opened). */
+    data class Refused(val fast: Boolean) : Sheet
     data class App(val pkg: String, val label: String) : Sheet
     data class RuleEdit(val index: Int?) : Sheet
     /** What bliss does on one network. */
@@ -89,10 +92,20 @@ class MainActivity : ComponentActivity() {
     /** A sheet something outside asked for: a shared link, the notification. */
     private var pending by mutableStateOf<Sheet?>(null)
 
+    /** When Android's consent dialog was asked for, to tell a refusal from
+     *  a dialog that closed by itself. */
+    private var askedAt = 0L
     private val consent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (VpnService.prepare(this) == null) {
             askNotifications()
             TunnelService.connect(this)
+        } else {
+            // Said, not swallowed: a heart that did nothing at all was all a
+            // person saw when the dialog flashed and closed — what Android
+            // does while another app holds «Постоянный VPN» (seen on a
+            // Samsung with Android 17). Under a second, nobody pressed
+            // «Отмена»: the dialog never stayed.
+            pending = Sheet.Refused(fast = android.os.SystemClock.elapsedRealtime() - askedAt < 1500)
         }
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -158,7 +171,13 @@ class MainActivity : ComponentActivity() {
             return true
         }
         if (!primed) return false
-        consent.launch(ask)
+        askedAt = android.os.SystemClock.elapsedRealtime()
+        try {
+            consent.launch(ask)
+        } catch (_: android.content.ActivityNotFoundException) {
+            // A firmware without the dialog, or one that hides it from this profile.
+            pending = Sheet.Refused(fast = true)
+        }
         return true
     }
 
@@ -238,6 +257,7 @@ fun App(
             is Sheet.ServerMenu -> ServerMenu(frame, s.index, c = c, close = { sheet = null })
             is Sheet.Group -> GroupMenu(frame, s.id, c = c, close = { sheet = null })
             Sheet.Permission -> PermissionSheet(close = { sheet = null }, go = { sheet = null; connect(true) })
+            is Sheet.Refused -> RefusedSheet(s.fast, close = { sheet = null }, again = { sheet = null; connect(true) })
             is Sheet.App -> AppSheet(frame, s.pkg, s.label, c = c, close = { sheet = null })
             is Sheet.RuleEdit -> RuleEditor(frame, s.index, c = c, close = { sheet = null })
         }
