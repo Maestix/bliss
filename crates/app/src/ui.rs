@@ -47,7 +47,9 @@ use dioxus::desktop::tao::window::{Icon, Window};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
-use crate::engine::{Command, Controller, Frame, Link, Ping, Reveal, Secret, State, bytes, rate};
+use crate::engine::{
+    Check, Command, Controller, Frame, Link, Ping, Reveal, Secret, State, bytes, rate,
+};
 use crate::profile_file::Subject;
 use bliss_proto::{Action, ProxyMode};
 
@@ -1190,8 +1192,8 @@ fn TrayMenu(frame: Frame) -> Element {
                             "{elide(&server.tag, 22)}"
                         }
                         span {
-                            style: "font-size:12.5px;color:{ping_tone(server.ping)}",
-                            "{ping_text(server.ping)}"
+                            style: "font-size:12.5px;color:{reach_tone(server)}",
+                            "{reach_text(server)}"
                         }
                     }
                 }
@@ -2948,6 +2950,15 @@ fn ServerList(frame: Frame) -> Element {
                     },
                     icon: rsx! { crate::icons::Pulse { size: 15, color: ACCENT } },
                 }
+                Button {
+                    label: if checking(&frame) { "Проверяю доступ…" } else { "Проверить доступ" },
+                    enabled: !checking(&frame) && !frame.servers.is_empty(),
+                    onclick: {
+                        let controller = controller.clone();
+                        move |_| controller.send(Command::CheckAll)
+                    },
+                    icon: rsx! { crate::icons::Shield { size: 15, color: ACCENT } },
+                }
                 span { style: "font-size:13px;color:var(--color-neutral-600)",
                     "переключение перезапускает движок"
                 }
@@ -2983,6 +2994,16 @@ fn ActionsTab(frame: Frame) -> Element {
                     move |_| controller.send(Command::PingAll)
                 },
                 icon: rsx! { crate::icons::Pulse { size: 17, color: ACCENT } },
+            }
+            ActionCard {
+                title: if checking(&frame) { "Проверяю доступ…" } else { "Проверить доступ" },
+                hint: "открыть страницу через каждый сервер",
+                enabled: !checking(&frame) && !frame.servers.is_empty(),
+                onclick: {
+                    let controller = controller.clone();
+                    move |_| controller.send(Command::CheckAll)
+                },
+                icon: rsx! { crate::icons::Shield { size: 17, color: ACCENT } },
             }
             ActionCard {
                 title: "Перезапустить туннель",
@@ -3201,6 +3222,59 @@ fn Button(
 /// disagree about whether it is available.
 fn sweeping(frame: &Frame) -> bool {
     frame.servers.iter().any(|s| s.ping == Ping::Probing)
+}
+
+/// Are real checks under way (`Check`)? The same for their buttons.
+fn checking(frame: &Frame) -> bool {
+    frame.servers.iter().any(|s| s.check == Check::Probing)
+}
+
+/// What a row says of a server: the real check when there is one — a page
+/// through it, which says more, and is the only thing a server over UDP has
+/// — else the handshake. The phone's list says the same two, in two lines.
+fn reach_text(server: &crate::engine::ServerRow) -> String {
+    match server.check {
+        Check::Ok(ms) => format!("{ms} мс"),
+        Check::Down => "нет".to_owned(),
+        Check::Probing if server.ping == Ping::Udp || server.ping == Ping::Unknown => {
+            "…".to_owned()
+        }
+        _ => ping_text(server.ping),
+    }
+}
+
+fn reach_tone(server: &crate::engine::ServerRow) -> &'static str {
+    match server.check {
+        // A page through it takes two round trips' worth more than a
+        // handshake, so its bands sit higher.
+        Check::Ok(ms) if ms < 300 => GOOD,
+        Check::Ok(ms) if ms < 800 => "var(--color-accent-2-300)",
+        Check::Ok(_) => "var(--color-neutral-400)",
+        Check::Down => BAD,
+        _ => ping_tone(server.ping),
+    }
+}
+
+fn reach_title(server: &crate::engine::ServerRow) -> String {
+    let handshake = match server.ping {
+        Ping::Ok(ms) => format!("рукопожатие TCP — {ms} мс"),
+        Ping::Down => "рукопожатие TCP — нет ответа".to_owned(),
+        Ping::Udp => {
+            "сервер работает по UDP — рукопожатие TCP до него ничего не измерит".to_owned()
+        }
+        Ping::Probing | Ping::Unknown => String::new(),
+    };
+    let page = match server.check {
+        Check::Ok(ms) => format!("страница через сервер — {ms} мс"),
+        Check::Down => "через сервер страница не открылась".to_owned(),
+        Check::Probing => "проверяю, открывается ли страница через сервер…".to_owned(),
+        Check::Unknown => String::new(),
+    };
+    [page, handshake]
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn ping_text(ping: Ping) -> String {
@@ -5446,6 +5520,40 @@ mod tests {
         assert_ne!(ping_tone(Ping::Unknown), ping_tone(Ping::Down));
         assert_ne!(ping_text(Ping::Unknown), ping_text(Ping::Down));
         assert_eq!(ping_text(Ping::Ok(42)), "42 мс");
+
+        // A server over UDP: the handshake says «UDP», the page through it
+        // the number; the page wins whenever there is one.
+        let udp = crate::engine::ServerRow {
+            ping: Ping::Udp,
+            ..Default::default()
+        };
+        assert_eq!(reach_text(&udp), "UDP");
+        let checked = crate::engine::ServerRow {
+            ping: Ping::Udp,
+            check: Check::Ok(340),
+            ..Default::default()
+        };
+        assert_eq!(reach_text(&checked), "340 мс");
+        assert!(reach_title(&checked).contains("страница через сервер — 340 мс"));
+        let dead = crate::engine::ServerRow {
+            ping: Ping::Ok(40),
+            check: Check::Down,
+            ..Default::default()
+        };
+        assert_eq!(
+            (reach_text(&dead), reach_tone(&dead)),
+            ("нет".to_owned(), BAD)
+        );
+        let going = crate::engine::ServerRow {
+            ping: Ping::Ok(40),
+            check: Check::Probing,
+            ..Default::default()
+        };
+        assert_eq!(
+            reach_text(&going),
+            "40 мс",
+            "a handshake stays while the page is on its way"
+        );
     }
 }
 
@@ -6625,13 +6733,9 @@ fn ServerLine(
             }
             span {
                 style: "text-align:right;font-size:13.5px;\
-                        font-variant-numeric:tabular-nums;color:{ping_tone(server.ping)}",
-                title: if server.ping == Ping::Udp {
-                    "Сервер работает по UDP — рукопожатие TCP до него ничего не измерит"
-                } else {
-                    ""
-                },
-                "{ping_text(server.ping)}"
+                        font-variant-numeric:tabular-nums;color:{reach_tone(&server)}",
+                title: "{reach_title(&server)}",
+                "{reach_text(&server)}"
             }
             div { style: "display:flex;justify-content:flex-end;gap:4px",
             // Shown in full on a starred server, as the bin is on a hovered row.
