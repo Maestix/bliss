@@ -1876,6 +1876,16 @@ table.
 - **A server reached over UDP has no ping.** The list's ping is a TCP
   handshake, which Hysteria 2, WireGuard and mKCP servers never answer, so
   they show «UDP» rather than «нет» (`ServerConfig::over_udp`, `Ping::Udp`).
+  **They get a real check instead** (`Check`, `check_servers`, as the
+  phone's «Доступ»): an xray of their own on a free loopback port, in
+  `checks\<n>` under the work dir and gone after, four at a time, and
+  `measure_latency` through it — a page loaded, the second of two requests
+  timed. Every sweep checks the UDP servers so; «Проверить доступ» (the
+  list's foot, the actions tab) checks every server. The row shows the
+  page's time where there is one, else the handshake, both in its tooltip
+  (`reach_text`, `reach_title`). The user found every non-VLESS row of
+  theirs reading «UDP». Not run against a real server here: the container
+  reaches the internet only through an HTTPS proxy.
 - **xray answers a SOCKS CONNECT as soon as it accepts it, not when the server is
   reached.** Timing `Outbound::connect_tcp` measured 0 ms (`measure_latency` in
   `engine.rs`): a successful dial proves nothing about the tunnel, and an

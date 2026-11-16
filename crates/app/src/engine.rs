@@ -70,6 +70,22 @@ pub enum Ping {
     Udp,
 }
 
+/// The real check of a server: a page loaded through it, by an xray of its
+/// own for the check alone (`check_servers`), as the phone's «Доступ» does.
+/// A TCP handshake says the server's port answers, and meets nothing at all
+/// on a server reached over UDP; this says the server takes you somewhere,
+/// whatever it speaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Check {
+    #[default]
+    Unknown,
+    Probing,
+    /// The second of two requests through it, in milliseconds.
+    Ok(u32),
+    /// Nothing came back through it.
+    Down,
+}
+
 /// One row of the server list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerRow {
@@ -88,6 +104,8 @@ pub struct ServerRow {
     pub group_id: Option<String>,
     /// Marked with a star: listed above the rest.
     pub favorite: bool,
+    /// A page loaded through it (`Check`).
+    pub check: Check,
 }
 
 /// One rule, as the routing screen shows it.
@@ -359,6 +377,8 @@ pub enum Command {
     Select(usize),
     /// Measure every server's handshake time.
     PingAll,
+    /// A page through every server, each by an xray of its own (`Check`).
+    CheckAll,
     /// Change what bliss does with the machine's proxy settings.
     Proxy(ProxyMode),
     /// Ask the rules about one destination. The answer lands in the frame.
@@ -704,6 +724,7 @@ fn server_rows(profile: &Profile, servers: &[ServerConfig], selected: usize) -> 
                 group_id: group.as_ref().map(|(id, _)| id.clone()),
                 group: group.map(|(_, name)| name),
                 favorite: stars.get(i).copied().unwrap_or(false),
+                check: Check::Unknown,
             }
         })
         .collect()
@@ -892,6 +913,7 @@ async fn drive(
     // semaphore per call means the cap is per sweep, and N sweeps in flight is
     // 12N sockets — which is exactly what two clicks on the button produced.
     let probes = Arc::new(Sweep::new());
+    let checks = Arc::new(Sweep::with(CHECK_CONCURRENCY));
 
     let mut proxy = setup.profile.inbound.system_proxy;
     let system_proxy = SystemProxy::new(setup.work_dir.clone(), frames.clone());
@@ -925,7 +947,7 @@ async fn drive(
 
     // One sweep at the start, so the list arrives with numbers in it rather
     // than with a column of dashes waiting for someone to discover the button.
-    ping_all(&setup.servers, &frames, &probes);
+    sweep_servers(&setup, &frames, &probes, &checks);
 
     if setup.autostart {
         running = start(
@@ -1012,7 +1034,8 @@ async fn drive(
                             system_proxy.apply(proxy, &setup, running.is_some());
                         }
                     }
-                    Command::PingAll => ping_all(&setup.servers, &frames, &probes),
+                    Command::PingAll => sweep_servers(&setup, &frames, &probes, &checks),
+                    Command::CheckAll => check_servers(&setup, false, &frames, &checks),
                     Command::Check(text) => {
                         let answer = check_target(&rules.router, &text);
                         frames.send_modify(|f| f.check = answer);
@@ -1240,7 +1263,7 @@ async fn drive(
                             }
                         }
                         if servers_came {
-                            ping_all(&setup.servers, &frames, &probes);
+                            sweep_servers(&setup, &frames, &probes, &checks);
                             // The first server is what the window was waiting
                             // for. Connect, as opening it with one already would.
                             if first && setup.autostart && running.is_none() {
@@ -1474,7 +1497,7 @@ async fn drive(
                                 };
                                 toaster.show(&frames, text, false);
                                 // The rows came back without their numbers.
-                                ping_all(&setup.servers, &frames, &probes);
+                                sweep_servers(&setup, &frames, &probes, &checks);
                                 if lost {
                                     follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy, &system_proxy)
                                         .await;
@@ -1530,7 +1553,7 @@ async fn drive(
                                     toaster.show(&frames, refreshed_text(&refreshed), false);
                                 }
                                 // The rows came back without their numbers.
-                                ping_all(&setup.servers, &frames, &probes);
+                                sweep_servers(&setup, &frames, &probes, &checks);
                                 if lost {
                                     follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy, &system_proxy)
                                         .await;
@@ -3216,8 +3239,12 @@ struct Sweep {
 
 impl Sweep {
     fn new() -> Self {
+        Self::with(PING_CONCURRENCY)
+    }
+
+    fn with(permits: usize) -> Self {
         Self {
-            permits: tokio::sync::Semaphore::new(PING_CONCURRENCY),
+            permits: tokio::sync::Semaphore::new(permits),
             running: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -3240,6 +3267,122 @@ impl Sweep {
 ///
 /// Returns immediately: results arrive one at a time over the following
 /// seconds, which is also how they should appear on screen.
+/// Engines at once in a sweep of real checks: each is a process of its own.
+const CHECK_CONCURRENCY: usize = 4;
+
+/// The sweep the list asks for: a handshake to every server that can take
+/// one, and a page through each one reached over UDP, which cannot — those
+/// read «UDP» and nothing else, and on a list of Hysteria servers that was
+/// every row (the user's, asking for the phone's numbers on the desktop).
+fn sweep_servers(
+    setup: &Setup,
+    frames: &watch::Sender<Frame>,
+    probes: &Arc<Sweep>,
+    checks: &Arc<Sweep>,
+) {
+    ping_all(&setup.servers, frames, probes);
+    check_servers(setup, true, frames, checks);
+}
+
+/// Real checks (`Check`): every server, or `udp_only` those reached over
+/// UDP. Each gets an xray of its own on a free loopback port, in a folder of
+/// its own under the work dir, gone after; a few at a time. A row is written
+/// only while it still names the server it was asked for: a list refreshed
+/// meanwhile moves the places.
+fn check_servers(
+    setup: &Setup,
+    udp_only: bool,
+    frames: &watch::Sender<Frame>,
+    checks: &Arc<Sweep>,
+) {
+    let Ok(exe) = engine_path(setup) else {
+        return;
+    };
+    let targets: Vec<(usize, ServerConfig)> = setup
+        .servers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !udp_only || s.over_udp())
+        .map(|(i, s)| (i, s.clone()))
+        .collect();
+    if targets.is_empty() || !checks.begin() {
+        return;
+    }
+    frames.send_modify(|f| {
+        for (index, server) in &targets {
+            if let Some(row) = f.servers.get_mut(*index).filter(|r| r.tag == server.tag) {
+                row.check = Check::Probing;
+            }
+        }
+    });
+    let frames = frames.clone();
+    let checks = Arc::clone(checks);
+    let work = setup.work_dir.join("checks");
+    tokio::spawn(async move {
+        let version = bliss_xray::check_version(&exe, None).await.ok();
+        let mut runs = Vec::with_capacity(targets.len());
+        for (index, server) in targets {
+            let checks = Arc::clone(&checks);
+            let frames = frames.clone();
+            let exe = exe.clone();
+            let work = work.join(index.to_string());
+            runs.push(tokio::spawn(async move {
+                let _permit = checks.permits.acquire().await;
+                let measured = match version {
+                    Some(version) => real_check(&server, &exe, &work, version).await,
+                    None => None,
+                };
+                frames.send_modify(|f| {
+                    if let Some(row) = f.servers.get_mut(index).filter(|r| r.tag == server.tag) {
+                        row.check = measured.map_or(Check::Down, Check::Ok);
+                    }
+                });
+            }));
+        }
+        for run in runs {
+            let _ = run.await;
+        }
+        let _ = std::fs::remove_dir_all(&work);
+        checks.end();
+    });
+}
+
+/// One server's real check: its own xray, for this check alone, and the
+/// tunnel's own latency probe through it (`measure_latency`: two requests on
+/// one connection, the second timed).
+async fn real_check(
+    server: &ServerConfig,
+    exe: &std::path::Path,
+    work: &std::path::Path,
+    version: bliss_xray::Version,
+) -> Option<u32> {
+    if bliss_xray::minimum_xray_version(server).is_some_and(|needs| version < needs) {
+        return None;
+    }
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()?
+        .local_addr()
+        .ok()?
+        .port();
+    std::fs::create_dir_all(work).ok()?;
+    let config = bliss_xray::build(server, port, bliss_xray::LogLevel::None, version);
+    let xray = bliss_xray::Xray::spawn(exe, &config, work, port)
+        .await
+        .ok()?;
+    let outbound = SocksOutbound::new(
+        xray.socks_addr(),
+        EngineInfo {
+            kind: "xray-core",
+            version: version.to_string(),
+            external: true,
+        },
+    );
+    let measured = measure_latency(&outbound).await;
+    let _ = xray.shutdown().await;
+    let _ = std::fs::remove_dir_all(work);
+    measured.map(|ms| ms.min(u64::from(u32::MAX)) as u32)
+}
+
 fn ping_all(servers: &[ServerConfig], frames: &watch::Sender<Frame>, sweep: &Arc<Sweep>) {
     if !sweep.begin() {
         tracing::debug!("a server sweep is already running");
