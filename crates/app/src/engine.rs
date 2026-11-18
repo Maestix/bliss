@@ -221,6 +221,25 @@ pub struct Frame {
     pub vpn: VpnView,
     /// Whether there is an engine to start, and one on its way if not.
     pub engine_setup: EngineSetup,
+    /// The rule sets: which list, what is on the disk, a fetch under way.
+    pub geo: GeoView,
+}
+
+/// The rule sets as the settings screen shows them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GeoView {
+    /// The source's key (`rule_sets::SOURCES`).
+    pub source: String,
+    pub auto: bool,
+    /// Sizes in bytes of the files on the disk.
+    pub ip: Option<u64>,
+    pub site: Option<u64>,
+    /// When bliss itself last fetched them, in seconds since 1970. The pair
+    /// that came in the engine's archive has no date here.
+    pub updated: Option<i64>,
+    /// Bytes so far, while fetching.
+    pub fetching: Option<u64>,
+    pub problem: Option<String>,
 }
 
 /// The engine, as the window can do something about it.
@@ -451,6 +470,13 @@ pub enum Command {
         index: usize,
         tag: String,
     },
+    /// Fetch the rule sets (`geoip.dat`, `geosite.dat`), from another source
+    /// when one is named, which is then the profile's choice.
+    GeoUpdate(Option<String>),
+    /// Fetch them again by the week, or stop.
+    GeoAuto(bool),
+    /// The fetch finished. Only the engine sends this, to itself.
+    GeoDone(Result<(), String>),
     /// A star on the server at this place, or off it; the tag as for a delete.
     Favorite {
         index: usize,
@@ -929,6 +955,10 @@ async fn drive(
     // someone is most likely to be editing rules.
     let mut rules = Rules::from_setup(&setup);
     publish_routing(&frames, &rules, setup.tun);
+    publish_geo(&frames, &setup);
+    // When the rule sets were last tried for, by the wall clock, so a network
+    // that refuses them is not asked every five minutes (`geo_due`).
+    let mut geo_tried = 0i64;
 
     // Whether the connections screen is open, and so whether the frame
     // carries the table (`Command::Table`).
@@ -1430,6 +1460,60 @@ async fn drive(
                             None => toaster.show(&frames, "этой подписки уже нет", true),
                         }
                     }
+                    Command::GeoUpdate(source) => {
+                        if frames.borrow().geo.fetching.is_some() {
+                            continue;
+                        }
+                        if let Some(key) = source {
+                            let key = crate::rule_sets::source(&key).key;
+                            let mut next = setup.profile.clone();
+                            next.geo.source = (key != crate::rule_sets::SOURCES[0].key).then(|| key.to_owned());
+                            if next.geo != setup.profile.geo {
+                                match save_profile(&mut store, &next) {
+                                    Ok(()) => {
+                                        setup.profile = next;
+                                        forget_problem(&mut setup, &frames);
+                                        publish_geo(&frames, &setup);
+                                    }
+                                    Err(e) => {
+                                        toaster.show(&frames, e, true);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        fetch_geo(&setup, via(running.as_ref()), &frames, &own);
+                    }
+                    Command::GeoAuto(on) => {
+                        let mut next = setup.profile.clone();
+                        next.geo.auto = on;
+                        match save_profile(&mut store, &next) {
+                            Ok(()) => {
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                publish_geo(&frames, &setup);
+                            }
+                            Err(e) => toaster.show(&frames, e, true),
+                        }
+                    }
+                    Command::GeoDone(result) => match result {
+                        Ok(()) => {
+                            tracing::info!("geo: the rule sets are new");
+                            write_geo_stamp(&setup);
+                            frames.send_modify(|f| f.geo.fetching = None);
+                            // The rules were compiled from the old files.
+                            took_up_engine(&setup, &mut rules, running.as_ref(), &frames);
+                            toaster.show(&frames, "Гео-файлы обновлены", false);
+                        }
+                        Err(why) => {
+                            tracing::warn!("geo: {why}");
+                            frames.send_modify(|f| {
+                                f.geo.fetching = None;
+                                f.geo.problem = Some(why.clone());
+                            });
+                            toaster.show(&frames, format!("Гео-файлы не обновились: {why}"), true);
+                        }
+                    },
                     Command::Favorite { index, tag, on } => {
                         let links = links_of(&setup.profile);
                         let Some(link) = setup
@@ -1848,6 +1932,12 @@ async fn drive(
                 let route = via(running.as_ref());
                 if refresh(&setup.profile, None, true, false, &mut fetching, &mut began, route, &own) > 0 {
                     publish_subscriptions(&frames, &setup.profile, &fetching, &problems);
+                }
+                let now = jiff::Timestamp::now().as_second();
+                if frames.borrow().geo.fetching.is_none() && geo_due(&setup, now, geo_tried) {
+                    geo_tried = now;
+                    tracing::info!("geo: the rule sets are a week old; fetching them");
+                    fetch_geo(&setup, route, &frames, &own);
                 }
             }
             _ = probe.tick() => {
@@ -2603,9 +2693,117 @@ fn took_up_engine(
 ) {
     *rules = Rules::from_setup(setup);
     publish_routing(frames, rules, setup.tun);
+    publish_geo(frames, setup);
     if let Some(parts) = running {
         parts.serving.set_router(Arc::clone(&rules.router));
     }
+}
+
+/// The folder the rule sets are in: the routing's own, else the work dir
+/// (where the engine's archive puts them), as `Rules::compile` reads them.
+fn geo_dir(setup: &Setup) -> PathBuf {
+    setup
+        .profile
+        .routing
+        .geo_dir
+        .clone()
+        .unwrap_or_else(|| setup.work_dir.clone())
+}
+
+/// The file in the work dir that says when bliss last fetched the rule sets
+/// itself, in seconds since 1970. Without it they are the engine's own, and
+/// bliss does not change them by the week on its own say-so.
+const GEO_STAMP: &str = "geo-updated";
+
+fn geo_stamp(setup: &Setup) -> Option<i64> {
+    std::fs::read_to_string(setup.work_dir.join(GEO_STAMP))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn write_geo_stamp(setup: &Setup) {
+    let now = jiff::Timestamp::now().as_second();
+    if let Err(e) = std::fs::write(setup.work_dir.join(GEO_STAMP), now.to_string()) {
+        tracing::warn!("geo: the date was not written down: {e}");
+    }
+}
+
+/// Whether the rule sets are due: kept fresh, fetched by bliss before, and
+/// older than a week, and not tried for within the hour.
+fn geo_due(setup: &Setup, now: i64, tried: i64) -> bool {
+    setup.profile.geo.auto
+        && now.saturating_sub(tried) >= GEO_RETRY
+        && geo_stamp(setup).is_some_and(|at| now.saturating_sub(at) > crate::rule_sets::STALE)
+        && crate::rule_sets::size(&crate::rule_sets::site_path(&geo_dir(setup))).is_some()
+}
+
+/// A failed or refused fetch is not tried again for this long.
+const GEO_RETRY: i64 = 3600;
+
+/// What the screen knows of the files, except a fetch under way and its
+/// problem, which stay as they are.
+fn publish_geo(frames: &watch::Sender<Frame>, setup: &Setup) {
+    let dir = geo_dir(setup);
+    let source = crate::rule_sets::source(setup.profile.geo.source.as_deref().unwrap_or(""))
+        .key
+        .to_owned();
+    let (auto, updated) = (setup.profile.geo.auto, geo_stamp(setup));
+    let ip = crate::rule_sets::size(&crate::rule_sets::ip_path(&dir));
+    let site = crate::rule_sets::size(&crate::rule_sets::site_path(&dir));
+    frames.send_modify(|f| {
+        f.geo.source = source;
+        f.geo.auto = auto;
+        f.geo.updated = updated;
+        f.geo.ip = ip;
+        f.geo.site = site;
+    });
+}
+
+/// Fetch the rule sets off the loop, through the tunnel when it is up and
+/// straight if that fails (GitHub is slow, or shut, from some networks), and
+/// hand the outcome back through it.
+fn fetch_geo(
+    setup: &Setup,
+    via: Option<SocketAddr>,
+    frames: &watch::Sender<Frame>,
+    own: &mpsc::WeakUnboundedSender<Command>,
+) {
+    let source = crate::rule_sets::source(setup.profile.geo.source.as_deref().unwrap_or(""));
+    let dir = geo_dir(setup);
+    frames.send_modify(|f| {
+        f.geo.fetching = Some(0);
+        f.geo.problem = None;
+    });
+    tracing::info!("geo: fetching the rule sets from {}", source.key);
+    let (frames, own) = (frames.clone(), own.clone());
+    tokio::spawn(async move {
+        let progress = {
+            let frames = frames.clone();
+            move |bytes| {
+                frames.send_modify(|f| {
+                    if f.geo.fetching.is_some() {
+                        f.geo.fetching = Some(bytes);
+                    }
+                });
+            }
+        };
+        let result = match std::fs::create_dir_all(&dir) {
+            Err(e) => Err(e.to_string()),
+            Ok(()) => {
+                let mut result =
+                    crate::rule_sets::update(source, &dir, via.map(|a| (a, None)), &progress).await;
+                if result.is_err() && via.is_some() {
+                    result = crate::rule_sets::update(source, &dir, None, &progress).await;
+                }
+                result
+            }
+        };
+        if let Some(own) = own.upgrade() {
+            let _ = own.send(Command::GeoDone(result));
+        }
+    });
 }
 
 /// Fetch the engine off the loop, as `bliss engine install` does, showing in
@@ -4140,6 +4338,55 @@ mod tests {
         let rules = Rules::compile(routing, std::path::Path::new("nonexistent"));
         assert!(rules.view(false).warnings.is_empty());
         assert_eq!(rules.view(true).warnings.len(), 1);
+    }
+
+    /// The rule sets are fetched by the week only once bliss has fetched them
+    /// itself, only while asked to, and not again within the hour.
+    #[test]
+    fn the_rule_sets_are_due_by_the_week_once_bliss_has_fetched_them() {
+        let dir = std::env::temp_dir().join(format!("bliss-geo-due-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut setup = Setup {
+            servers: Vec::new(),
+            selected: 0,
+            work_dir: dir.clone(),
+            profile_path: dir.join("bliss.toml"),
+            engine_log: bliss_xray::LogLevel::Warning,
+            autostart: false,
+            tun: false,
+            profile: Profile::default(),
+            problem: None,
+        };
+        let week = crate::rule_sets::STALE;
+        let now = 10 * week;
+        // The engine's own pair: no date of ours, so nothing to renew.
+        std::fs::write(dir.join("geosite.dat"), b"x").unwrap();
+        assert!(!geo_due(&setup, now, 0));
+        // Ours, and old.
+        std::fs::write(dir.join(GEO_STAMP), (now - week - 1).to_string()).unwrap();
+        assert!(geo_due(&setup, now, 0));
+        // Tried a moment ago.
+        assert!(!geo_due(&setup, now, now - 60));
+        assert!(geo_due(&setup, now, now - GEO_RETRY));
+        // Asked not to.
+        setup.profile.geo.auto = false;
+        assert!(!geo_due(&setup, now, 0));
+        setup.profile.geo.auto = true;
+        // Fresh.
+        std::fs::write(dir.join(GEO_STAMP), (now - 60).to_string()).unwrap();
+        assert!(!geo_due(&setup, now, 0));
+        // Old, but the files are gone: that is a download to ask for, not one to repeat.
+        std::fs::write(dir.join(GEO_STAMP), "1").unwrap();
+        std::fs::remove_file(dir.join("geosite.dat")).unwrap();
+        assert!(!geo_due(&setup, now, 0));
+        // The routing's own folder is the one looked in.
+        let other = dir.join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("geosite.dat"), b"x").unwrap();
+        setup.profile.routing.geo_dir = Some(other);
+        assert!(geo_due(&setup, now, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

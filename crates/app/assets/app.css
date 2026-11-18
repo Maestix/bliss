@@ -656,6 +656,19 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
 }
 .check-row.on .check-box { background-color: var(--color-accent); box-shadow: none; }
 
+/* The rule sets' sources: one is chosen, as in a radio group. */
+.geo-source { cursor: pointer; transition: background-color .14s ease; }
+.geo-source:not(.on):not(.disabled):hover { background-color: rgba(239, 232, 245, .05); }
+.geo-source.on { background-color: rgba(238, 130, 196, .08); cursor: default; }
+.geo-source.disabled { cursor: default; opacity: .45; }
+.geo-dot {
+  width: 18px; height: 18px; flex: none;
+  display: grid; place-items: center; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px rgba(239, 232, 245, .28);
+}
+.geo-source.on .geo-dot { box-shadow: inset 0 0 0 1.5px var(--color-accent); }
+.geo-dot-in { width: 9px; height: 9px; border-radius: 50%; background-color: var(--color-accent); }
+
 /* A server's star: faint beside an ordinary row, as the bin is, and in full
    on a starred server or a hovered row. */
 .srv-star { opacity: .4; transition: opacity .14s ease; }

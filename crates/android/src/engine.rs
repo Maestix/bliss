@@ -1799,7 +1799,10 @@ impl Engine {
         let source = geo::source(&self.settings.geo_source);
         let files = self.paths.files.clone();
         // Through the tunnel when it is up: GitHub is slow from some networks.
-        let via = self.running.as_ref().map(|r| (r.socks, self.login.clone()));
+        let via = self
+            .running
+            .as_ref()
+            .map(|r| (r.socks, Some(self.login.clone())));
         let own = self.own.clone();
         tracing::info!("geo: fetching the rule sets from {}", source.key);
         tokio::spawn(async move {

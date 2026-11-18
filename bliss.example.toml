@@ -46,6 +46,16 @@ system_proxy = "unchanged"
 # `process` do. Programs pointed at the SOCKS and HTTP ports are unaffected.
 enabled = false
 
+[geo]
+# Where geoip.dat and geosite.dat come from when the settings screen fetches
+# them: "loyalsoldier" (the default), "runetfreedom" (what is blocked in
+# Russia) or "v2fly". The engine's own archive brings a pair too, and this is
+# how that pair is replaced. Written only once changed.
+# source = "loyalsoldier"
+#
+# Fetch them again by the week, once bliss has fetched them itself.
+auto = true
+
 # --- Маршрутизация ---------------------------------------------------------
 #
 # С каждым соединением можно сделать одно из трёх — или четырёх, если добавлен

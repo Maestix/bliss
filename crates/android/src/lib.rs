@@ -33,5 +33,10 @@ pub mod subscription;
 #[allow(dead_code)]
 pub mod rule_text;
 
+/// The rule sets' sources and their fetch, shared with the desktop, whose
+/// window has the same screen for them.
+#[path = "../../app/src/rule_sets.rs"]
+pub mod rule_sets;
+
 #[cfg(target_os = "android")]
 mod android;
