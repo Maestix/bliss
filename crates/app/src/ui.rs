@@ -48,7 +48,7 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::engine::{
-    Check, Command, Controller, Frame, Link, Ping, Reveal, Secret, State, bytes, rate,
+    Check, Command, Controller, Frame, GeoView, Link, Ping, Reveal, Secret, State, bytes, rate,
 };
 use crate::profile_file::Subject;
 use bliss_proto::{Action, ProxyMode};
@@ -5307,6 +5307,34 @@ mod tests {
     }
 
     #[test]
+    fn the_rule_sets_line_says_what_is_going_on() {
+        let mut geo = GeoView::default();
+        assert_eq!(geo_status(&geo, 0), ("Пока не скачаны".to_owned(), false));
+        geo.ip = Some(5 * 1024 * 1024);
+        geo.site = Some(5 * 1024 * 1024);
+        assert_eq!(
+            geo_status(&geo, 0),
+            ("На диске: 10,00 МБ · из архива движка".to_owned(), false)
+        );
+        geo.updated = Some(1_000);
+        assert_eq!(
+            geo_status(&geo, 1_000 + 3 * 86_400),
+            (
+                "На диске: 10,00 МБ · обновлены 3 дня назад".to_owned(),
+                false
+            )
+        );
+        geo.problem = Some("не удалось соединиться с GitHub".to_owned());
+        assert_eq!(
+            geo_status(&geo, 0),
+            ("Не вышло: не удалось соединиться с GitHub".to_owned(), true)
+        );
+        // A fetch under way outranks an old failure.
+        geo.fetching = Some(1024);
+        assert_eq!(geo_status(&geo, 0), ("Скачиваю… 1,00 КБ".to_owned(), false));
+    }
+
+    #[test]
     fn russian_plurals_agree() {
         let count = |n| plural(n, "соединение", "соединения", "соединений");
         assert_eq!(count(1), "1 соединение");
@@ -7303,9 +7331,124 @@ fn Settings(frame: Frame) -> Element {
                         }
                     }
                 }
+                GeoCard { geo: frame.geo.clone() }
                 VpnCard { vpn: frame.vpn.clone() }
             }
         }
+    }
+}
+
+/// The rule sets, `geoip.dat` and `geosite.dat`: which list they come from,
+/// what is on the disk, and the button. A category rule (`geosite:youtube`)
+/// decides nothing until they are here; the engine's own archive brings a
+/// pair, and this is how they are changed or kept fresh. As on the phone.
+#[component]
+fn GeoCard(geo: GeoView) -> Element {
+    let controller = use_context::<Controller>();
+    let busy = geo.fetching.is_some();
+    let here = geo.ip.is_some() && geo.site.is_some();
+    let (status, failed) = geo_status(&geo, jiff::Timestamp::now().as_second());
+    let status_color = if failed {
+        "#f2a7ad"
+    } else {
+        "var(--color-neutral-600)"
+    };
+    rsx! {
+        div {
+            style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:16px;\
+                    background-color:var(--color-surface);border-radius:8px;\
+                    box-shadow:var(--shadow-sm)",
+            span { style: "font:700 16px/1 var(--font-heading);padding:0 0 8px", "Гео-файлы" }
+            span {
+                style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600);padding:0 0 6px",
+                "Списки сайтов и адресов по категориям и странам — для правил вида \
+                 geosite:youtube и geoip:ru."
+            }
+            for source in crate::rule_sets::SOURCES.iter() {
+                {
+                    let on = source.key == geo.source;
+                    let class = match (on, busy) {
+                        (true, _) => "geo-source on",
+                        (false, true) => "geo-source disabled",
+                        (false, false) => "geo-source",
+                    };
+                    let key = source.key.to_owned();
+                    let controller = controller.clone();
+                    rsx! {
+                        div {
+                            key: "{source.key}",
+                            class: "{class}",
+                            style: "display:flex;align-items:center;gap:12px;margin:0 -10px;\
+                                    padding:9px 10px;border-radius:4px",
+                            onclick: move |_| if !busy && !on {
+                                controller.send(Command::GeoUpdate(Some(key.clone())))
+                            },
+                            div { class: "geo-dot",
+                                if on {
+                                    div { class: "geo-dot-in" }
+                                }
+                            }
+                            div { style: "display:flex;flex-direction:column;gap:2px;min-width:0",
+                                span { style: "font-size:14.5px", "{source.name}" }
+                                span {
+                                    style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
+                                    "{source.about}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            span {
+                style: "padding:8px 0 4px;font-size:13.5px;line-height:1.45;color:{status_color}",
+                "{status}"
+            }
+            div { style: "display:flex;padding:0 0 4px",
+                Button {
+                    label: if here { "Обновить" } else { "Скачать" },
+                    enabled: !busy,
+                    onclick: {
+                        let controller = controller.clone();
+                        move |_| controller.send(Command::GeoUpdate(None))
+                    },
+                    icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
+                }
+            }
+            CheckRow {
+                checked: geo.auto,
+                enabled: true,
+                title: "Обновлять раз в неделю",
+                hint: "Когда списки уже скачаны отсюда: раз в неделю bliss возьмёт новые, через \
+                       туннель, если он включён.",
+                onclick: {
+                    let on = geo.auto;
+                    move |_| controller.send(Command::GeoAuto(!on))
+                },
+            }
+        }
+    }
+}
+
+/// The line under the sources: a fetch under way, what went wrong, or what is
+/// on the disk and how old it is. The flag is true for a failure, to be drawn
+/// in its colour.
+fn geo_status(geo: &GeoView, now: i64) -> (String, bool) {
+    if let Some(done) = geo.fetching {
+        return (format!("Скачиваю… {}", bytes(done)), false);
+    }
+    if let Some(why) = &geo.problem {
+        return (format!("Не вышло: {why}"), true);
+    }
+    match (geo.ip, geo.site) {
+        (Some(ip), Some(site)) => {
+            let mut text = format!("На диске: {}", bytes(ip + site));
+            match geo.updated {
+                Some(at) => text.push_str(&format!(" · обновлены {}", ago(at, now))),
+                None => text.push_str(" · из архива движка"),
+            }
+            (text, false)
+        }
+        _ => ("Пока не скачаны".to_owned(), false),
     }
 }
 

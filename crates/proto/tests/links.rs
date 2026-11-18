@@ -680,6 +680,25 @@ fn the_example_profile_is_a_valid_profile() {
     );
 }
 
+/// The rule sets' section is written only when it differs from what a profile
+/// without it means, so a profile that never touched it stays as it was.
+#[test]
+fn the_rule_sets_section_is_written_only_when_it_says_something() {
+    let profile = bliss_proto::Profile::default();
+    assert!(profile.geo.auto && profile.geo.source.is_none());
+    let text = toml::to_string(&profile).expect("serializes");
+    assert!(!text.contains("[geo]"), "{text}");
+
+    let mut changed = profile;
+    changed.geo.source = Some("v2fly".to_owned());
+    changed.geo.auto = false;
+    let text = toml::to_string(&changed).expect("serializes");
+    assert!(text.contains("[geo]"), "{text}");
+    let back: bliss_proto::Profile = toml::from_str(&text).expect("reads back");
+    assert_eq!(back.geo, changed.geo);
+    assert!(toml::from_str::<bliss_proto::Profile>("[geo]\nsources = 1").is_err());
+}
+
 #[test]
 fn short_id_may_be_absent_or_full_length() {
     assert!(ShortId::EMPTY.is_empty());

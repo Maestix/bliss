@@ -92,8 +92,8 @@ The long-form plan, in Russian, lives outside the repo at
 | `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service and, on Linux, `pkexec` (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision tied to bliss's life — a Job Object, on Linux the parent-death signal (`job.rs`) — GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
 | `crates/tun` | `bliss-tun` | stage 2: `wintun.dll` carried inside the binary (`lib.rs`), the adapter (`device.rs`; Linux's own TUN device, `linux_device.rs`), the machine's addresses and routes (`net.rs`; over netlink, `linux_net.rs`), packets turned into connections and flows (`stack.rs`), and the lookups answered with addresses read back as names, where bliss is the DNS server (`names.rs`, Android's only so far); `tests/netns.rs` carries a connection and a datagram through Linux's device in a namespace of its own (§2) |
-| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), Linux's tray (`tray_linux.rs`) and single window (`instance.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), starting with the session (`startup.rs`), log ring buffer (`logs.rs`), clipboard, the stand-ins that keep libxdo out of Linux's binary (`no_xdo.rs`, guarded by `tests/libraries.rs`) |
-| `crates/android` | `bliss-android` | the tunnel's engine on Android, `libbliss.so`: its own loop (`engine.rs`), the JSON-lines socket the screens use (`protocol.rs`, `tests/socket.rs`), the three JNI calls and the one back, `ownerOf` (`android.rs`), the rule sets fetched from GitHub (`geo.rs`), and the desktop's `subscription.rs` and `rule_text.rs` by `#[path]`; the app around it is the Gradle project in `android/` (docs/android-stack.md) |
+| `crates/app` | `bliss` (binary) | CLI (`main.rs`), engine thread (`engine.rs`), Dioxus window (`ui.rs`), Linux's tray (`tray_linux.rs`) and single window (`instance.rs`), the profile and every change the window makes to it (`profile_file.rs`), rule conditions as typed (`rule_text.rs`), subscriptions (`subscription.rs`), the rule sets' sources and fetch (`rule_sets.rs`, shared with the phone), starting with the session (`startup.rs`), log ring buffer (`logs.rs`), clipboard, the stand-ins that keep libxdo out of Linux's binary (`no_xdo.rs`, guarded by `tests/libraries.rs`) |
+| `crates/android` | `bliss-android` | the tunnel's engine on Android, `libbliss.so`: its own loop (`engine.rs`), the JSON-lines socket the screens use (`protocol.rs`, `tests/socket.rs`), the three JNI calls and the one back, `ownerOf` (`android.rs`), the rule sets fetched from GitHub (`geo.rs`), and the desktop's `subscription.rs`, `rule_sets.rs` and `rule_text.rs` by `#[path]`; the app around it is the Gradle project in `android/` (docs/android-stack.md) |
 | `crates/spike` | `bliss-spike` | renderer measurement (WebView2 vs Blitz), not in `default-members`; build with `cargo build -p bliss-spike --profile spike`; results in `docs/spike-1.0-renderer.md` |
 
 **The seam:** `bliss-core` and `bliss-proto` never depend on `bliss-xray`; only
@@ -119,7 +119,8 @@ Runtime paths on Windows:
   without it
 - work dir: `%LOCALAPPDATA%\bliss\data` — `xray.exe`, `geoip.dat`,
   `geosite.dat`, `xray.json`, `bliss.log`, `system-proxy-backup.txt`,
-  `selected` (the server in use, by key), and
+  `selected` (the server in use, by key), `geo-updated` (when bliss itself
+  last fetched the rule sets), and
   `openvpn\`: `profile.ovpn` while OpenVPN starts, and OpenVPN's own
   `openvpn.log`, written over at every start
 - default ports: inbound SOCKS 10808, HTTP 10809; xray bridge 11080
@@ -657,6 +658,19 @@ These cost the most time on this project. None of them announce themselves.
   tap alone and «Автовыбор», a failover or a network's rule moved the server
   without it (`remember` in its engine). `bliss run` without `--server` takes
   it up as well (`the_server_in_use_outlives_a_restart`, both platforms).
+- **The rule sets are managed as on the phone** (`rule_sets.rs`, the
+  settings screen's «Гео-файлы», `Command::GeoUpdate`/`GeoAuto`/`GeoDone`):
+  three sources (Loyalsoldier, runetfreedom, v2fly), the choice and the
+  weekly switch in `[geo]` of the profile (written only once changed), a
+  fetch off the loop through the tunnel and then straight, each file read as
+  a rule set before it replaces the one in use, and the rules compiled again
+  after (`took_up_engine`). The pair in the engine's archive has no date, so
+  the weekly update waits for the first fetch bliss makes itself, which
+  writes `geo-updated`, and is not tried again within the hour
+  (`geo_due`). The fetch itself is the phone's code, moved to one file both
+  include; its `via` takes a login or none. Written without a window to
+  look at it and not run against GitHub from here: the container reaches
+  the internet through an HTTPS proxy only.
 - **A star is `favorite = true` on a `[[server]]`**, written only when set;
   the list shows starred servers under «Избранное» first and not again in
   their section (`server_sections`), the tray's menus put them first

@@ -22,6 +22,10 @@ pub struct Profile {
     pub inbound: Inbound,
     #[serde(default)]
     pub tun: Tun,
+    /// The rule sets' source and whether they are kept fresh; written only
+    /// once changed.
+    #[serde(default, skip_serializing_if = "Geo::is_default")]
+    pub geo: Geo,
     #[serde(default)]
     pub routing: crate::Routing,
     /// Server lists a provider publishes at an address. Their servers are the
@@ -175,6 +179,40 @@ pub struct Inbound {
 pub struct Tun {
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Where `geoip.dat` and `geosite.dat` come from, and whether bliss fetches
+/// them again by the week. The files themselves are the routing's
+/// (`Routing::geo_dir`, else the work dir); the list's own key is
+/// `rule_sets::SOURCES`, which this crate does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Geo {
+    /// A source's key; unset is the first one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Fetch again by the week, once bliss has fetched them itself.
+    #[serde(default = "Geo::default_auto")]
+    pub auto: bool,
+}
+
+impl Geo {
+    fn default_auto() -> bool {
+        true
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for Geo {
+    fn default() -> Self {
+        Self {
+            source: None,
+            auto: Self::default_auto(),
+        }
+    }
 }
 
 /// What to do with the machine-wide proxy settings, the three choices every
