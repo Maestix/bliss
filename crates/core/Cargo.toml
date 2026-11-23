@@ -8,6 +8,7 @@ description = "Inbounds, routing, relay and the connection table — everything 
 
 [dependencies]
 async-trait.workspace = true
+sha2.workspace = true                                  # Trojan's key: the hex of a SHA-224
 bliss-proto = { path = "../proto" }
 jiff.workspace = true
 thiserror.workspace = true

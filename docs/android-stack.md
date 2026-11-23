@@ -720,3 +720,26 @@ or with no dialog to open (`ActivityNotFoundException`), it says the dialog
 never stayed and why that happens, with a button to Android's VPN settings
 and another try; a refusal pressed by hand gets the short word. Not seen on
 that phone: the cause there is the likeliest one, not a measured one.
+
+## 0.5.14: datagrams are not a SOCKS association
+
+An article of 7 April 2026 on VLESS clients says any app on a phone can ask
+a client's local proxy where the tunnel comes out, and that UDP gets past a
+login. The first half was closed from the start (a login and a port that
+differs every run, 0.2.x). The second is true of xray 26.3.27, checked
+here: with a SOCKS UDP association open — any UDP flow of the TUN — a
+datagram in SOCKS's form sent to the proxy's port by another program is
+carried out through the server with no login. So the SOCKS inbound now
+serves TCP only (`udp: false`), and datagrams go over a Trojan inbound
+beside it: UDP inside the TCP stream, behind the run's password, no UDP
+socket for a stranger to write to (`trojan_udp.rs`, in `bliss-core`, the
+client end; `bliss_xray::datagrams_over_trojan`). Seen with a real xray:
+the datagram of a stranger gets nothing at either port while a flow is in
+the air, a wrong password gets nothing, and the test fails with the UDP
+left on. The geo files' and subscriptions' fetch go through the SOCKS port
+as before, with its login.
+
+What the article also asks of clients and bliss does not do: nothing runs
+xray's API (no `HandlerService`, no `StatsService`), and the port is not
+one of the well-known ones; a program that scans loopback still finds a
+SOCKS port that wants a login, and a Trojan port that says nothing.

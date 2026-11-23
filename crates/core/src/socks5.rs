@@ -305,7 +305,7 @@ pub fn reply_code_for(err: &std::io::Error) -> u8 {
 
 // --- shared wire format ---------------------------------------------------
 
-fn write_target(out: &mut Vec<u8>, target: &Target) -> Result<(), SocksError> {
+pub(crate) fn write_target(out: &mut Vec<u8>, target: &Target) -> Result<(), SocksError> {
     match target {
         Target::Domain { host, port } => {
             if host.len() > MAX_DOMAIN {
@@ -330,7 +330,7 @@ fn write_target(out: &mut Vec<u8>, target: &Target) -> Result<(), SocksError> {
     Ok(())
 }
 
-async fn read_target<S>(stream: &mut S) -> Result<Target, SocksError>
+pub(crate) async fn read_target<S>(stream: &mut S) -> Result<Target, SocksError>
 where
     S: AsyncRead + Unpin,
 {

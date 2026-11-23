@@ -79,6 +79,9 @@ pub struct SocksOutbound {
     addr: SocketAddr,
     info: EngineInfo,
     login: Option<socks5::Login>,
+    /// The engine's Trojan inbound and its password, when datagrams go there
+    /// rather than through a SOCKS association (`with_datagrams`).
+    datagrams: Option<(SocketAddr, String)>,
 }
 
 impl SocksOutbound {
@@ -87,6 +90,7 @@ impl SocksOutbound {
             addr,
             info,
             login: None,
+            datagrams: None,
         }
     }
 
@@ -95,6 +99,14 @@ impl SocksOutbound {
     /// serves only who has them.
     pub fn with_login(mut self, login: socks5::Login) -> Self {
         self.login = Some(login);
+        self
+    }
+
+    /// Send datagrams through the engine's Trojan inbound at `addr`, behind
+    /// `password`, instead of a SOCKS association: that one is a UDP port
+    /// that takes datagrams from every app on the phone (`trojan_udp.rs`).
+    pub fn with_datagrams(mut self, addr: SocketAddr, password: String) -> Self {
+        self.datagrams = Some((addr, password));
         self
     }
 }
@@ -132,6 +144,20 @@ impl Outbound for SocksOutbound {
     }
 
     async fn bind_udp(&self, target: &Target) -> std::io::Result<BoxedDatagram> {
+        if let Some((addr, password)) = &self.datagrams {
+            return match tokio::time::timeout(
+                DIAL_TIMEOUT,
+                crate::trojan_udp::open(*addr, password, target),
+            )
+            .await
+            {
+                Ok(opened) => opened,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("the engine did not answer within {DIAL_TIMEOUT:?}"),
+                )),
+            };
+        }
         // The association is asked for over a TCP connection and lasts exactly
         // as long as that connection: the proxy drops it when the connection
         // closes, so the channel keeps it open for its whole life.
