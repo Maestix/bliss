@@ -137,6 +137,35 @@ pub fn require_login(config: &mut Value, user: &str, pass: &str) {
     }
 }
 
+/// Take datagrams off the SOCKS port and give them a Trojan inbound of their
+/// own on `port`, behind `password` (`bliss_core::SocksOutbound::with_datagrams`).
+///
+/// A SOCKS5 UDP association is a UDP port, and a UDP port answers anyone who
+/// sends it a datagram: with one association open — any UDP flow of the
+/// tunnel's — another app on the phone could send a SOCKS datagram to the port,
+/// no login asked, and leave through the server around bliss's rules. Found by
+/// an article on 7 April 2026 about VLESS clients, and seen here against xray
+/// 26.3.27. The Trojan inbound carries UDP inside its TCP stream, behind the
+/// password, and opens no UDP socket; the SOCKS inbound keeps TCP and serves
+/// no UDP.
+pub fn datagrams_over_trojan(config: &mut Value, port: u16, password: &str) {
+    if let Some(settings) = config
+        .pointer_mut("/inbounds/0/settings")
+        .and_then(Value::as_object_mut)
+    {
+        settings.insert("udp".to_owned(), json!(false));
+    }
+    if let Some(inbounds) = config.get_mut("inbounds").and_then(Value::as_array_mut) {
+        inbounds.push(json!({
+            "tag": "bliss-datagrams",
+            "listen": "127.0.0.1",
+            "port": port,
+            "protocol": "trojan",
+            "settings": { "clients": [{ "password": password }] }
+        }));
+    }
+}
+
 fn outbound(server: &ServerConfig, engine: Version) -> Value {
     let address = server.address.to_string();
     let port = server.port;
@@ -517,6 +546,22 @@ mod tests {
             config["inbounds"][0]["settings"],
             json!({ "auth": "password", "accounts": [{ "user": "u1", "pass": "QQQQ" }], "udp": true })
         );
+    }
+
+    /// The SOCKS port serves no UDP, and the datagrams have an inbound behind
+    /// a password that opens no UDP socket of its own.
+    #[test]
+    fn datagrams_have_a_door_of_their_own() {
+        let server: ServerConfig = "trojan://PPPP@example.net:443#t".parse().unwrap();
+        let mut config = build(&server, 10_000, LogLevel::Warning, STABLE);
+        datagrams_over_trojan(&mut config, 10_001, "TTTT");
+        assert_eq!(config["inbounds"][0]["settings"]["udp"], json!(false));
+        assert_eq!(config["inbounds"].as_array().unwrap().len(), 2);
+        let door = &config["inbounds"][1];
+        assert_eq!(door["protocol"], "trojan");
+        assert_eq!(door["listen"], "127.0.0.1");
+        assert_eq!(door["port"], 10_001);
+        assert_eq!(door["settings"]["clients"], json!([{ "password": "TTTT" }]));
     }
 
     /// xray 26.3.27 panics on the first connection when a hop has no

@@ -596,6 +596,24 @@ These cost the most time on this project. None of them announce themselves.
   ways apps look for a VPN (`the_engine_serves_only_who_has_the_login`,
   ignored, needs `BLISS_XRAY`). The desktop's port stays open: what runs
   beside it runs as the same user.
+  - **Datagrams do not go through a SOCKS association there.** An
+    association is a UDP port, which takes a datagram from anyone: with one
+    open — any UDP flow of the tunnel — another app could send a SOCKS
+    datagram to the port, no login asked, and leave through the server
+    around bliss's rules (an article of 7 April 2026 said so of VLESS
+    clients; seen here against xray 26.3.27, and a datagram with no
+    association open gets nothing). The SOCKS inbound serves TCP only
+    (`udp: false`) and the datagrams ride xray's Trojan inbound on a port of
+    its own, behind the run's password, as frames inside the TCP stream: no
+    UDP socket, and a stranger gets no answer
+    (`bliss_xray::datagrams_over_trojan`, `SocksOutbound::with_datagrams`,
+    `trojan_udp.rs`; `the_ports_serve_only_bliss` in
+    `crates/xray/tests/datagrams.rs`, ignored, needs `BLISS_XRAY`, seen
+    failing with the UDP left on). The two ports are chosen together
+    (`Engine::door`) and stay for the run, since a switch restarts xray
+    under the same outbound. Not done: the desktop's bridge (11080, open)
+    and its two inbound ports, which give the exit's address to any program
+    of the user's by design.
 - **A connection a rule sends to the VPN goes there or nowhere.** With no VPN
   up, `Serving::dial_tunnelled` refuses it (`NotConnected`, SOCKS reply 3,
   HTTP 502 saying the VPN is not connected) rather than letting it fall

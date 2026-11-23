@@ -25,3 +25,6 @@ windows.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 # PR_SET_PDEATHSIG: the engine dies with bliss (job.rs).
 libc.workspace = true
+
+[dev-dependencies]
+bliss-core = { path = "../core" }

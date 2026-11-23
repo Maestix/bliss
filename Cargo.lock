@@ -798,6 +798,7 @@ dependencies = [
  "bliss-proto",
  "jiff",
  "libc",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -863,6 +864,7 @@ name = "bliss-xray"
 version = "0.5.13"
 dependencies = [
  "base64",
+ "bliss-core",
  "bliss-proto",
  "futures-util",
  "libc",

@@ -14,6 +14,7 @@ mod socks5;
 mod target;
 mod through;
 mod tracker;
+mod trojan_udp;
 
 pub mod geo;
 pub mod http;

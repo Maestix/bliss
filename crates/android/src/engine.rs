@@ -413,6 +413,14 @@ fn fresh_login() -> bliss_core::Login {
     }
 }
 
+/// Another such port, not `taken`.
+fn free_port_besides(taken: u16) -> u16 {
+    (0..8)
+        .filter_map(|_| free_port())
+        .find(|port| *port != taken)
+        .unwrap_or_else(|| taken.wrapping_add(1))
+}
+
 /// A port nobody holds now, from the system's own choice: the engine's
 /// port differs from run to run, so it is not a fixed place to knock.
 fn free_port() -> Option<u16> {
@@ -477,6 +485,9 @@ struct Engine {
     /// The engine's SOCKS port and the login it asks for, made afresh for
     /// each run of the tunnel's process (`fresh_login`, `free_port`).
     bridge: u16,
+    /// The Trojan inbound the datagrams go through, beside the bridge
+    /// (`bliss_xray::datagrams_over_trojan`).
+    door: u16,
     login: bliss_core::Login,
     /// The tracker's totals as the tunnel last came up: «за сессию» counts
     /// from there. The tracker lives as long as the process, which the
@@ -573,6 +584,7 @@ impl Engine {
             running: None,
             port: Port::default(),
             bridge: 0,
+            door: 0,
             login: fresh_login(),
             session: (0, 0, 0),
             pending: None,
@@ -607,6 +619,7 @@ impl Engine {
             held_off: false,
         };
         engine.bridge = free_port().unwrap_or(engine.profile.engine.bridge_port);
+        engine.door = free_port_besides(engine.bridge);
         engine.settle_protocols();
         engine.offer_quic_rule();
         engine.reparse();
@@ -1013,7 +1026,7 @@ impl Engine {
         let paths = self.paths.clone();
         let tracker = Arc::clone(&self.tracker);
         let router = Arc::new(self.router());
-        let port = self.bridge;
+        let (port, door) = (self.bridge, self.door);
         let login = self.login.clone();
         let version = self.version;
         let names = Arc::clone(&self.names);
@@ -1024,7 +1037,7 @@ impl Engine {
         // through the server go on after it, so a stop asked for meanwhile
         // need not wait for them.
         self.port.queue(move |slot| async move {
-            let started = spawn_engine(&server, &paths, port, version, &login, &slot).await;
+            let started = spawn_engine(&server, &paths, (port, door), version, &login, &slot).await;
             tokio::spawn(async move {
                 let result = match started {
                     Ok((socks, version)) => {
@@ -1032,6 +1045,7 @@ impl Engine {
                             keep,
                             link,
                             socks,
+                            door,
                             login,
                             version,
                             tracker,
@@ -1082,12 +1096,12 @@ impl Engine {
         let epoch = self.epoch;
         let own = self.own.clone();
         let paths = self.paths.clone();
-        let port = self.bridge;
+        let (port, door) = (self.bridge, self.door);
         let login = self.login.clone();
         let version = self.version;
         tracing::info!("tunnel: switching to «{}»", server.tag);
         self.port.queue(move |slot| async move {
-            let started = spawn_engine(&server, &paths, port, version, &login, &slot).await;
+            let started = spawn_engine(&server, &paths, (port, door), version, &login, &slot).await;
             tokio::spawn(async move {
                 let result = match started {
                     Ok(_) => {
@@ -2510,7 +2524,7 @@ fn silent(server: &ServerConfig, e: &str) -> String {
 async fn spawn_engine(
     server: &ServerConfig,
     paths: &Paths,
-    port: u16,
+    (port, door): (u16, u16),
     version: Option<bliss_xray::Version>,
     login: &bliss_core::Login,
     slot: &Slot,
@@ -2525,6 +2539,7 @@ async fn spawn_engine(
     };
     let mut config = bliss_xray::build(server, port, bliss_xray::LogLevel::Warning, version);
     bliss_xray::require_login(&mut config, &login.user, &login.pass);
+    bliss_xray::datagrams_over_trojan(&mut config, door, &login.pass);
     let xray = bliss_xray::Xray::spawn(&exe, &config, &paths.work(), port)
         .await
         .map_err(|e| format!("движок не запустился: {e}"))?;
@@ -2540,6 +2555,8 @@ struct Up {
     keep: bool,
     link: String,
     socks: SocketAddr,
+    /// The port of the Trojan inbound, on the same address.
+    door: u16,
     login: bliss_core::Login,
     version: bliss_xray::Version,
     tracker: Arc<Tracker>,
@@ -2562,6 +2579,7 @@ async fn bring_up(
         keep,
         link,
         socks,
+        door,
         login,
         version,
         tracker,
@@ -2579,7 +2597,8 @@ async fn bring_up(
                 external: true,
             },
         )
-        .with_login(login),
+        .with_login(login.clone())
+        .with_datagrams(SocketAddr::new(socks.ip(), door), login.pass),
     );
     let serving = Arc::new(Serving::new(outbound, tracker, router));
     let mut carrying = bliss_tun::Carrying::new(Arc::clone(&serving), bliss_tun::Gateway);
@@ -2875,7 +2894,8 @@ mod tests {
         let login = fresh_login();
         let slot = Slot::default();
         let port = free_port().unwrap();
-        let (socks, version) = spawn_engine(&server, &paths, port, None, &login, &slot)
+        let door = free_port_besides(port);
+        let (socks, version) = spawn_engine(&server, &paths, (port, door), None, &login, &slot)
             .await
             .expect("the engine starts with a login");
         let info = || bliss_core::EngineInfo {
