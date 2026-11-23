@@ -48,12 +48,20 @@ object Native {
                 InetSocketAddress(InetAddress.getByName(remoteIp), remotePort),
             )
             if (uid == Process.INVALID_UID) return null
+            // Another user of the phone (a work profile, Shelter's): its apps
+            // are not this user's to name, and its sockets reach the tunnel
+            // only by binding to its interface by name; the engine turns
+            // them away (`shut_out_of` in crates/android/src/engine.rs).
+            if (uid / PER_USER_RANGE != Process.myUid() / PER_USER_RANGE) return "foreign:$uid"
             packages.get(uid) ?: (context.packageManager.getPackagesForUid(uid)?.firstOrNull()
                 ?: context.packageManager.getNameForUid(uid))?.also { packages.put(uid, it) }
         } catch (_: Exception) {
             null
         }
     }
+
+    /** Uids per user of the phone: Android's `UserHandle.PER_USER_RANGE`. */
+    private const val PER_USER_RANGE = 100_000
 
     fun socket(context: Context): String = File(context.filesDir, "engine.sock").path
 }
