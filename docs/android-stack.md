@@ -757,8 +757,13 @@ So the engine now asks whose each connection is (it already did, for app
 rules) and closes those of another user of the phone — `ownerOf` says
 `foreign:<uid>` when the uid's user differs from bliss's — and of the apps
 «мимо VPN» in `bypass.txt`, which can do the same. A connection whose owner
-the system does not name is carried, as before. Still to be seen on the
-phone: that `getConnectionOwnerUid` names a work profile's sockets at all.
+the system does not name is carried, as before. Run again from Shelter with
+0.5.15 the same evening, RKNHardering found no way through the tunnel: no
+«VPN network binding», no VPN channel among the addresses it saw, and the
+server's address nowhere in the report; its verdict went from DETECTED
+(R1, a bypass confirmed) to NEEDS_REVIEW, on `tun0` and the routes alone.
+So `getConnectionOwnerUid` does name a work profile's sockets to the VPN's
+app, at least on the user's phone.
 
 What the same report found and nothing in an app can change: `tun0` in
 `getifaddrs()`, `if_indextoname`, `/proc/sys/net/*/conf` and the routing
