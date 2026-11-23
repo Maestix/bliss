@@ -743,3 +743,23 @@ What the article also asks of clients and bliss does not do: nothing runs
 xray's API (no `HandlerService`, no `StatsService`), and the port is not
 one of the well-known ones; a program that scans loopback still finds a
 SOCKS port that wants a login, and a Trojan port that says nothing.
+
+## 0.5.15: an app outside the VPN cannot borrow its interface
+
+The user ran RKNHardering in the Shelter work profile that holds their
+Russian apps, beside bliss 0.5.14 in the main one. From there it saw no
+`TRANSPORT_VPN`, and the SOCKS port it found asked for a login; but it bound
+a socket to `tun0` by name (`SO_BINDTODEVICE`, which Android lets any app
+do), sent a request to an IP checker through it, and read the server's
+address off the answer — its hard verdict. Android routes an app into the
+VPN by its uid; a socket bound to the interface goes in whatever its uid.
+So the engine now asks whose each connection is (it already did, for app
+rules) and closes those of another user of the phone — `ownerOf` says
+`foreign:<uid>` when the uid's user differs from bliss's — and of the apps
+«мимо VPN» in `bypass.txt`, which can do the same. A connection whose owner
+the system does not name is carried, as before. Still to be seen on the
+phone: that `getConnectionOwnerUid` names a work profile's sockets at all.
+
+What the same report found and nothing in an app can change: `tun0` in
+`getifaddrs()`, `if_indextoname`, `/proc/sys/net/*/conf` and the routing
+table; and a default route through it beside Wi-Fi's.

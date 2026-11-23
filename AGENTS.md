@@ -614,6 +614,19 @@ These cost the most time on this project. None of them announce themselves.
     under the same outbound. Not done: the desktop's bridge (11080, open)
     and its two inbound ports, which give the exit's address to any program
     of the user's by design.
+  - **The tunnel carries for this user's routed apps alone** (`ShutOut`,
+    `shut_out_of`). Android keeps an app out of the VPN by its routing, but
+    a socket bound to `tun0` by name (`SO_BINDTODEVICE`) gets in whoever
+    opened it. The user keeps Russian apps in a Shelter work profile; run
+    there on 24 November 2026, RKNHardering bound to `tun0` and read the
+    server's address off an IP checker («VPN network binding», its hard
+    verdict). Now `ownerOf` names another user's connection
+    `foreign:<uid>` (uid / 100 000 differs from bliss's) and the stack
+    closes it, as it does one from an app in `bypass.txt` («мимо VPN»); a
+    flow gets the ICMP refusal. A connection whose owner the system does
+    not name is still carried. The same run saw `tun0` itself — in
+    `getifaddrs`, `/proc/sys/net/*/conf`, the routes — which no app can
+    hide, and found no `TRANSPORT_VPN` from the work profile.
 - **A connection a rule sends to the VPN goes there or nowhere.** With no VPN
   up, `Serving::dial_tunnelled` refuses it (`NotConnected`, SOCKS reply 3,
   HTTP 502 saying the VPN is not connected) rather than letting it fall

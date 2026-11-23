@@ -50,6 +50,9 @@ pub use device::MTU;
 pub use device::Packets;
 #[cfg(target_os = "android")]
 pub use net::Gateway;
+/// Named outside Android too, where the phone's engine is tested.
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
+pub use stack::ShutOut;
 #[cfg(target_os = "android")]
 pub use stack::{Carrying, Owner, serve};
 

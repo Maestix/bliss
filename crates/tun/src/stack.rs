@@ -58,6 +58,8 @@ pub struct Carrying {
     /// a table read (Android: `getConnectionOwnerUid`). Without it, the
     /// machine's own tables (`bliss_core::name_for_connection`).
     pub owner: Option<Owner>,
+    /// Programs whose connections the tunnel does not take (`ShutOut`).
+    pub shut_out: Option<ShutOut>,
     /// Sites' real addresses, learnt through the tunnel where `names` hands
     /// out the pool's: what `geoip:` and subnet rules decide a site by.
     pub addresses: Arc<Addresses>,
@@ -78,6 +80,19 @@ const OWNER_WAIT: Duration = Duration::from_millis(500);
 /// Which program holds a connection: TCP or not, its local end and its far one.
 pub type Owner = Arc<dyn Fn(bool, SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
 
+/// Whether the connections of a program, named as `Owner` names it, are not
+/// the tunnel's to carry.
+///
+/// Android keeps an app out of the VPN by its list of routed apps, but a
+/// socket bound to the tunnel's interface by name (`SO_BINDTODEVICE`) goes in
+/// regardless, whoever opened it: an app in another profile, or one the
+/// person put «мимо VPN» because it refuses to work beside a VPN, can then
+/// ask the world its address and read the server's off the answer — which is
+/// what a detector run from a work profile did on 24 November 2026
+/// (RKNHardering's «VPN network binding»). Such a connection is closed here,
+/// as a rule's «block» closes it.
+pub type ShutOut = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 impl Carrying {
     pub fn new(serving: Arc<Serving>, gateway: Gateway) -> Self {
         Self {
@@ -86,6 +101,7 @@ impl Carrying {
             names: None,
             sniff: false,
             owner: None,
+            shut_out: None,
             addresses: Arc::new(Addresses::new()),
             answers: std::sync::OnceLock::new(),
             asking: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -102,6 +118,17 @@ impl Carrying {
             Some(owner) => ask_owner(owner, tcp, local, remote, OWNER_WAIT).await,
             None if tcp => bliss_core::name_for_connection(local, remote),
             None => bliss_core::name_for_datagram_port(local.port()),
+        }
+    }
+
+    /// Whether the program behind a connection is one the tunnel does not
+    /// carry for (`shut_out`). A connection whose program is not known is
+    /// carried: asking can fail, and nobody's phone should lose its network
+    /// to that.
+    fn shuts_out(&self, process: Option<&str>) -> bool {
+        match (&self.shut_out, process) {
+            (Some(shut_out), Some(program)) => shut_out(program),
+            _ => false,
         }
     }
 
@@ -582,6 +609,14 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     let process = carrying
         .program(true, client.local_addr(), client.peer_addr())
         .await;
+    if carrying.shuts_out(process.as_deref()) {
+        tracing::info!(
+            "tun: a connection from {} is not carried",
+            process.as_deref().unwrap_or("?")
+        );
+        let _ = client.shutdown().await;
+        return Ok(());
+    }
     // One table decides this connection, whatever changes while it is open.
     let decision = carrying
         .decide(&target, seen, process.as_deref(), false)
@@ -736,6 +771,14 @@ async fn carry_datagrams(client: IpStackUdpStream, carrying: Arc<Carrying>) -> i
     let process = carrying
         .program(false, client.local_addr(), client.peer_addr())
         .await;
+    if carrying.shuts_out(process.as_deref()) {
+        tracing::info!(
+            "tun: a flow from {} is not carried",
+            process.as_deref().unwrap_or("?")
+        );
+        carrying.refuse_datagrams(client.local_addr(), client.peer_addr(), &first);
+        return Ok(());
+    }
     let decision = carrying
         .decide(&target, None, process.as_deref(), true)
         .await;
@@ -1048,6 +1091,43 @@ mod tests {
                 .await
                 .as_deref(),
             Some("org.example.app")
+        );
+    }
+
+    /// A program the tunnel does not carry for is turned away, one it cannot
+    /// name is carried, and with no list nobody is turned away.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_that_is_shut_out_gets_no_connection() {
+        let serving = Arc::new(Serving::new(
+            Arc::new(SocksOutbound::new(
+                "127.0.0.1:1".parse().unwrap(),
+                EngineInfo {
+                    kind: "test",
+                    version: String::new(),
+                    external: true,
+                },
+            )),
+            Arc::new(Tracker::new()),
+            Arc::new(Router::build(
+                &bliss_proto::Routing::default(),
+                std::path::Path::new("/nonexistent"),
+            )),
+        ));
+        let mut carrying = Carrying::new(serving, Gateway::for_tests());
+        assert!(
+            !carrying.shuts_out(Some("org.example.app")),
+            "no list, no refusal"
+        );
+        carrying.shut_out = Some(Arc::new(|program| {
+            program.starts_with("foreign:") || program == "org.example.bypassed"
+        }));
+        assert!(carrying.shuts_out(Some("foreign:1010123")));
+        assert!(carrying.shuts_out(Some("org.example.bypassed")));
+        assert!(!carrying.shuts_out(Some("org.example.app")));
+        assert!(
+            !carrying.shuts_out(None),
+            "a connection of no known program is carried"
         );
     }
 

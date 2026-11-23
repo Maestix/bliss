@@ -413,6 +413,27 @@ fn fresh_login() -> bliss_core::Login {
     }
 }
 
+/// What a connection's program is called when it belongs to another user of
+/// the phone (a work profile, Shelter's): `ownerOf` in Native.kt says it so,
+/// with the uid after the colon.
+const FOREIGN: &str = "foreign:";
+
+/// The programs the tunnel does not carry for: every one of another user of
+/// the phone, and the apps the person put «мимо VPN» (`bypass.txt`, beside
+/// this process's files), whose sockets can reach the tunnel's interface by
+/// name all the same (`bliss_tun::ShutOut`).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn shut_out_of(files: &std::path::Path) -> bliss_tun::ShutOut {
+    let bypassed: std::collections::HashSet<String> =
+        std::fs::read_to_string(files.join("bypass.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect();
+    Arc::new(move |program| program.starts_with(FOREIGN) || bypassed.contains(program))
+}
+
 /// Another such port, not `taken`.
 fn free_port_besides(taken: u16) -> u16 {
     (0..8)
@@ -1030,6 +1051,7 @@ impl Engine {
         let login = self.login.clone();
         let version = self.version;
         let names = Arc::clone(&self.names);
+        let shut_out = shut_out_of(&self.paths.files);
         let link = self.current_link().unwrap_or_default();
         let keep = self.settings.auto_server;
         tracing::info!("tunnel: starting through «{}»", server.tag);
@@ -1052,6 +1074,7 @@ impl Engine {
                             router,
                             packets,
                             names,
+                            shut_out,
                         };
                         bring_up(&server, up, epoch, &own).await
                     }
@@ -2563,6 +2586,7 @@ struct Up {
     router: Arc<Router>,
     packets: bliss_tun::Packets,
     names: Arc<bliss_tun::names::FakeNames>,
+    shut_out: bliss_tun::ShutOut,
 }
 
 /// The stack over an engine that is up, and the check through the server.
@@ -2586,6 +2610,7 @@ async fn bring_up(
         router,
         packets,
         names,
+        shut_out,
     } = up;
     step(own, epoch, 1);
     let outbound = Arc::new(
@@ -2606,6 +2631,7 @@ async fn bring_up(
     // there are what lets domain and geosite rules see TUN connections.
     carrying.names = Some((DNS_ADDRESS, names));
     carrying.owner = Some(Arc::new(crate::android::owner_of));
+    carrying.shut_out = Some(shut_out);
     let carrying = Arc::new(carrying);
     let ended = own.clone();
     let stack = tokio::spawn(async move {
@@ -3604,5 +3630,30 @@ mod tests {
         let local = Target::Socket("[fe80::1]:80".parse().unwrap());
         assert_eq!(router.decide(&local, None).route, Route::Direct);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Another user's app and an app put «мимо VPN» are shut out of the
+    /// tunnel; everything else, and a list that is not there, is not.
+    #[test]
+    fn the_tunnel_carries_for_this_user_and_not_for_the_bypassed() {
+        let dir = std::env::temp_dir().join(format!("bliss-shut-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let none = shut_out_of(&dir);
+        assert!(!none("org.example.app"));
+        assert!(
+            none("foreign:1010123"),
+            "another user's app, list or no list"
+        );
+        std::fs::write(
+            dir.join("bypass.txt"),
+            "org.example.bank\n\n  org.example.shop \n",
+        )
+        .unwrap();
+        let shut_out = shut_out_of(&dir);
+        assert!(shut_out("org.example.bank"));
+        assert!(shut_out("org.example.shop"));
+        assert!(!shut_out("org.example.app"));
+        assert!(!shut_out(""));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
