@@ -624,7 +624,10 @@ These cost the most time on this project. None of them announce themselves.
     `foreign:<uid>` (uid / 100 000 differs from bliss's) and the stack
     closes it, as it does one from an app in `bypass.txt` («мимо VPN»); a
     flow gets the ICMP refusal. A connection whose owner the system does
-    not name is still carried. The same run saw `tun0` itself — in
+    not name is still carried. Run again on 0.5.15, the detector found no
+    way through and the server's address nowhere: DETECTED became
+    NEEDS_REVIEW, so `getConnectionOwnerUid` names a work profile's sockets
+    (on the user's phone; not seen elsewhere). The same run saw `tun0` itself — in
     `getifaddrs`, `/proc/sys/net/*/conf`, the routes — which no app can
     hide, and found no `TRANSPORT_VPN` from the work profile.
 - **A connection a rule sends to the VPN goes there or nowhere.** With no VPN
