@@ -295,7 +295,7 @@ fun ServerSheet(frame: Frame, c: Commands, close: () -> Unit, all: () -> Unit) {
 }
 
 @Composable
-fun AddSheet(prefill: String, c: Commands, close: () -> Unit, scan: () -> Unit) {
+fun AddSheet(prefill: String, c: Commands, close: () -> Unit, scan: () -> Unit, manual: () -> Unit) {
     val context = LocalContext.current
     var text by remember { mutableStateOf(prefill) }
     val verdict = verdict(text)
@@ -329,6 +329,11 @@ fun AddSheet(prefill: String, c: Commands, close: () -> Unit, scan: () -> Unit) 
         Text(verdict.first, style = T.small.copy(color = verdict.second), modifier = Modifier.padding(start = 20.dp, top = 8.dp, end = 20.dp))
         Text("Ссылку можно и просто отправить: «Поделиться» в мессенджере → bliss.",
             style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(start = 20.dp, top = 14.dp, end = 20.dp))
+        Row(Modifier.padding(start = 12.dp, top = 6.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = manual).padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Ico(Icons.Plus, C.Accent, size = 18.dp)
+            Text("Нет ссылки? Заполнить вручную", style = T.small.copy(color = C.Accent), modifier = Modifier.padding(start = 8.dp))
+        }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Btn("Отмена", accent = false, modifier = Modifier.weight(1f), onClick = close)
             Btn("Добавить", modifier = Modifier.weight(1.4f), enabled = verdict.third) { c("import", "text" to text); close() }
@@ -370,7 +375,7 @@ fun verdict(text: String): Triple<String, Color, Boolean> {
 }
 
 @Composable
-fun ServerMenu(frame: Frame, index: Int, c: Commands, close: () -> Unit) {
+fun ServerMenu(frame: Frame, index: Int, c: Commands, close: () -> Unit, card: () -> Unit) {
     // The server the menu was opened on, followed by its key: a list
     // refreshed while the menu is up moves the places.
     val key = remember { frame.servers.getOrNull(index)?.key } ?: return close()
@@ -386,12 +391,13 @@ fun ServerMenu(frame: Frame, index: Int, c: Commands, close: () -> Unit) {
             c("favorite", "key" to key, "on" to !s.favorite); close()
         }
         MenuRow(Icons.Shield, "Проверить доступ через него", C.N300) { c("check", "index" to at, "key" to key); close() }
+        MenuRow(Icons.Share, "Подробнее и поделиться", C.N300) { c("server_card", "index" to at, "key" to key); card() }
         MenuRow(Icons.Trash, "Удалить", C.BadText) { c("delete", "index" to at, "key" to key); close() }
     }
 }
 
 @Composable
-fun GroupMenu(frame: Frame, id: String, c: Commands, close: () -> Unit) {
+fun GroupMenu(frame: Frame, id: String, c: Commands, close: () -> Unit, card: () -> Unit) {
     val g = frame.groups.firstOrNull { it.id == id } ?: return close()
     BlissSheet(close) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
@@ -399,6 +405,7 @@ fun GroupMenu(frame: Frame, id: String, c: Commands, close: () -> Unit) {
             Text(g.host, style = T.small)
         }
         MenuRow(Icons.Refresh, "Обновить", C.N300) { c("refresh", "id" to id); close() }
+        MenuRow(Icons.Share, "Поделиться подпиской", C.N300) { c("group_card", "id" to id); card() }
         MenuRow(Icons.Trash, "Удалить подписку и её серверы", C.BadText) { c("delete_group", "id" to id); close() }
     }
 }

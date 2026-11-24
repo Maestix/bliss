@@ -428,6 +428,11 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
 .pill-choice.on.proxy  { color: #ee82c4; background-color: rgba(238, 130, 196, .14); box-shadow: none; }
 .pill-choice.on.direct { color: #72cf9e; background-color: rgba(114, 207, 158, .14); box-shadow: none; }
 .pill-choice.on.block  { color: #e56b6f; background-color: rgba(229, 107, 111, .14); box-shadow: none; }
+/* A choice in the server form: the accent, as for "through the proxy". */
+.pill-choice.on.pick   { color: #ee82c4; background-color: rgba(238, 130, 196, .14); box-shadow: none; }
+/* A secret in a card, hidden until clicked. */
+.reveal { cursor: pointer; color: var(--color-neutral-500); font-size: 13px; }
+.reveal:hover { color: var(--color-neutral-200); }
 .pill-choice.on.vpn    { color: #7eb3ee; background-color: rgba(126, 179, 238, .14); box-shadow: none; }
 
 /* A preset: the same pill, in the accent while it is in force, with a violet

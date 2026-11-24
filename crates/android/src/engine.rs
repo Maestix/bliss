@@ -556,6 +556,10 @@ struct Engine {
     categories: Option<Vec<String>>,
     /// Journals written for sharing so far (`Frame::journal`).
     journals: u64,
+    /// The card the screens have open (`Frame::card`).
+    card: Option<crate::protocol::CardView>,
+    /// The answer to the last save of the server form (`Frame::saved`).
+    saved: Option<crate::protocol::Saved>,
     /// The phone's network, as the service last said.
     network: Option<crate::networks::Seen>,
     /// What the network asks of the service (`Frame::wish`).
@@ -634,6 +638,8 @@ impl Engine {
             geo_problem: None,
             categories: None,
             journals: 0,
+            card: None,
+            saved: None,
             network: None,
             wish: None,
             wishes: 0,
@@ -937,6 +943,24 @@ impl Engine {
                 self.settings.save(&self.paths.files);
             }
             UiCommand::Favorite { key, on } => self.favorite(key, on),
+            UiCommand::ServerCard { index, key } => {
+                if let Some(index) = self.place_of(index, key.as_deref()) {
+                    self.server_card(index);
+                }
+            }
+            UiCommand::GroupCard { id } => self.group_card(&id),
+            UiCommand::CloseCard => self.card = None,
+            UiCommand::SaveServer { key, form, attempt } => {
+                let (ok, text) = match self.save_server(key.as_deref(), &form) {
+                    Ok(text) => (true, text),
+                    Err(why) => (false, why),
+                };
+                if ok {
+                    self.card = None;
+                    self.toast(&text, false, false);
+                }
+                self.saved = Some(crate::protocol::Saved { attempt, ok, text });
+            }
             UiCommand::SaveRule {
                 index,
                 name,
@@ -2099,6 +2123,137 @@ impl Engine {
         }
     }
 
+    /// A server's card: its fields, read back into the form, and its link.
+    fn server_card(&mut self, index: usize) {
+        let (Some(entry), Some(Some(server))) =
+            (self.profile.servers.get(index), self.servers.get(index))
+        else {
+            self.toast("Эта ссылка не читается", true, false);
+            return;
+        };
+        let form = bliss_proto::ServerForm::from_config(server);
+        self.card = Some(crate::protocol::CardView {
+            title: server.tag.clone(),
+            rows: form.rows(),
+            link: entry.link.clone(),
+            key: Some(crate::protocol::server_key(&entry.link)),
+            manual: entry.group.is_none(),
+            form: Some(form),
+        });
+    }
+
+    /// A subscription's card: its whole address, hidden until asked for.
+    fn group_card(&mut self, id: &str) {
+        let Some(sub) = self.profile.subscriptions.iter().find(|s| s.id == id) else {
+            self.toast("Этой подписки уже нет", true, false);
+            return;
+        };
+        let servers = self
+            .profile
+            .servers
+            .iter()
+            .filter(|e| e.group.as_deref() == Some(id))
+            .count();
+        let row = |label: &str, value: String, secret: bool| bliss_proto::DetailRow {
+            label: label.to_owned(),
+            value,
+            secret,
+        };
+        self.card = Some(crate::protocol::CardView {
+            title: sub.name.clone(),
+            rows: vec![
+                row("Сервер подписки", sub.shown_url(), false),
+                row("Адрес целиком", sub.url.clone(), true),
+                row("Серверов", servers.to_string(), false),
+            ],
+            link: sub.url.clone(),
+            key: None,
+            manual: false,
+            form: None,
+        });
+    }
+
+    /// A server from the form: added, or put in place of the one with `key`,
+    /// which keeps its place, its star, the networks that name it and its
+    /// being the server in use. One from a subscription is not changed: its
+    /// next update would put it back.
+    fn save_server(
+        &mut self,
+        key: Option<&str>,
+        form: &bliss_proto::ServerForm,
+    ) -> Result<String, String> {
+        let link = form.to_link()?;
+        let tag = link
+            .parse::<ServerConfig>()
+            .map(|c| c.tag)
+            .unwrap_or_default();
+        let at = match key {
+            None => None,
+            Some(key) => Some(
+                self.profile
+                    .servers
+                    .iter()
+                    .position(|e| crate::protocol::server_key(&e.link) == key)
+                    .ok_or_else(|| "Этого сервера уже нет в списке".to_owned())?,
+            ),
+        };
+        if self
+            .profile
+            .servers
+            .iter()
+            .enumerate()
+            .any(|(i, e)| Some(i) != at && e.link == link)
+        {
+            return Err(format!("Такой сервер уже есть: «{tag}»"));
+        }
+        let Some(at) = at else {
+            if MAX_PROFILE_SERVERS <= self.profile.servers.len() {
+                return Err("Серверов уже слишком много".to_owned());
+            }
+            self.profile.servers.push(ServerEntry {
+                link,
+                name: None,
+                group: None,
+                favorite: false,
+            });
+            self.save();
+            self.reparse();
+            tracing::info!("server added by hand: {tag}");
+            return Ok(format!("Сервер «{tag}» добавлен"));
+        };
+        if self.profile.servers[at].group.is_some() {
+            return Err(
+                "Сервер из подписки не изменить: обновление вернёт его. Сохраните копию".to_owned(),
+            );
+        }
+        let old = std::mem::replace(&mut self.profile.servers[at].link, link.clone());
+        self.profile.servers[at].name = None;
+        let (old_key, new_key) = (
+            crate::protocol::server_key(&old),
+            crate::protocol::server_key(&link),
+        );
+        for favorite in &mut self.settings.favorites {
+            if *favorite == old_key {
+                favorite.clone_from(&new_key);
+            }
+        }
+        for rule in &mut self.settings.networks {
+            if rule.server.as_deref() == Some(old_key.as_str()) {
+                rule.server = Some(new_key.clone());
+            }
+        }
+        self.settings.save(&self.paths.files);
+        let in_use = self.selected.as_deref() == Some(old.as_str());
+        self.save();
+        self.reparse();
+        tracing::info!("server changed: {tag}");
+        if in_use {
+            // The server in use, changed: the tunnel takes it up again.
+            self.select(at);
+        }
+        Ok(format!("Сервер «{tag}» сохранён"))
+    }
+
     /// A star on a server or off it. The stars are kept by key, so a list
     /// refreshed under them keeps them; a key whose server is gone is
     /// dropped as the next star is set, and past `MAX_FAVORITES` the oldest.
@@ -2467,6 +2622,8 @@ impl Engine {
                 .collect(),
             wish: self.wish,
             wish_id: self.wishes,
+            card: self.card.clone(),
+            saved: self.saved.clone(),
         };
         let _ = self.frames.send(frame);
     }
@@ -3630,6 +3787,109 @@ mod tests {
         let local = Target::Socket("[fe80::1]:80".parse().unwrap());
         assert_eq!(router.decide(&local, None).route, Route::Direct);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A server written in the form is added; changed, it keeps its star,
+    /// the network that names it and its being the server in use; one from a
+    /// subscription is not changed; and its card holds its link.
+    #[tokio::test]
+    async fn a_server_by_hand_is_added_changed_and_shown() {
+        let dir = std::env::temp_dir().join(format!("bliss-android-form-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (frames, _seen) = watch::channel(Frame::default());
+        let mut engine = Engine::load(
+            Paths {
+                files: dir.clone(),
+                libs: dir.clone(),
+                socket: dir.join("s"),
+            },
+            tx.downgrade(),
+            frames,
+        );
+        let form = bliss_proto::ServerForm {
+            protocol: "trojan".to_owned(),
+            address: "a.example".to_owned(),
+            port: "443".to_owned(),
+            password: "PPPP".to_owned(),
+            security: "tls".to_owned(),
+            ..bliss_proto::ServerForm::default()
+        };
+        engine.ui(UiCommand::SaveServer {
+            key: None,
+            form: Box::new(form.clone()),
+            attempt: 1,
+        });
+        let saved = engine.saved.clone().unwrap();
+        assert!(saved.ok, "{}", saved.text);
+        assert_eq!(saved.attempt, 1);
+        let link = engine.profile.servers[0].link.clone();
+        assert!(link.starts_with("trojan://PPPP@a.example:443"), "{link}");
+        // The same again is refused.
+        engine.ui(UiCommand::SaveServer {
+            key: None,
+            form: Box::new(form.clone()),
+            attempt: 2,
+        });
+        assert!(!engine.saved.clone().unwrap().ok);
+
+        let key = crate::protocol::server_key(&link);
+        engine.ui(UiCommand::Select {
+            index: 0,
+            key: Some(key.clone()),
+        });
+        engine.ui(UiCommand::Favorite {
+            key: key.clone(),
+            on: true,
+        });
+        engine.ui(UiCommand::SetNetwork {
+            id: "wifi:Дом".to_owned(),
+            connect: String::new(),
+            preset: None,
+            server: Some(key.clone()),
+        });
+        engine.ui(UiCommand::ServerCard {
+            index: 0,
+            key: Some(key.clone()),
+        });
+        let card = engine.card.clone().unwrap();
+        assert_eq!(card.link, link);
+        assert!(card.manual);
+        let mut changed = card.form.unwrap();
+        changed.port = "8443".to_owned();
+        engine.ui(UiCommand::SaveServer {
+            key: Some(key.clone()),
+            form: Box::new(changed),
+            attempt: 3,
+        });
+        assert!(engine.saved.clone().unwrap().ok);
+        assert!(engine.card.is_none(), "the card closes on a save");
+        let new_link = engine.profile.servers[0].link.clone();
+        assert!(new_link.contains("a.example:8443"), "{new_link}");
+        let new_key = crate::protocol::server_key(&new_link);
+        assert_eq!(engine.settings.favorites, [new_key.clone()]);
+        assert_eq!(
+            engine.settings.networks[0].server.as_deref(),
+            Some(new_key.as_str())
+        );
+        assert_eq!(engine.selected.as_deref(), Some(new_link.as_str()));
+
+        // One a subscription brought.
+        engine.profile.servers[0].group = Some("s1".to_owned());
+        let mut again = form.clone();
+        again.port = "9443".to_owned();
+        engine.ui(UiCommand::SaveServer {
+            key: Some(new_key),
+            form: Box::new(again),
+            attempt: 4,
+        });
+        let refused = engine.saved.clone().unwrap();
+        assert!(
+            !refused.ok && refused.text.contains("подписки"),
+            "{}",
+            refused.text
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Another user's app and an app put «мимо VPN» are shut out of the

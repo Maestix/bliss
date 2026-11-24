@@ -68,6 +68,10 @@ sealed interface Sheet {
     data class Network(val id: String, val name: String) : Sheet
     /** The QR scanner: a screen of its own, over everything. */
     data object Scan : Sheet
+    /** A server's or a subscription's card, as the engine sends it. */
+    data object Card : Sheet
+    /** The server form: new (`key` none), or changing the server with this key. */
+    data class Form(val key: String?, val start: String) : Sheet
 }
 
 /** Opens the quick server sheet: the notification's «Сервер». */
@@ -251,11 +255,15 @@ fun App(
         when (val s = sheet) {
             null -> {}
             Sheet.Server -> ServerSheet(frame, c = c, close = { sheet = null }, all = { sheet = null; tab = Tab.Servers })
-            is Sheet.Add -> AddSheet(s.text, c = c, close = { sheet = null }, scan = { sheet = Sheet.Scan })
+            is Sheet.Add -> AddSheet(s.text, c = c, close = { sheet = null }, scan = { sheet = Sheet.Scan },
+                manual = { sheet = Sheet.Form(null, newServerForm().toString()) })
+            Sheet.Card -> CardSheet(frame, c = c, close = { sheet = null },
+                edit = { key, form -> sheet = Sheet.Form(key, form.toString()) })
+            is Sheet.Form -> FormSheet(frame, org.json.JSONObject(s.start), s.key, c = c, close = { sheet = null })
             is Sheet.Network -> NetworkSheet(frame, s.id, s.name, c = c, close = { sheet = null })
             Sheet.Scan -> Scanner(back = { sheet = Sheet.Add() }, found = { c("import", "text" to it); sheet = null })
-            is Sheet.ServerMenu -> ServerMenu(frame, s.index, c = c, close = { sheet = null })
-            is Sheet.Group -> GroupMenu(frame, s.id, c = c, close = { sheet = null })
+            is Sheet.ServerMenu -> ServerMenu(frame, s.index, c = c, close = { sheet = null }, card = { sheet = Sheet.Card })
+            is Sheet.Group -> GroupMenu(frame, s.id, c = c, close = { sheet = null }, card = { sheet = Sheet.Card })
             Sheet.Permission -> PermissionSheet(close = { sheet = null }, go = { sheet = null; connect(true) })
             is Sheet.Refused -> RefusedSheet(s.fast, close = { sheet = null }, again = { sheet = null; connect(true) })
             is Sheet.App -> AppSheet(frame, s.pkg, s.label, c = c, close = { sheet = null })

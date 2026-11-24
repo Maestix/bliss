@@ -30,6 +30,9 @@ directories.workspace = true
 futures-util.workspace = true                          # reading a subscription up to a size cap
 jiff.workspace = true
 mimalloc = { workspace = true, optional = true }
+image.workspace = true                                 # a picture with a QR code in it, opened
+rqrr.workspace = true                                  # and the code read
+qrcode.workspace = true                                # a server's or a subscription's link, for the phone to scan
 reqwest.workspace = true                               # fetching subscriptions, as bliss-xray fetches the engine
 tokio = { workspace = true }
 toml.workspace = true

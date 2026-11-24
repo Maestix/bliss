@@ -205,6 +205,43 @@ pub fn add_server(profile: &mut Profile, link: &str) -> Result<ServerConfig, Str
     Ok(config)
 }
 
+/// Put a server written in the window in place of the one with `old` as its
+/// link, keeping its place and its star. One a subscription brought is
+/// refused: its next update would put the provider's link back.
+pub fn replace_server(
+    profile: &mut Profile,
+    old: &str,
+    link: &str,
+) -> Result<ServerConfig, String> {
+    let link = link.trim();
+    let config: ServerConfig = link.parse().map_err(|e| link_problem(link, &e))?;
+    let at = profile
+        .servers
+        .iter()
+        .position(|s| s.link == old)
+        .ok_or_else(|| "этого сервера уже нет".to_owned())?;
+    if profile.servers[at].group.is_some() {
+        return Err(
+            "сервер из подписки не изменить: её обновление вернёт его как было. \
+             Сохраните его как новый — кнопкой «Добавить вручную»"
+                .to_owned(),
+        );
+    }
+    if profile
+        .servers
+        .iter()
+        .enumerate()
+        .any(|(i, s)| i != at && s.link.trim() == link)
+    {
+        return Err(format!("такой сервер уже есть: «{}»", config.tag));
+    }
+    let entry = &mut profile.servers[at];
+    entry.link = link.to_owned();
+    // The name is in the link now.
+    entry.name = None;
+    Ok(config)
+}
+
 /// Put the starting set of rules in a profile that has none.
 ///
 /// Refuses rather than replacing rules that are already there: they are
@@ -1056,6 +1093,40 @@ mod tests {
         add_server(&mut profile, &link).expect("added");
         Store::new(path.clone()).save(&profile).expect("saved");
         assert_eq!(links(&read(&path).unwrap().unwrap()), [link.as_str()]);
+    }
+
+    #[test]
+    fn a_server_is_replaced_in_place_and_one_from_a_subscription_is_not() {
+        let mut profile = Profile::default();
+        add_server(&mut profile, &server_link("a.example")).unwrap();
+        add_server(&mut profile, &server_link("b.example")).unwrap();
+        profile.servers[0].favorite = true;
+        profile.servers[0].name = Some("старое".to_owned());
+        let old = server_link("a.example");
+        replace_server(&mut profile, &old, &server_link("c.example")).unwrap();
+        assert_eq!(
+            links(&profile),
+            [server_link("c.example").as_str(), &server_link("b.example")]
+        );
+        assert!(profile.servers[0].favorite, "the star stays");
+        assert_eq!(profile.servers[0].name, None, "the link names it now");
+        // Into another server's link: refused, nothing changed.
+        let refused = replace_server(
+            &mut profile,
+            &server_link("c.example"),
+            &server_link("b.example"),
+        );
+        assert!(refused.is_err());
+        assert_eq!(profile.servers[0].link, server_link("c.example"));
+        // One a subscription brought.
+        profile.servers[1].group = Some("s1".to_owned());
+        let refused = replace_server(
+            &mut profile,
+            &server_link("b.example"),
+            &server_link("d.example"),
+        );
+        assert!(refused.unwrap_err().contains("подписки"));
+        assert_eq!(profile.servers[1].link, server_link("b.example"));
     }
 
     #[test]

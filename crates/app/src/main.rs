@@ -24,6 +24,7 @@ mod logs;
 #[cfg(target_os = "linux")]
 mod no_xdo;
 mod profile_file;
+mod qr;
 // Shared with the phone, which also reads the files' category names.
 #[allow(dead_code)]
 mod rule_sets;

@@ -1469,6 +1469,8 @@ fn App() -> Element {
                         *RULE_MENU.write() = false;
                         *DRAFT.write() = None;
                         *SUB_DRAFT.write() = None;
+                        *FORM.write() = None;
+                        controller.send(Command::CloseCard);
                     }
                     _ => {}
                 }
@@ -1509,6 +1511,14 @@ fn App() -> Element {
         WindowZoom {}
         Tray { frame: live }
         ToastLine { toast: toast_shown(frame.toast.clone(), TRAY_MENU()) }
+        if !TRAY_MENU() {
+            if let Some(card) = frame.card.clone() {
+                CardDialog { card }
+            }
+            if let Some(draft) = FORM() {
+                ServerFormDialog { draft, saved: frame.saved.clone() }
+            }
+        }
         if TRAY_MENU() {
             TrayMenu { frame: frame.clone() }
         }
@@ -2483,7 +2493,7 @@ fn AddServerCard(frame: Frame) -> Element {
                      bliss сохранит их в профиль и подключится. Можно просто нажать Ctrl+V."
                 }
             }
-            ImportForm { frame, placeholder: "vless://, trojan://, ss://… или https://… подписки" }
+            ImportForm { frame, placeholder: "vless://, trojan://, ss://… или https://… подписки", manual: true }
         }
     }
 }
@@ -2503,6 +2513,9 @@ fn ImportForm(
     /// of their own, so its buttons end where theirs do.
     #[props(default)]
     wide: bool,
+    /// Offers the server form beside the field, for a server with no link.
+    #[props(default)]
+    manual: bool,
 ) -> Element {
     let controller = use_context::<Controller>();
     let mut link = use_signal(String::new);
@@ -2534,10 +2547,36 @@ fn ImportForm(
     };
     let typed = !link().trim().is_empty();
     let width = if wide { "none" } else { "680px" };
+    // Why the last picture gave no link; the engine's answer says the rest.
+    let mut from_picture = use_signal(|| None::<String>);
+    let read_picture = {
+        let submit = submit.clone();
+        move |e: FormEvent| {
+            let files = e.files();
+            let submit = submit.clone();
+            spawn(async move {
+                let Some(file) = files.first() else { return };
+                let read = match file.read_bytes().await {
+                    Ok(bytes) => crate::qr::read(&bytes),
+                    Err(_) => Err("картинка не открылась".to_owned()),
+                };
+                match read {
+                    Ok(text) => {
+                        from_picture.set(None);
+                        link.set(text.clone());
+                        submit(text);
+                    }
+                    Err(why) => from_picture.set(Some(why)),
+                }
+            });
+        }
+    };
 
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:7px;max-width:{width}",
-            div { style: "display:flex;align-items:center;gap:8px",
+            // Wraps, so the field keeps a width a link can be read in when the
+            // buttons do not fit beside it.
+            div { style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px",
                 input {
                     class: "field",
                     r#type: "text",
@@ -2545,7 +2584,7 @@ fn ImportForm(
                     placeholder: "{placeholder}",
                     autocomplete: "off",
                     spellcheck: "false",
-                    style: "flex:1;min-width:0;padding:8px 10px;border-radius:4px;border:none;\
+                    style: "flex:1 1 220px;min-width:220px;padding:8px 10px;border-radius:4px;border:none;\
                             color:var(--color-text);font-size:14px;\
                             font-family:ui-monospace,Consolas,monospace",
                     oninput: move |e| link.set(e.value()),
@@ -2588,6 +2627,37 @@ fn ImportForm(
                         }
                     },
                     icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
+                }
+                // A link that came as a QR code: a screenshot or a photo of it.
+                label {
+                    class: "act",
+                    title: "Картинка с QR-кодом сервера или подписки: скриншот или фото",
+                    style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;\
+                            border-radius:4px;font-size:14px;white-space:nowrap;flex:none;\
+                            color:var(--color-neutral-200);\
+                            box-shadow:inset 0 0 0 1px rgba(238,130,196,.35)",
+                    input {
+                        r#type: "file",
+                        accept: "image/*",
+                        style: "display:none",
+                        onchange: read_picture,
+                    }
+                    crate::icons::Qr { size: 15, color: ACCENT }
+                    "QR-код"
+                }
+                if manual {
+                    Button {
+                        label: "Вручную",
+                        enabled: true,
+                        onclick: move |_| open_form(None, bliss_proto::ServerForm::new_server()),
+                        icon: rsx! { crate::icons::Pencil { size: 15, color: ACCENT } },
+                    }
+                }
+            }
+            if let Some(why) = from_picture() {
+                span {
+                    style: "font-size:13px;line-height:1.45;color:#f2a7ad;word-break:break-word",
+                    "{why}"
                 }
             }
             match fresh.map(|added| added.outcome) {
@@ -2938,7 +3008,7 @@ fn ServerList(frame: Frame) -> Element {
                 }
             }
 
-            ImportForm { frame: frame.clone(), placeholder: "vless://, trojan://, ss://… или адрес подписки" }
+            ImportForm { frame: frame.clone(), placeholder: "vless://, trojan://, ss://… или адрес подписки", manual: true }
 
             div { style: "display:flex;align-items:center;gap:10px;padding-top:2px",
                 Button {
@@ -6410,6 +6480,625 @@ fn RuleEditor(draft: Draft, vpn: bool) -> Element {
     }
 }
 
+// --- a server by hand, and a server's or a subscription's card -----------------
+
+/// The server form, while it is open: what is typed, where it goes, and the
+/// answer to the last save.
+#[derive(Clone, Debug, PartialEq)]
+struct FormDraft {
+    /// The server it changes, by place and tag; `None` for a new one.
+    at: Option<(usize, String)>,
+    form: bliss_proto::ServerForm,
+    /// «Дополнительно» is open.
+    more: bool,
+    /// The save on its way, by its number in `Frame.saved`.
+    waiting: Option<u64>,
+    problem: Option<String>,
+}
+
+static FORM: GlobalSignal<Option<FormDraft>> = Signal::global(|| None);
+
+/// Numbers the form's saves, so its answer is told from an older one.
+static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Open the form: empty for a new server, or filled from one to change.
+fn open_form(at: Option<(usize, String)>, form: bliss_proto::ServerForm) {
+    *FORM.write() = Some(FormDraft {
+        at,
+        form,
+        more: false,
+        waiting: None,
+        problem: None,
+    });
+}
+
+/// A field of the form by the name the window gives it.
+fn form_field<'a>(form: &'a mut bliss_proto::ServerForm, key: &str) -> Option<&'a mut String> {
+    Some(match key {
+        "protocol" => &mut form.protocol,
+        "name" => &mut form.name,
+        "address" => &mut form.address,
+        "port" => &mut form.port,
+        "id" => &mut form.id,
+        "flow" => &mut form.flow,
+        "encryption" => &mut form.encryption,
+        "cipher" => &mut form.cipher,
+        "method" => &mut form.method,
+        "user" => &mut form.user,
+        "password" => &mut form.password,
+        "security" => &mut form.security,
+        "sni" => &mut form.sni,
+        "fingerprint" => &mut form.fingerprint,
+        "alpn" => &mut form.alpn,
+        "pinned" => &mut form.pinned,
+        "verify_names" => &mut form.verify_names,
+        "ech" => &mut form.ech,
+        "public_key" => &mut form.public_key,
+        "short_id" => &mut form.short_id,
+        "spider_x" => &mut form.spider_x,
+        "mldsa65" => &mut form.mldsa65,
+        "transport" => &mut form.transport,
+        "host" => &mut form.host,
+        "path" => &mut form.path,
+        "mode" => &mut form.mode,
+        "extra" => &mut form.extra,
+        "service_name" => &mut form.service_name,
+        "authority" => &mut form.authority,
+        "header" => &mut form.header,
+        "seed" => &mut form.seed,
+        "mtu" => &mut form.mtu,
+        "obfs" => &mut form.obfs,
+        "hop" => &mut form.hop,
+        "private_key" => &mut form.private_key,
+        "peer_key" => &mut form.peer_key,
+        "pre_shared_key" => &mut form.pre_shared_key,
+        "local_addresses" => &mut form.local_addresses,
+        "reserved" => &mut form.reserved,
+        "finalmask" => &mut form.finalmask,
+        _ => return None,
+    })
+}
+
+fn form_value(form: &bliss_proto::ServerForm, key: &str) -> String {
+    form_field(&mut form.clone(), key)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn set_field(key: &str, value: String) {
+    if let Some(open) = FORM.write().as_mut() {
+        if key == "protocol" && open.form.protocol != value {
+            suit_protocol(&mut open.form, &value);
+        }
+        if let Some(field) = form_field(&mut open.form, key) {
+            *field = value;
+        }
+        open.problem = None;
+    }
+}
+
+/// What a protocol is usually set up with, put in when it is picked: Trojan
+/// is a TLS server, REALITY is VLESS's, Shadowsocks needs a method.
+fn suit_protocol(form: &mut bliss_proto::ServerForm, protocol: &str) {
+    match protocol {
+        "vless" => {
+            if form.security.is_empty() || form.security == "none" {
+                form.security = "reality".to_owned();
+            }
+        }
+        "vmess" => {
+            form.flow.clear();
+            if form.security == "reality" {
+                form.security = "tls".to_owned();
+            }
+            if form.cipher.is_empty() {
+                form.cipher = "auto".to_owned();
+            }
+        }
+        "trojan" => {
+            form.flow.clear();
+            form.security = "tls".to_owned();
+        }
+        "ss" => {
+            form.flow.clear();
+            form.security = "none".to_owned();
+            if form.method.is_empty() {
+                form.method = "2022-blake3-aes-128-gcm".to_owned();
+            }
+        }
+        _ => {}
+    }
+}
+
+const FINGERPRINTS: [(&str, &str); 7] = [
+    ("chrome", "Chrome"),
+    ("firefox", "Firefox"),
+    ("safari", "Safari"),
+    ("ios", "iOS"),
+    ("android", "Android"),
+    ("edge", "Edge"),
+    ("random", "случайный"),
+];
+
+/// A text field of the form.
+#[component]
+fn FormInput(
+    label: &'static str,
+    field: &'static str,
+    value: String,
+    #[props(default)] placeholder: &'static str,
+    #[props(default)] mono: bool,
+) -> Element {
+    let font = if mono {
+        "font-family:ui-monospace,Consolas,monospace;font-size:13px"
+    } else {
+        "font-size:14px"
+    };
+    rsx! {
+        div { style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:5px",
+            span { style: LABEL, "{label}" }
+            input {
+                class: "field",
+                r#type: "text",
+                value: "{value}",
+                placeholder: "{placeholder}",
+                autocomplete: "off",
+                spellcheck: "false",
+                style: "padding:7px 10px;border-radius:4px;border:none;color:var(--color-text);{font}",
+                oninput: move |e| set_field(field, e.value()),
+            }
+        }
+    }
+}
+
+/// One of a few values, as pills.
+#[component]
+fn FormPills(
+    label: &'static str,
+    field: &'static str,
+    value: String,
+    choices: Vec<(&'static str, &'static str)>,
+) -> Element {
+    rsx! {
+        div { style: "flex:none;display:flex;flex-direction:column;gap:6px",
+            span { style: LABEL, "{label}" }
+            div { style: "display:flex;flex-wrap:wrap;gap:6px",
+                for (choice, shown) in choices {
+                    div {
+                        key: "{choice}",
+                        class: if value == choice { "pill-choice on pick" } else { "pill-choice" },
+                        onclick: move |_| set_field(field, choice.to_owned()),
+                        "{shown}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A server by hand, or one being changed: the fields its protocol has, the
+/// security and the transport, and the rarer ones under «Дополнительно».
+#[component]
+fn ServerFormDialog(draft: FormDraft, saved: Option<crate::engine::Added>) -> Element {
+    let controller = use_context::<Controller>();
+    // The answer to this form's save: closed on success, the reason shown
+    // otherwise. In an effect: a render must not write a signal.
+    use_effect(use_reactive((&saved,), move |(saved,)| {
+        let Some(saved) = saved else { return };
+        let ours = FORM.peek().as_ref().and_then(|d| d.waiting) == Some(saved.attempt);
+        if !ours {
+            return;
+        }
+        match saved.outcome {
+            Ok(_) => *FORM.write() = None,
+            Err(why) => {
+                if let Some(open) = FORM.write().as_mut() {
+                    open.problem = Some(why);
+                    open.waiting = None;
+                }
+            }
+        }
+    }));
+    let save = move |_| {
+        let Some(current) = FORM() else { return };
+        let attempt = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if let Some(open) = FORM.write().as_mut() {
+            open.waiting = Some(attempt);
+        }
+        controller.send(Command::SaveServer {
+            at: current.at,
+            form: Box::new(current.form),
+            attempt,
+        });
+    };
+    let form = &draft.form;
+    let v = |key: &str| form_value(form, key);
+    let protocol = form.protocol.as_str();
+    let streamed = matches!(protocol, "vless" | "vmess" | "trojan" | "ss");
+    let security = if form.security.is_empty() {
+        "none"
+    } else {
+        form.security.as_str()
+    };
+    let transport = if form.transport.is_empty() {
+        "tcp"
+    } else {
+        form.transport.as_str()
+    };
+    let more = draft.more;
+    let heading = if draft.at.is_some() {
+        "Сервер"
+    } else {
+        "Новый сервер"
+    };
+    let protocols: Vec<(&str, &str)> = bliss_proto::PROTOCOLS.to_vec();
+    let methods: Vec<(&str, &str)> = bliss_proto::SS_METHODS.iter().map(|m| (*m, *m)).collect();
+
+    rsx! {
+        div {
+            class: "veil",
+            "data-modal": "true",
+            onclick: move |_| *FORM.write() = None,
+            div {
+                class: "dialog-card",
+                onclick: move |e: MouseEvent| e.stop_propagation(),
+                div { style: "flex:none;display:flex;align-items:center;gap:10px",
+                    span {
+                        style: "font-weight:700;font-size:20px;line-height:1.2;\
+                                font-family:var(--font-heading)",
+                        "{heading}"
+                    }
+                    div { style: "margin-left:auto",
+                        IconButton {
+                            title: "Закрыть — Esc",
+                            enabled: true,
+                            onclick: move |_| *FORM.write() = None,
+                            icon: rsx! { crate::icons::Close { size: 16, color: MUTED } },
+                        }
+                    }
+                }
+                div { class: "dialog-body",
+                    if let Some(problem) = &draft.problem {
+                        span {
+                            style: "flex:none;font-size:13px;line-height:1.45;color:#f2a7ad;\
+                                    word-break:break-word",
+                            "{problem}"
+                        }
+                    }
+                    FormPills { label: "Протокол", field: "protocol", value: v("protocol"), choices: protocols }
+                    FormInput { label: "Название", field: "name", value: v("name"), placeholder: "можно не заполнять — назовётся по адресу" }
+                    div { style: "flex:none;display:flex;gap:10px",
+                        div { style: "flex:3;min-width:0;display:flex",
+                            FormInput { label: "Адрес", field: "address", value: v("address"), placeholder: "имя или IP сервера", mono: true }
+                        }
+                        div { style: "flex:1;min-width:0;display:flex",
+                            FormInput { label: "Порт", field: "port", value: v("port"), placeholder: "443", mono: true }
+                        }
+                    }
+
+                    {match protocol {
+                        "vless" => rsx! {
+                            FormInput { label: "UUID", field: "id", value: v("id"), placeholder: "11111111-2222-…", mono: true }
+                            FormPills { label: "Flow", field: "flow", value: v("flow"),
+                                choices: vec![("", "нет"), ("xtls-rprx-vision", "vision"), ("xtls-rprx-vision-udp443", "vision-udp443")] }
+                        },
+                        "vmess" => rsx! {
+                            FormInput { label: "UUID", field: "id", value: v("id"), placeholder: "11111111-2222-…", mono: true }
+                            FormPills { label: "Шифр", field: "cipher", value: v("cipher"),
+                                choices: vec![("auto", "auto"), ("aes-128-gcm", "aes-128-gcm"), ("chacha20-poly1305", "chacha20-poly1305"), ("none", "none"), ("zero", "zero")] }
+                        },
+                        "trojan" => rsx! {
+                            FormInput { label: "Пароль", field: "password", value: v("password"), mono: true }
+                        },
+                        "ss" => rsx! {
+                            FormPills { label: "Шифр", field: "method", value: v("method"), choices: methods }
+                            FormInput { label: "Пароль", field: "password", value: v("password"), mono: true }
+                        },
+                        "socks" => rsx! {
+                            div { style: "flex:none;display:flex;gap:10px",
+                                FormInput { label: "Пользователь", field: "user", value: v("user"), placeholder: "без входа — пусто", mono: true }
+                                FormInput { label: "Пароль", field: "password", value: v("password"), mono: true }
+                            }
+                        },
+                        "hysteria2" => rsx! {
+                            FormInput { label: "Пароль (auth)", field: "password", value: v("password"), mono: true }
+                            FormInput { label: "SNI", field: "sni", value: v("sni"), placeholder: "по умолчанию — адрес", mono: true }
+                            div { style: "flex:none;display:flex;gap:10px",
+                                FormInput { label: "Пароль Salamander", field: "obfs", value: v("obfs"), placeholder: "без обфускации — пусто", mono: true }
+                                FormInput { label: "Прыжки по портам", field: "hop", value: v("hop"), placeholder: "20000-30000", mono: true }
+                            }
+                        },
+                        "wireguard" => rsx! {
+                            FormInput { label: "Закрытый ключ", field: "private_key", value: v("private_key"), placeholder: "base64", mono: true }
+                            FormInput { label: "Открытый ключ сервера", field: "peer_key", value: v("peer_key"), placeholder: "base64", mono: true }
+                            FormInput { label: "Адреса в туннеле", field: "local_addresses", value: v("local_addresses"), placeholder: "10.0.0.2/32, fd00::2/128", mono: true }
+                        },
+                        _ => rsx! {},
+                    }}
+
+                    if streamed {
+                        FormPills { label: "Защита", field: "security", value: security.to_owned(),
+                            choices: vec![("none", "нет"), ("tls", "TLS"), ("reality", "REALITY")] }
+                        if security == "tls" {
+                            FormInput { label: "SNI", field: "sni", value: v("sni"), placeholder: "по умолчанию — адрес", mono: true }
+                            FormPills { label: "Отпечаток", field: "fingerprint", value: v("fingerprint"), choices: FINGERPRINTS.to_vec() }
+                        }
+                        if security == "reality" {
+                            FormInput { label: "SNI — сайт для маскировки", field: "sni", value: v("sni"), placeholder: "www.example.com", mono: true }
+                            FormInput { label: "Открытый ключ (pbk)", field: "public_key", value: v("public_key"), mono: true }
+                            FormInput { label: "Short ID", field: "short_id", value: v("short_id"), placeholder: "можно пусто", mono: true }
+                            FormPills { label: "Отпечаток", field: "fingerprint", value: v("fingerprint"), choices: FINGERPRINTS.to_vec() }
+                        }
+                        FormPills { label: "Транспорт", field: "transport", value: transport.to_owned(),
+                            choices: vec![("tcp", "TCP"), ("ws", "WebSocket"), ("httpupgrade", "HTTPUpgrade"), ("xhttp", "XHTTP"), ("grpc", "gRPC"), ("kcp", "mKCP")] }
+                        {match transport {
+                            "ws" | "httpupgrade" | "xhttp" => rsx! {
+                                div { style: "flex:none;display:flex;gap:10px",
+                                    FormInput { label: "Host", field: "host", value: v("host"), mono: true }
+                                    FormInput { label: "Путь", field: "path", value: v("path"), placeholder: "/", mono: true }
+                                }
+                                if transport == "xhttp" {
+                                    FormPills { label: "Режим", field: "mode", value: v("mode"),
+                                        choices: vec![("auto", "auto"), ("packet-up", "packet-up"), ("stream-up", "stream-up"), ("stream-one", "stream-one")] }
+                                }
+                            },
+                            "grpc" => rsx! {
+                                FormInput { label: "serviceName", field: "service_name", value: v("service_name"), mono: true }
+                            },
+                            "kcp" => rsx! {
+                                FormPills { label: "Маскировка", field: "header", value: v("header"),
+                                    choices: vec![("none", "нет"), ("srtp", "srtp"), ("utp", "utp"), ("wechat-video", "wechat-video"), ("dtls", "dtls"), ("wireguard", "wireguard")] }
+                                FormInput { label: "Seed", field: "seed", value: v("seed"), mono: true }
+                            },
+                            _ => rsx! {},
+                        }}
+                    }
+
+                    div {
+                        class: "check-row",
+                        style: "flex:none;display:flex;align-items:center;gap:8px;margin:0 -10px;\
+                                padding:7px 10px;border-radius:4px;font-size:13.5px;\
+                                color:var(--color-neutral-400)",
+                        onclick: move |_| {
+                            if let Some(open) = FORM.write().as_mut() {
+                                open.more = !open.more;
+                            }
+                        },
+                        if more {
+                            crate::icons::ChevronUp { size: 14, color: MUTED }
+                        } else {
+                            crate::icons::ChevronDown { size: 14, color: MUTED }
+                        }
+                        "Дополнительно"
+                    }
+                    if more {
+                        {match protocol {
+                            "vless" => rsx! {
+                                FormInput { label: "Шифрование (VLESS Encryption)", field: "encryption", value: v("encryption"), placeholder: "none", mono: true }
+                            },
+                            "wireguard" => rsx! {
+                                FormInput { label: "Общий ключ (PSK)", field: "pre_shared_key", value: v("pre_shared_key"), mono: true }
+                                div { style: "flex:none;display:flex;gap:10px",
+                                    FormInput { label: "Reserved", field: "reserved", value: v("reserved"), placeholder: "0,0,0", mono: true }
+                                    FormInput { label: "MTU", field: "mtu", value: v("mtu"), placeholder: "1420", mono: true }
+                                }
+                            },
+                            "hysteria2" => rsx! {
+                                FormInput { label: "ALPN", field: "alpn", value: v("alpn"), mono: true }
+                                FormInput { label: "Закреплённый сертификат (SHA-256)", field: "pinned", value: v("pinned"), mono: true }
+                            },
+                            _ => rsx! {},
+                        }}
+                        if streamed && security == "tls" {
+                            FormInput { label: "ALPN", field: "alpn", value: v("alpn"), placeholder: "h2,http/1.1", mono: true }
+                            FormInput { label: "Закреплённый сертификат (SHA-256)", field: "pinned", value: v("pinned"), mono: true }
+                            FormInput { label: "Имена сертификата (vcn)", field: "verify_names", value: v("verify_names"), mono: true }
+                            FormInput { label: "ECH", field: "ech", value: v("ech"), mono: true }
+                        }
+                        if streamed && security == "reality" {
+                            FormInput { label: "SpiderX", field: "spider_x", value: v("spider_x"), mono: true }
+                            FormInput { label: "ML-DSA-65 (pqv)", field: "mldsa65", value: v("mldsa65"), mono: true }
+                        }
+                        if streamed && transport == "xhttp" {
+                            FormInput { label: "extra (JSON)", field: "extra", value: v("extra"), mono: true }
+                        }
+                        if streamed && transport == "grpc" {
+                            FormInput { label: "authority", field: "authority", value: v("authority"), mono: true }
+                        }
+                        if streamed && transport == "kcp" {
+                            FormInput { label: "MTU", field: "mtu", value: v("mtu"), mono: true }
+                        }
+                        if streamed && transport == "tcp" {
+                            FormPills { label: "Маскировка TCP", field: "header", value: v("header"),
+                                choices: vec![("none", "нет"), ("http", "HTTP")] }
+                            if form.header == "http" {
+                                div { style: "flex:none;display:flex;gap:10px",
+                                    FormInput { label: "Host", field: "host", value: v("host"), mono: true }
+                                    FormInput { label: "Путь", field: "path", value: v("path"), placeholder: "/", mono: true }
+                                }
+                            }
+                        }
+                        FormInput { label: "finalmask (fm, JSON)", field: "finalmask", value: v("finalmask"), mono: true }
+                    }
+                }
+                div { style: "flex:none;display:flex;align-items:center;gap:8px;padding-top:2px",
+                    span {
+                        style: "font-size:12px;color:var(--color-neutral-700);line-height:1.4",
+                        "Сервер сохранится ссылкой — такой же, как вставленная"
+                    }
+                    div { style: "margin-left:auto" }
+                    Button {
+                        label: "Отмена",
+                        enabled: true,
+                        onclick: move |_| *FORM.write() = None,
+                        icon: rsx! { crate::icons::Close { size: 15, color: MUTED } },
+                    }
+                    Button {
+                        label: if draft.waiting.is_some() { "Сохраняю…" } else { "Сохранить" },
+                        enabled: draft.waiting.is_none(),
+                        onclick: save,
+                        icon: rsx! { crate::icons::Check { size: 15, color: ACCENT } },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A server's or a subscription's card: every field, the secrets hidden until
+/// asked for, and the link to copy or show as a QR code for the phone.
+#[component]
+fn CardDialog(card: crate::engine::Card) -> Element {
+    let controller = use_context::<Controller>();
+    let mut shown = use_signal(std::collections::BTreeSet::<usize>::new);
+    let mut qr = use_signal(|| false);
+    let mut note = use_signal(String::new);
+    let close = {
+        let controller = controller.clone();
+        move |_| controller.send(Command::CloseCard)
+    };
+    let link = card.link.clone();
+    let code = if qr() {
+        crate::qr::of(&card.link)
+    } else {
+        None
+    };
+    // The code with a quiet zone of four modules round it.
+    let span_of = code.as_ref().map_or(0, |c| c.side + 8);
+    let what = if card.server.is_some() {
+        "ссылку"
+    } else {
+        "адрес"
+    };
+    let server = card.server.clone();
+
+    rsx! {
+        div {
+            class: "veil",
+            "data-modal": "true",
+            onclick: close.clone(),
+            div {
+                class: "dialog-card",
+                onclick: move |e: MouseEvent| e.stop_propagation(),
+                div { style: "flex:none;display:flex;align-items:center;gap:10px;min-width:0",
+                    span {
+                        style: "min-width:0;overflow:hidden;white-space:nowrap;font-weight:700;\
+                                font-size:20px;line-height:1.2;font-family:var(--font-heading)",
+                        title: "{card.title}",
+                        "{elide(&card.title, 40)}"
+                    }
+                    div { style: "margin-left:auto;flex:none",
+                        IconButton {
+                            title: "Закрыть — Esc",
+                            enabled: true,
+                            onclick: close.clone(),
+                            icon: rsx! { crate::icons::Close { size: 16, color: MUTED } },
+                        }
+                    }
+                }
+                div { class: "dialog-body",
+                    if let Some(code) = code {
+                        div { style: "flex:none;display:flex;flex-direction:column;align-items:center;gap:8px",
+                            // Dark modules on white with a quiet zone of four, as
+                            // a camera expects: a code drawn in the theme's colours
+                            // would not scan.
+                            svg {
+                                width: "240", height: "240",
+                                view_box: "-4 -4 {span_of} {span_of}",
+                                style: "border-radius:8px",
+                                rect { x: "-4", y: "-4", width: "{span_of}", height: "{span_of}", fill: "#ffffff" }
+                                path { d: "{code.path}", fill: "#140f1d" }
+                            }
+                            span { style: "font-size:12.5px;color:var(--color-neutral-600)",
+                                "Наведите камеру телефона: bliss → «Добавить» → «QR-код»"
+                            }
+                        }
+                    }
+                    div {
+                        style: "flex:none;display:grid;grid-template-columns:auto minmax(0,1fr);\
+                                gap:7px 16px;font-size:13.5px;line-height:1.45",
+                        for (i, row) in card.rows.iter().cloned().enumerate() {
+                            div { key: "{i}", style: "display:contents",
+                                span { style: "color:var(--color-neutral-500);white-space:nowrap", "{row.label}" }
+                                if row.secret && !shown().contains(&i) {
+                                    span {
+                                        class: "reveal",
+                                        title: "Показать",
+                                        onclick: move |_| { shown.write().insert(i); },
+                                        "•••••••• показать"
+                                    }
+                                } else {
+                                    span {
+                                        style: "min-width:0;word-break:break-all;-webkit-user-select:text;\
+                                                user-select:text;font-family:ui-monospace,Consolas,monospace;\
+                                                font-size:13px;color:var(--color-neutral-200)",
+                                        "{row.value}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !note().is_empty() {
+                        span { style: "flex:none;font-size:12.5px;color:var(--color-neutral-500)", "{note}" }
+                    }
+                }
+                div { style: "flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding-top:2px",
+                    if let Some(server) = server {
+                        if server.manual {
+                            Button {
+                                label: "Изменить",
+                                enabled: true,
+                                onclick: {
+                                    let controller = controller.clone();
+                                    let server = server.clone();
+                                    move |_| {
+                                        open_form(Some((server.index, server.tag.clone())), server.form.clone());
+                                        controller.send(Command::CloseCard);
+                                    }
+                                },
+                                icon: rsx! { crate::icons::Pencil { size: 15, color: MUTED } },
+                            }
+                        } else {
+                            Button {
+                                label: "Копия для правки",
+                                enabled: true,
+                                onclick: {
+                                    let controller = controller.clone();
+                                    let server = server.clone();
+                                    move |_| {
+                                        open_form(None, server.form.clone());
+                                        controller.send(Command::CloseCard);
+                                    }
+                                },
+                                icon: rsx! { crate::icons::Pencil { size: 15, color: MUTED } },
+                            }
+                        }
+                    }
+                    div { style: "margin-left:auto" }
+                    Button {
+                        label: if qr() { "Скрыть QR-код" } else { "QR-код" },
+                        enabled: true,
+                        onclick: move |_| qr.set(!qr()),
+                        icon: rsx! { crate::icons::Qr { size: 15, color: MUTED } },
+                    }
+                    Button {
+                        label: "Скопировать {what}",
+                        enabled: true,
+                        onclick: move |_| {
+                            note.set(if crate::clipboard::copy(&link) {
+                                format!("{} в буфере обмена — отправьте его, кому нужно", if what == "ссылку" { "Ссылка" } else { "Адрес" })
+                            } else {
+                                "буфер обмена занят другой программой".to_owned()
+                            });
+                        },
+                        icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
+                    }
+                }
+            }
+        }
+    }
+}
+
 // --- narrowing the table to one rule ------------------------------------------
 
 /// The rules to narrow the connections table to, each with how many of the
@@ -6519,10 +7208,10 @@ fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
 /// `CONNECTION_COLUMNS`. This is the shape before the header has measured the
 /// list; after that `ServerColumns` gives it in pixels.
 const SERVER_COLUMNS: &str =
-    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 60px;gap:12px";
+    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 92px;gap:12px";
 const SERVER_KIND: f64 = 136.0;
-/// Ping, the star and the bin, and the four gaps between the five columns.
-const SERVER_FIXED: f64 = 78.0 + 60.0 + 4.0 * 12.0;
+/// Ping, the star, the card and the bin, and the four gaps between the five columns.
+const SERVER_FIXED: f64 = 78.0 + 92.0 + 4.0 * 12.0;
 /// The row's padding on either side, as the header has it.
 const SERVER_PAD: f64 = 10.0;
 /// Narrower than this, a name or an address is no longer worth a column.
@@ -6570,7 +7259,7 @@ impl ServerColumns {
     /// indented by 20px, loses them from the address and not off its end.
     fn css(&self) -> String {
         format!(
-            "grid-template-columns:{}px minmax(0,1fr) {}px 78px 60px;gap:12px",
+            "grid-template-columns:{}px minmax(0,1fr) {}px 78px 92px;gap:12px",
             self.name, self.kind
         )
     }
@@ -6780,6 +7469,16 @@ fn ServerLine(
                 }
             }
             div { class: "srv-tools",
+                IconButton {
+                    title: "Подробнее: все поля, ссылка, QR-код",
+                    enabled: true,
+                    onclick: {
+                        let controller = controller.clone();
+                        let tag = tag.clone();
+                        move |_| controller.send(Command::ServerCard { index, tag: tag.clone() })
+                    },
+                    icon: rsx! { crate::icons::Info { size: 14, color: MUTED } },
+                }
                 IconButton {
                     title,
                     enabled: true,
@@ -6992,6 +7691,16 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                     enabled: true,
                     onclick: copy,
                     icon: rsx! { crate::icons::Copy { size: 15, color: MUTED } },
+                }
+                IconButton {
+                    title: "Поделиться: адрес и QR-код для телефона",
+                    enabled: true,
+                    onclick: {
+                        let controller = controller.clone();
+                        let id = row.id.clone();
+                        move |_| controller.send(Command::GroupCard(id.clone()))
+                    },
+                    icon: rsx! { crate::icons::Share { size: 15, color: MUTED } },
                 }
                 Button {
                     label: if row.fetching { "Загружаю…" } else { "Обновить" },

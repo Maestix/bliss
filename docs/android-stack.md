@@ -768,3 +768,21 @@ app, at least on the user's phone.
 What the same report found and nothing in an app can change: `tun0` in
 `getifaddrs()`, `if_indextoname`, `/proc/sys/net/*/conf` and the routing
 table; and a default route through it beside Wi-Fi's.
+
+## 0.5.16: servers by hand, cards, sharing
+
+Asked for by the user: a server written by hand, a server's details, and a
+subscription shared as a server already could be. The form is the
+desktop's (`bliss_proto::ServerForm`, AGENTS.md §5), sent as JSON:
+`save_server` with the server's key to change one, none to add one, and
+an `attempt` that comes back in `Frame.saved`. `server_card` and
+`group_card` put a card in the frame — its rows, and the link, which the
+screens never held before; there only while the sheet is open, and gone
+with `close_card`. «Поделиться» hands the link to Android's share sheet,
+«Скопировать» puts it on the clipboard marked sensitive, and «QR-код»
+draws it with ZXing, which the scanner already brought. A server changed
+keeps its place; its star and a network's rule follow it to its new key,
+and if it is the server in use the tunnel takes it up again. One from a
+subscription is not changed («Копия для правки» saves a copy instead).
+Built and installed nowhere but the user's phone: the sheets were not seen
+here.

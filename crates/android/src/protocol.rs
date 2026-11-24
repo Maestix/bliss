@@ -1,9 +1,10 @@
 //! What crosses the socket between the tunnel's process and the screens.
 //!
-//! One JSON object per line each way. The screens never see a link or a
-//! subscription's address — those are credentials (AGENTS.md §5) — only
-//! names, kinds, hosts and numbers; deleting and restoring is done by index
-//! on this side, so an undo needs no link either.
+//! One JSON object per line each way. The screens see a link or a
+//! subscription's address — credentials (AGENTS.md §5) — only in a card the
+//! person opened to see or share it (`Frame::card`), and only while it is
+//! open; otherwise names, kinds, hosts and numbers. Deleting and restoring
+//! is done by index on this side, so an undo needs no link either.
 
 use bliss_proto::{Flow, Protocol, Security, ServerConfig, TcpHeader, Transport};
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,40 @@ pub struct Frame {
     /// person's.
     pub wish: Option<&'static str>,
     pub wish_id: u64,
+    /// A server's or a subscription's card, while it is open.
+    pub card: Option<CardView>,
+    /// The answer to the server form's last save.
+    pub saved: Option<Saved>,
+}
+
+/// What a card shows: every field, the secrets marked, and the link to share
+/// or show as a QR code. `Debug` shows the title alone.
+#[derive(Clone, Default, Serialize)]
+pub struct CardView {
+    pub title: String,
+    pub rows: Vec<bliss_proto::DetailRow>,
+    /// The server's link, or the subscription's whole address.
+    pub link: String,
+    /// The server's key; none for a subscription.
+    pub key: Option<String>,
+    /// Added by hand, so it can be changed.
+    pub manual: bool,
+    /// What the form starts from to change the server, or to copy it.
+    pub form: Option<bliss_proto::ServerForm>,
+}
+
+impl std::fmt::Debug for CardView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CardView({})", self.title)
+    }
+}
+
+/// The answer to a save, by the number the form sent it with.
+#[derive(Debug, Clone, Serialize)]
+pub struct Saved {
+    pub attempt: u64,
+    pub ok: bool,
+    pub text: String,
 }
 
 /// A network as the screens show it.
@@ -300,6 +335,26 @@ pub enum UiCommand {
         package: String,
         label: String,
         action: Option<String>,
+    },
+    /// Open a server's card, by place and key as `Select` names one.
+    ServerCard {
+        index: usize,
+        #[serde(default)]
+        key: Option<String>,
+    },
+    /// Open a subscription's card: its address, to share.
+    GroupCard {
+        id: String,
+    },
+    CloseCard,
+    /// A server written in the form: added, or put in place of the one with
+    /// this key. `attempt` comes back in `Frame::saved`.
+    SaveServer {
+        #[serde(default)]
+        key: Option<String>,
+        // Boxed: a form is a kilobyte, and every other command a few words.
+        form: Box<bliss_proto::ServerForm>,
+        attempt: u64,
     },
     /// Fetch the rule sets, from another source when one is named.
     GeoUpdate {
