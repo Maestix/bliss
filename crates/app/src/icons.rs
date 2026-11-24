@@ -241,6 +241,51 @@ pub fn Copy(size: u32, color: String) -> Element {
     }
 }
 
+/// A server's card: what it is, field by field.
+#[component]
+pub fn Info(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            circle { cx: "12", cy: "12", r: "8.6" }
+            path { d: "M12 11 V16.4" }
+            path { d: "M12 7.7 V7.8" }
+        }
+    }
+}
+
+/// Sharing: a link to hand on, as text or a QR code.
+#[component]
+pub fn Share(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linecap: "round",
+            circle { cx: "17.6", cy: "5.8", r: "2.4" }
+            circle { cx: "6.4", cy: "12", r: "2.4" }
+            circle { cx: "17.6", cy: "18.2", r: "2.4" }
+            path { d: "M8.5 10.8 L15.5 7" }
+            path { d: "M8.5 13.2 L15.5 17" }
+        }
+    }
+}
+
+/// A QR code: three finder squares.
+#[component]
+pub fn Qr(size: u32, color: String) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            stroke: "{color}", stroke_width: STROKE, stroke_linejoin: "round",
+            rect { x: "4", y: "4", width: "6", height: "6", rx: "1" }
+            rect { x: "14", y: "4", width: "6", height: "6", rx: "1" }
+            rect { x: "4", y: "14", width: "6", height: "6", rx: "1" }
+            path { d: "M14 14 H16 V16 M18 14 H20 M14 18 V20 H16 M18 18 H20 V20" }
+        }
+    }
+}
+
 /// Moving a rule earlier.
 #[component]
 pub fn ChevronUp(size: u32, color: String) -> Element {

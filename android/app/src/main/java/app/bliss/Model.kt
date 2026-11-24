@@ -51,6 +51,10 @@ data class Frame(
     /** What the network asks of the service: "on", "off", "back"; once per `wishId`. */
     val wish: String? = null,
     val wishId: Long = 0,
+    /** A server's or a subscription's card, while its sheet is open. */
+    val card: CardView? = null,
+    /** The answer to the server form's last save. */
+    val saved: Saved? = null,
     /** Not from the engine: whether the socket is up at all. */
     val connected: Boolean = false,
 )
@@ -107,6 +111,14 @@ data class ConnRow(
     val app: String? = null,
 )
 data class Toast(val id: Long, val text: String, val bad: Boolean, val undo: Boolean)
+data class DetailRow(val label: String, val value: String, val secret: Boolean)
+/** A card: its fields, and the link — a credential, there only while the sheet is open. */
+data class CardView(
+    val title: String, val rows: List<DetailRow>, val link: String, val key: String?, val manual: Boolean,
+    /** What the form starts from to change the server. */
+    val form: JSONObject?,
+)
+data class Saved(val attempt: Long, val ok: Boolean, val text: String)
 
 private fun JSONObject.str(key: String): String? = if (isNull(key)) null else optString(key)
 private fun JSONObject.long(key: String): Long? = if (isNull(key) || !has(key)) null else optLong(key)
@@ -181,6 +193,11 @@ fun applyPatch(prev: Frame, o: JSONObject): Frame {
             "wish" -> f.copy(wish = o.str(key))
             "wish_id" -> f.copy(wishId = o.optLong(key))
             "categories" -> f.copy(categories = if (o.isNull(key)) null else o.optJSONArray(key).strings())
+            "card" -> f.copy(card = o.optJSONObject(key)?.let {
+                CardView(it.optString("title"), it.optJSONArray("rows").map { r -> DetailRow(r.optString("label"), r.optString("value"), r.optBoolean("secret")) },
+                    it.optString("link"), it.str("key"), it.optBoolean("manual"), it.optJSONObject("form"))
+            })
+            "saved" -> f.copy(saved = o.optJSONObject(key)?.let { Saved(it.optLong("attempt"), it.optBoolean("ok"), it.optString("text")) })
             else -> f
         }
     }

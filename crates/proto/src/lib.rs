@@ -5,6 +5,7 @@
 
 mod encryption;
 mod error;
+mod form;
 mod link;
 mod profile;
 mod redact;
@@ -13,6 +14,7 @@ mod server;
 
 pub use encryption::{AppearanceMode, Encryption, EncryptionKey, RttMode, VlessEncryption};
 pub use error::{LinkError, Unsupported};
+pub use form::{DetailRow, PROTOCOLS, SS_METHODS, ServerForm};
 pub use link::is_server_scheme;
 pub use profile::{Engine, Geo, Inbound, Profile, ProxyMode, Subscription, Tun, Usage, Vpn};
 pub use routing::{Action, Preset, Routing, Rule};

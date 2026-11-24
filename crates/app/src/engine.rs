@@ -223,6 +223,41 @@ pub struct Frame {
     pub engine_setup: EngineSetup,
     /// The rule sets: which list, what is on the disk, a fetch under way.
     pub geo: GeoView,
+    /// The card open over the servers or the subscriptions, if any.
+    pub card: Option<Card>,
+    /// The answer to the server form's last save.
+    pub saved: Option<Added>,
+}
+
+/// A server's or a subscription's card: what it is, field by field, and its
+/// link, to copy or show as a QR code.
+///
+/// The link is a credential, so `Debug` shows the title alone; it is in the
+/// frame only while the card is open, because someone asked to see it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Card {
+    pub title: String,
+    pub rows: Vec<bliss_proto::DetailRow>,
+    /// The server's link, or the subscription's whole address.
+    pub link: String,
+    pub server: Option<CardServer>,
+}
+
+impl std::fmt::Debug for Card {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Card({})", self.title)
+    }
+}
+
+/// A server's card: where it is in the list, and the form an edit starts from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardServer {
+    pub index: usize,
+    pub tag: String,
+    /// Added by hand, so it can be edited; a subscription's comes back as
+    /// the provider wrote it.
+    pub manual: bool,
+    pub form: bliss_proto::ServerForm,
 }
 
 /// The rule sets as the settings screen shows them.
@@ -477,6 +512,24 @@ pub enum Command {
     GeoAuto(bool),
     /// The fetch finished. Only the engine sends this, to itself.
     GeoDone(Result<(), String>),
+    /// Open the card of the server at this place: its details, its link to
+    /// copy or show as a QR code. The tag as for a delete.
+    ServerCard {
+        index: usize,
+        tag: String,
+    },
+    /// Open the card of a subscription, by id: its address, to share.
+    GroupCard(String),
+    /// The card was closed.
+    CloseCard,
+    /// A server written in the form: added, or put in place of the one at
+    /// this place (with its tag, as for a delete). `attempt` comes back in
+    /// `Frame.saved`, so the form knows the answer is its.
+    SaveServer {
+        at: Option<(usize, String)>,
+        form: Box<bliss_proto::ServerForm>,
+        attempt: u64,
+    },
     /// A star on the server at this place, or off it; the tag as for a delete.
     Favorite {
         index: usize,
@@ -784,6 +837,53 @@ fn remember_selection(setup: &Setup, selected: usize) {
 
 /// The file in the work dir that holds the server in use.
 const SELECTED: &str = "selected";
+
+/// A server's card: its fields from the form it reads back into.
+fn server_card(server: &ServerConfig, link: &str, index: usize, manual: bool) -> Card {
+    let form = bliss_proto::ServerForm::from_config(server);
+    Card {
+        title: server.tag.clone(),
+        rows: form.rows(),
+        link: link.to_owned(),
+        server: Some(CardServer {
+            index,
+            tag: server.tag.clone(),
+            manual,
+            form,
+        }),
+    }
+}
+
+/// A subscription's card: its whole address, hidden until asked for, with
+/// what is known of it.
+fn group_card(subscription: &bliss_proto::Subscription, servers: usize) -> Card {
+    let row = |label: &str, value: String, secret: bool| bliss_proto::DetailRow {
+        label: label.to_owned(),
+        value,
+        secret,
+    };
+    let mut rows = vec![
+        row("Сервер подписки", subscription.shown_url(), false),
+        row("Адрес целиком", subscription.url.clone(), true),
+        row("Серверов", servers.to_string(), false),
+    ];
+    if let Some(updated) = subscription.updated
+        && let Ok(at) = jiff::Timestamp::from_second(updated)
+    {
+        let zoned = at.to_zoned(jiff::tz::TimeZone::system());
+        rows.push(row(
+            "Обновлена",
+            zoned.strftime("%d.%m.%Y %H:%M").to_string(),
+            false,
+        ));
+    }
+    Card {
+        title: subscription.name.clone(),
+        rows,
+        link: subscription.url.clone(),
+        server: None,
+    }
+}
 
 /// The links of the servers that parse, in the order `parse_servers` keeps.
 fn links_of(profile: &Profile) -> Vec<String> {
@@ -1514,6 +1614,98 @@ async fn drive(
                             toaster.show(&frames, format!("Гео-файлы не обновились: {why}"), true);
                         }
                     },
+                    Command::ServerCard { index, tag } => {
+                        let links = links_of(&setup.profile);
+                        let found = setup
+                            .servers
+                            .get(index)
+                            .filter(|server| server.tag == tag)
+                            .zip(links.get(index));
+                        let Some((server, link)) = found else {
+                            toaster.show(&frames, "этого сервера уже нет — список успел измениться", true);
+                            continue;
+                        };
+                        let manual = setup
+                            .profile
+                            .servers
+                            .iter()
+                            .find(|e| &e.link == link)
+                            .is_some_and(|e| e.group.is_none());
+                        let card = server_card(server, link, index, manual);
+                        frames.send_modify(|f| f.card = Some(card));
+                    }
+                    Command::GroupCard(id) => {
+                        match setup.profile.subscriptions.iter().find(|s| s.id == id) {
+                            Some(subscription) => {
+                                let count = setup.profile.servers.iter().filter(|e| e.group.as_deref() == Some(id.as_str())).count();
+                                let card = group_card(subscription, count);
+                                frames.send_modify(|f| f.card = Some(card));
+                            }
+                            None => toaster.show(&frames, "этой подписки уже нет", true),
+                        }
+                    }
+                    Command::CloseCard => frames.send_modify(|f| f.card = None),
+                    Command::SaveServer { at, form, attempt } => {
+                        let first = setup.servers.is_empty();
+                        let links = links_of(&setup.profile);
+                        let in_use = links.get(selected).cloned();
+                        // The server being edited, by its link, found the way a delete finds it.
+                        let editing = match &at {
+                            None => None,
+                            Some((index, tag)) => match setup
+                                .servers
+                                .get(*index)
+                                .filter(|server| &server.tag == tag)
+                                .and(links.get(*index))
+                            {
+                                Some(link) => Some(link.clone()),
+                                None => {
+                                    let outcome = Err("этого сервера уже нет — список успел измениться".to_owned());
+                                    frames.send_modify(|f| f.saved = Some(Added { attempt, outcome }));
+                                    continue;
+                                }
+                            },
+                        };
+                        let mut next = setup.profile.clone();
+                        let outcome = form.to_link().and_then(|link| {
+                            let config = match &editing {
+                                None => crate::profile_file::add_server(&mut next, &link)?,
+                                Some(old) => crate::profile_file::replace_server(&mut next, old, &link)?,
+                            };
+                            save_profile(&mut store, &next)?;
+                            Ok((config.tag, link))
+                        });
+                        match outcome {
+                            Ok((name, link)) => {
+                                tracing::info!("server {}: {name}", if editing.is_some() { "changed" } else { "added by hand" });
+                                let edited_in_use = editing.is_some() && editing == in_use;
+                                setup.profile = next;
+                                forget_problem(&mut setup, &frames);
+                                // The server in use, edited, is still the one in use.
+                                let was = if edited_in_use { Some(link) } else { in_use };
+                                let lost = reload_servers(&mut setup, &mut selected, was, &frames);
+                                let text = if editing.is_some() {
+                                    format!("Сервер «{name}» сохранён")
+                                } else {
+                                    format!("Сервер «{name}» добавлен")
+                                };
+                                frames.send_modify(|f| {
+                                    f.saved = Some(Added { attempt, outcome: Ok(text.clone()) });
+                                    f.card = None;
+                                });
+                                toaster.show(&frames, text, false);
+                                sweep_servers(&setup, &frames, &probes, &checks);
+                                if lost || edited_in_use {
+                                    follow_selection(&mut running, &setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own), proxy, &system_proxy)
+                                        .await;
+                                } else if first && setup.autostart && running.is_none() {
+                                    running = start(&setup, selected, wiring(&tracker, &rules.router, &vpn.way, &frames, &own)).await;
+                                    system_proxy.apply(proxy, &setup, running.is_some());
+                                }
+                            }
+                            Err(why) => frames.send_modify(|f| f.saved = Some(Added { attempt, outcome: Err(why) })),
+                        }
+                    }
                     Command::Favorite { index, tag, on } => {
                         let links = links_of(&setup.profile);
                         let Some(link) = setup

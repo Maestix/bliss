@@ -7,7 +7,7 @@ members = ["crates/*"]
 default-members = ["crates/proto", "crates/core", "crates/xray", "crates/tun", "crates/openvpn", "crates/app"]
 
 [workspace.package]
-version = "0.5.15"
+version = "0.5.16"
 edition = "2024"
 # The highest any locked dependency asks for (time, libloading, icu), and what
 # the let-chains in the code need: with an older rustc cargo says so in one
@@ -117,6 +117,9 @@ windows = { version = "0.62", features = [
 libc = "0.2"
 camino = "1"                                           # Utf8Path: Windows paths that print sanely
 directories = "6"                                      # %APPDATA% by the book, not by hand
+qrcode = { version = "0.15", default-features = false }  # a link as a QR code, for the phone to scan
+rqrr = { version = "0.11", default-features = false }   # and one read off a picture: import by QR on the desktop
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 jiff = "0.2"                                           # timestamps; correct where chrono is merely popular
 
 # --- crypto, stage 3 ------------------------------------------------------

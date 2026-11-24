@@ -87,7 +87,7 @@ The long-form plan, in Russian, lives outside the repo at
 
 | crate | package | what lives there |
 |---|---|---|
-| `crates/proto` | `bliss-proto` | pure data: the parsed server — protocol, security, transport — and its redacting types (`server.rs`); share links, one parser per scheme in `link/` (`vless.rs`, `vmess.rs`, `trojan.rs`, `shadowsocks.rs`, `socks.rs`, `hysteria2.rs`, `wireguard.rs`) and the transport and TLS parameters they share (`link/stream.rs`); TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
+| `crates/proto` | `bliss-proto` | pure data: the parsed server — protocol, security, transport — and its redacting types (`server.rs`); a server as a form, written back into a link and read out of one (`form.rs`); share links, one parser per scheme in `link/` (`vless.rs`, `vmess.rs`, `trojan.rs`, `shadowsocks.rs`, `socks.rs`, `hysteria2.rs`, `wireguard.rs`) and the transport and TLS parameters they share (`link/stream.rs`); TOML profile (`profile.rs`), routing rules as written (`routing.rs`), VLESS Encryption parameter (`encryption.rs`), credential redaction (`redact.rs`) |
 | `crates/core` | `bliss-core` | engine-agnostic: inbound — SOCKS5 and HTTP on one port (`inbound.rs`, `socks5.rs`, `http.rs`), `Outbound` trait, relay, connection tracker, routing matcher (`routing.rs`), geo `.dat` decoder (`geo.rs`), system proxy (`sysproxy.rs`), port→process lookup (`process.rs`); leaving by one interface (`interface.rs`), dialling through one — the VPN's — with its own DNS servers (`through.rs`, `dns.rs`) |
 | `crates/openvpn` | `bliss-openvpn` | the work VPN: the profile rewritten to serve bliss's rules (`profile.rs`), OpenVPN's interactive service and, on Linux, `pkexec` (`service.rs`), its management interface (`management.rs`), one connection from start to finish (`session.rs`) |
 | `crates/xray` | `bliss-xray` | xray config generation for every protocol and transport, written for the engine's version (`config.rs`), process supervision tied to bliss's life — a Job Object, on Linux the parent-death signal (`job.rs`) — GitHub downloader; `tests/engine.rs` carries every kind of link end to end through a real xray (§2) |
@@ -705,6 +705,35 @@ These cost the most time on this project. None of them announce themselves.
   include; its `via` takes a login or none. Written without a window to
   look at it and not run against GitHub from here: the container reaches
   the internet through an HTTPS proxy only.
+- **A server can be written by hand, looked at field by field, and shared.**
+  Asked for by the user on 24 November. `bliss_proto::ServerForm` is every
+  field as text, shared by both programs (the phone gets it over its socket
+  as JSON): `to_link` writes the share link and reads it back through the
+  very parser a pasted link goes through, so nothing is saved the engine
+  would refuse, and a refusal names the field, never the value;
+  `from_config` reads a server back into it, and `rows` makes the card's
+  lines, secrets marked (`every_protocol_round_trips`). A server so written
+  is a link like any other: the profile format did not move. The desktop's
+  «Вручную» by the import field opens `ServerFormDialog`; a row's ⓘ opens
+  `CardDialog` (`Command::ServerCard`, `Frame.card`): the fields, a secret
+  shown on a click, the link to copy or as a QR code (`qr.rs`, the
+  `qrcode` crate, dark on white with a quiet zone — read back by a decoder
+  in the window's probe), «Изменить» for a server added by hand
+  (`replace_server`, which keeps its place and star) and «Копия для правки»
+  for one a subscription brought, whose next update would undo an edit. A
+  subscription's card (`GroupCard`, the share button on its card) holds its
+  whole address, hidden until clicked. **The link is in the frame only
+  while a card is open**, because someone asked to see it; `Card`'s
+  `Debug` shows the title. On the phone the same as sheets, the link shared
+  through Android's share sheet or copied marked sensitive; editing there
+  also moves the star, a network's rule and the server in use to the new
+  key. **A QR code is read off a picture on the desktop** (`qr::read`,
+  `rqrr` and `image`, 20 MB and 8 000 px at most): «QR-код» by the import
+  field opens the system's file dialog — on Linux dioxus's goes through
+  xdg-desktop-portal over D-Bus, then zenity, and this container has
+  neither, so there only the reading itself was seen to work
+  (`a_code_is_read_back_off_its_picture`). The form, the card, the QR
+  code and an edit were driven in the window under Xvfb on 24 November.
 - **A star is `favorite = true` on a `[[server]]`**, written only when set;
   the list shows starred servers under «Избранное» first and not again in
   their section (`server_sections`), the tray's menus put them first

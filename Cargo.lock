@@ -740,7 +740,7 @@ checksum = "6099cdc01846bc367c4e7dd630dc5966dccf36b652fae7a74e17b640411a91b2"
 
 [[package]]
 name = "bliss"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "base64",
  "bliss-core",
@@ -755,11 +755,14 @@ dependencies = [
  "embed-resource",
  "futures-util",
  "gtk",
+ "image",
  "jiff",
  "jpeg-decoder",
  "libc",
  "mimalloc",
+ "qrcode",
  "reqwest",
+ "rqrr",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
@@ -770,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-android"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "base64",
  "bliss-core",
@@ -792,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-core"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "async-trait",
  "bliss-proto",
@@ -807,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-openvpn"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "bliss-core",
  "libc",
@@ -820,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-proto"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "base64",
  "color-eyre",
@@ -836,14 +839,14 @@ dependencies = [
 
 [[package]]
 name = "bliss-spike"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "dioxus",
 ]
 
 [[package]]
 name = "bliss-tun"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "async-trait",
  "bliss-core",
@@ -861,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-xray"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "base64",
  "bliss-core",
@@ -2792,6 +2795,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "font-types"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3036,6 +3045,34 @@ checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
 dependencies = [
  "byteorder",
 ]
+
+[[package]]
+name = "g2gen"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5a7e0eb46f83a20260b850117d204366674e85d3a908d90865c78df9a6b1dfc"
+dependencies = [
+ "g2poly",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "g2p"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "539e2644c030d3bf4cd208cb842d2ce2f80e82e6e8472390bcef83ceba0d80ad"
+dependencies = [
+ "g2gen",
+ "g2poly",
+]
+
+[[package]]
+name = "g2poly"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "312d2295c7302019c395cfb90dacd00a82a2eabd700429bba9c7a3f38dbbe11b"
 
 [[package]]
 name = "gdk"
@@ -3604,7 +3641,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -3612,6 +3649,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hassle-rs"
@@ -4562,6 +4602,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
 dependencies = [
  "imgref",
+]
+
+[[package]]
+name = "lru"
+version = "0.18.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -6122,6 +6171,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ace1a365f55004297f2cf24acfd96d02966246ca423385273b58a7dc873ee14d"
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6641,6 +6696,16 @@ name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
+name = "rqrr"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d084c50c5cfa397a081850da329566c8667b0b6c4e81da16abff1fef27de93b"
+dependencies = [
+ "g2p",
+ "lru",
+]
 
 [[package]]
 name = "rustc-demangle"
