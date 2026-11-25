@@ -221,15 +221,20 @@ cargo build -p bliss         # target/debug/bliss.exe
   `android/build-native.sh` with the runner's newest NDK and Gradle 8.14.3,
   and puts them with a `SHA256SUMS.txt` on the tag's release; run by hand
   it only leaves artifacts. Every APK, debug or release, is signed with
-  one key (alias `androiddebugkey`), so that each release installs over the
-  last and over what phones already have, keeping the app's data; a key of
-  each run's own would mean uninstalling for every update. The key is not
-  in the repository: it was committed while the repository was private and
-  cut from the whole history on 25 November 2026, before it went public.
-  Locally `android/keystore.properties` names it (both are gitignored); the
-  workflow writes them from the secrets `ANDROID_KEYSTORE_B64` and
-  `ANDROID_KEYSTORE_PASSWORD` and stops if they are missing. Without the
-  file Gradle signs with the SDK's debug key, which installs over nothing.
+  one key (alias `bliss`, certificate SHA-256 `b25dcb27…9e43c1`), so that
+  each release installs over the last, keeping the app's data; a key of each
+  run's own would mean uninstalling for every update. The key is not in the
+  repository. Locally `android/keystore.properties` names it (both are
+  gitignored); the workflow writes them from the secrets
+  `ANDROID_KEYSTORE_B64` and `ANDROID_KEYSTORE_PASSWORD`, stops if they are
+  missing, and checks the APK's signer against that certificate (step
+  `Signer`). Without the file Gradle signs with the SDK's debug key, which
+  installs over nothing. **The key was changed on 25 November 2026**: the
+  first one (alias `androiddebugkey`) had been committed while the
+  repository was private, and though it was cut from the history, GitHub
+  still served the old commits by hash once the repository went public.
+  APKs up to 0.5.16 carry the old key; the first release after them does
+  not install over them, so phones uninstall bliss once and install again.
   Checked here: the `.deb` built from this container's build installed
   through apt with its capability and came off clean, and the APK signed
   with the committed key. First run on 5 November, v0.5.0: every job green

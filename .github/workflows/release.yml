@@ -112,7 +112,7 @@ jobs:
           {
             echo "storeFile=bliss.keystore"
             echo "storePassword=$KEYSTORE_PASSWORD"
-            echo "keyAlias=androiddebugkey"
+            echo "keyAlias=bliss"
             echo "keyPassword=$KEYSTORE_PASSWORD"
           } > keystore.properties
       - name: APK
@@ -125,7 +125,7 @@ jobs:
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
           signer="$("$apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk | sed -n 's/.*certificate SHA-256 digest: //p')"
           echo "signer: $signer"
-          [ "$signer" = 27eead3adc8c82403898420f4205de11994b8d005359695751100a8af6de8180 ] || { echo "::error::the APK is not signed with bliss's key"; exit 1; }
+          [ "$signer" = b25dcb2715080dc4bfbf8675ec636ea247e35d5a30ee4e63f0610788309e43c1 ] || { echo "::error::the APK is not signed with bliss's key"; exit 1; }
       - name: Package
         run: |
           version="${GITHUB_REF_NAME}"
