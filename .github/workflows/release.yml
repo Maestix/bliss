@@ -118,6 +118,14 @@ jobs:
       - name: APK
         working-directory: android
         run: gradle assembleRelease --no-daemon
+      # The one key, or no release: an APK signed with any other would not
+      # install over the ones already on phones.
+      - name: Signer
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          signer="$("$apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk | sed -n 's/.*certificate SHA-256 digest: //p')"
+          echo "signer: $signer"
+          [ "$signer" = 27eead3adc8c82403898420f4205de11994b8d005359695751100a8af6de8180 ] || { echo "::error::the APK is not signed with bliss's key"; exit 1; }
       - name: Package
         run: |
           version="${GITHUB_REF_NAME}"
