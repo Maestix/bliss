@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+license.workspace = true
 description = "A work VPN beside the tunnel: OpenVPN, started through its own service and kept to bliss's rules"
 
 [dependencies]

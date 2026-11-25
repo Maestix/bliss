@@ -1,0 +1,35 @@
+bliss
+Copyright (C) 2026 Maestix — https://github.com/Maestix/bliss
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.
+
+
+Additional terms (GPL-3.0, section 7(b))
+----------------------------------------
+
+Any version of this program you convey, modified or not, must keep the author
+attribution shown in the app: the line naming Maestix as the author, in the
+"О программе" card of the desktop settings and under the version in the
+Android settings. You may add your own name next to it; you may not remove or
+hide it.
+
+
+Third-party material
+--------------------
+
+- xray-core (https://github.com/XTLS/Xray-core), Mozilla Public License 2.0.
+  The desktop app downloads its official release at the user's request and
+  runs it as a separate process; the Android APK carries it, built unmodified
+  from that repository's source (android/build-native.sh names the version).
+- Comfortaa — Copyright 2011 The Comfortaa Project Authors, and the country
+  flags of Noto Color Emoji — Copyright 2022 Google Inc.; both under the SIL
+  Open Font License 1.1, whose text is in crates/app/assets/OFL-*.txt.
+- Rust, Go and Android libraries keep their own licenses; see Cargo.lock and
+  android/app/build.gradle.kts for the list.

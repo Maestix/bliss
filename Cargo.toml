@@ -14,6 +14,8 @@ edition = "2024"
 # line instead of failing inside some crate. build-linux.sh checks the same.
 rust-version = "1.88"
 authors = ["Maestix"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Maestix/bliss"
 
 # One table, declared once, used per crate. Entries here are picked deliberately;
 # the comments say why, so a later "do we still need this?" has an answer.

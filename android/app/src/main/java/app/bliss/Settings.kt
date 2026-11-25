@@ -89,6 +89,8 @@ fun Settings(frame: Frame, c: Commands, openTraffic: () -> Unit, openNetwork: (S
                 Text(if (frame.engine.isEmpty()) "движок xray — внутри приложения" else "движок ${frame.engine} — внутри приложения",
                     style = T.tiny.copy(fontSize = 12.5.sp), modifier = Modifier.padding(top = 4.dp))
                 Text("Comfortaa · SIL Open Font License", style = T.tiny.copy(fontSize = 12.5.sp))
+                // GPL-3.0 section 7(b): versions passed on keep this line (see NOTICE).
+                Text("Автор: Maestix · GPL-3.0", style = T.tiny.copy(fontSize = 12.5.sp))
             }
             Image(painterResource(R.drawable.bunny), "Зайчик спит в чашке", Modifier.size(150.dp, 142.dp))
         }

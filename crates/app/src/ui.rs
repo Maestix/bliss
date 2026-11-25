@@ -8042,6 +8042,25 @@ fn Settings(frame: Frame) -> Element {
                 }
                 GeoCard { geo: frame.geo.clone() }
                 VpnCard { vpn: frame.vpn.clone() }
+                AboutCard {}
+            }
+        }
+    }
+}
+
+/// Who made bliss and on what terms. The author's line is the additional term
+/// of the licence (GPL-3.0, section 7(b), see NOTICE): versions passed on keep it.
+#[component]
+fn AboutCard() -> Element {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    rsx! {
+        div {
+            style: "flex:none;display:flex;flex-direction:column;gap:4px;padding:16px;                    background-color:var(--color-surface);border-radius:8px;                    box-shadow:var(--shadow-sm)",
+            span { style: "font:700 16px/1 var(--font-heading);padding:0 0 8px", "О программе" }
+            span { style: "font-size:14.5px", "bliss {VERSION}" }
+            span {
+                style: "font-size:12.5px;line-height:1.45;color:var(--color-neutral-600)",
+                "Автор: Maestix · лицензия GPL-3.0 · github.com/Maestix/bliss"
             }
         }
     }

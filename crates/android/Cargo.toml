@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+license.workspace = true
 description = "bliss's tunnel on Android: the core, the engine and a socket for the screens"
 
 # libbliss.so for the app, and an rlib so the engine's logic is tested on the
