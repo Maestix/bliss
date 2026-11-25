@@ -3,8 +3,10 @@
 # of building it. Run by hand (Actions → release → Run workflow) it builds
 # the same and leaves the files as the run's artifacts.
 #
-# Android's APK is signed with android/bliss.keystore, the one key every build
-# uses, so each release installs over the last.
+# Android's APK is signed with the one key every release uses, so each
+# installs over the last. The key is not in the repository: the secrets
+# ANDROID_KEYSTORE_B64 (the keystore, base64) and ANDROID_KEYSTORE_PASSWORD
+# hold it, and a build without them stops rather than ship another key.
 name: release
 
 on:
@@ -97,6 +99,22 @@ jobs:
           gradle-version: "8.14.3"
       - name: Native libraries (libbliss.so, libxray.so)
         run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" android/build-native.sh
+      - name: Signing key
+        working-directory: android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 and ANDROID_KEYSTORE_PASSWORD are not set"; exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > bliss.keystore
+          {
+            echo "storeFile=bliss.keystore"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=androiddebugkey"
+            echo "keyPassword=$KEYSTORE_PASSWORD"
+          } > keystore.properties
       - name: APK
         working-directory: android
         run: gradle assembleRelease --no-daemon

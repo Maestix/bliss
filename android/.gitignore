@@ -5,3 +5,7 @@ local.properties
 app/src/main/jniLibs/
 *.apk
 .kotlin/
+# The signing key and its passwords: never in the repository.
+*.keystore
+*.jks
+keystore.properties

@@ -220,13 +220,16 @@ cargo build -p bliss         # target/debug/bliss.exe
   on windows-latest as one `.exe`, and Android on ubuntu-latest through
   `android/build-native.sh` with the runner's newest NDK and Gradle 8.14.3,
   and puts them with a `SHA256SUMS.txt` on the tag's release; run by hand
-  it only leaves artifacts. Every APK, debug or release, from any machine,
-  is signed with `android/bliss.keystore` (password `android`, alias
-  `androiddebugkey`): the debug key of the container that built every APK
-  before, committed on the user's word — the repository is private and bliss
-  is shared among a few friends — so that each release installs over the
-  last and over what their phones already have, keeping the app's data.
-  A key of each run's own would have meant uninstalling for every update.
+  it only leaves artifacts. Every APK, debug or release, is signed with
+  one key (alias `androiddebugkey`), so that each release installs over the
+  last and over what phones already have, keeping the app's data; a key of
+  each run's own would mean uninstalling for every update. The key is not
+  in the repository: it was committed while the repository was private and
+  cut from the whole history on 25 November 2026, before it went public.
+  Locally `android/keystore.properties` names it (both are gitignored); the
+  workflow writes them from the secrets `ANDROID_KEYSTORE_B64` and
+  `ANDROID_KEYSTORE_PASSWORD` and stops if they are missing. Without the
+  file Gradle signs with the SDK's debug key, which installs over nothing.
   Checked here: the `.deb` built from this container's build installed
   through apt with its capability and came off clean, and the APK signed
   with the committed key. First run on 5 November, v0.5.0: every job green

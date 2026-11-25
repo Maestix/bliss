@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -58,16 +59,21 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
 
-    // One key for every build, kept in the repository (a private one, at the
-    // user's word): the debug key of the machine that built every APK before
-    // GitHub Actions did, so a build from anywhere installs over any other
-    // and keeps the app's data. Debug builds take it too.
+    // One key for every build, so a release installs over the last and keeps
+    // the app's data. It is not in the repository: android/keystore.properties
+    // (storeFile, storePassword, keyAlias, keyPassword) names it, and the
+    // release workflow writes that file from the repository's secrets.
+    // Without it a build is signed with the SDK's own debug key: it runs, but
+    // will not install over the published APKs.
+    val keys = rootProject.file("keystore.properties").takeIf { it.exists() }?.let { f ->
+        Properties().apply { f.inputStream().use { load(it) } }
+    }
     signingConfigs {
-        getByName("debug") {
-            storeFile = File(rootDir, "bliss.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (keys != null) create("bliss") {
+            storeFile = rootProject.file(keys.getProperty("storeFile"))
+            storePassword = keys.getProperty("storePassword")
+            keyAlias = keys.getProperty("keyAlias")
+            keyPassword = keys.getProperty("keyPassword")
         }
     }
 
@@ -76,8 +82,9 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("bliss") ?: signingConfigs.getByName("debug")
         }
+        debug { signingConfigs.findByName("bliss")?.let { signingConfig = it } }
     }
 
     compileOptions {
