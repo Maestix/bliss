@@ -1560,6 +1560,23 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     address's 1, let a subscription's buttons drop under its words below
     300px, and widened the import row to 760px so «Вручную» stays on it.
 
+34. **A row has one framed button; other ways are quiet.** The user found
+    the buttons badly placed (26 November): six framed buttons of one
+    weight in two rows under the server list, five in a subscription's
+    card, and on the routing screen «Добавить правило» over «Сохранить как
+    пресет», their right edges 116px apart (the heading keeps clear of the
+    window's buttons; the bar below does not). Now:
+    - the import form is the field and «Добавить»; pasting, a QR picture
+      and the form by hand are `QuietButton`s (`.quiet-act`: accent text,
+      no frame) on a line under it, after «или»;
+    - the servers screen's checks are in its heading, as «Обновить все» is
+      on the subscriptions screen, each label `squeeze`d to its icon under
+      980px (`.squeeze`), what it measures in its tooltip;
+    - a subscription's card frames «Обновить» alone; edit, copy, share and
+      delete are icons, the bin armed by a first click as every list's is;
+    - «Добавить правило» stands on the rules card's heading line, and a new
+      preset is a dashed chip after the presets (`.preset-chip.new`).
+
 ## 7. Verifying a UI change: look at the real window
 
 A replica page proves a mechanism, not that the code changed. For any UI bug,

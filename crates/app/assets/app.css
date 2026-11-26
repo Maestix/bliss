@@ -131,6 +131,7 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
 @media (max-width: 980px) {
   .listen { display: none; }
   .head-hint { display: none; }
+  .squeeze { display: none; }
   .stats-card { width: 190px; }
 }
 
@@ -457,6 +458,18 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
   transition: background-color .14s ease, color .14s ease, box-shadow .14s ease;
 }
 .preset-chip:not(.on):hover { color: var(--color-neutral-200); background-color: rgba(239, 232, 245, .06); }
+/* The chip that makes a new one: dashed, quieter than any preset. */
+.preset-chip.new { color: var(--color-neutral-500); box-shadow: none; outline: 1px dashed rgba(239, 232, 245, .18); outline-offset: -1px; }
+
+/* A second way to do something (`QuietButton`): accent text and its icon,
+   no frame, a tint on hover. A row keeps one framed button. */
+.quiet-act {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 7px;
+  border-radius: 4px; font-size: 13px; white-space: nowrap; cursor: pointer;
+  color: var(--color-accent-300);
+  transition: background-color .14s ease, color .14s ease;
+}
+.quiet-act:hover { color: #ee82c4; background-color: rgba(238, 130, 196, .10); }
 .preset-chip.on {
   color: #ee82c4; background-color: rgba(238, 130, 196, .14);
   box-shadow: inset 0 0 0 1px rgba(238, 130, 196, .30);

@@ -2551,9 +2551,7 @@ fn ImportForm(
         }
     };
     let typed = !link().trim().is_empty();
-    // 760: the field's 220px and the four buttons beside it, with «Вручную»
-    // added. At 680 that button alone wrapped onto a second line.
-    let width = if wide { "none" } else { "760px" };
+    let width = if wide { "none" } else { "680px" };
     // Why the last picture gave no link; the engine's answer says the rest.
     let mut from_picture = use_signal(|| None::<String>);
     let read_picture = {
@@ -2581,9 +2579,9 @@ fn ImportForm(
 
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:7px;max-width:{width}",
-            // Wraps, so the field keeps a width a link can be read in when the
-            // buttons do not fit beside it.
-            div { style: "display:flex;align-items:center;flex-wrap:wrap;gap:8px",
+            // The field and the one button that acts on it; the other ways
+            // to bring a server in are a quiet line under them.
+            div { style: "display:flex;align-items:center;gap:8px",
                 input {
                     class: "field",
                     r#type: "text",
@@ -2613,11 +2611,14 @@ fn ImportForm(
                     },
                     icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
                 }
+            }
+            div { style: "display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-left:-6px",
+                span { style: "padding:0 2px 0 6px;font-size:13px;color:var(--color-neutral-600)", "или" }
                 // Straight from the clipboard, in one click: the link is long,
                 // and selecting a field to paste into is one more thing to aim at.
-                Button {
-                    label: "Вставить",
-                    enabled: true,
+                QuietButton {
+                    label: "вставить из буфера",
+                    title: "Ctrl+V в любом месте окна делает то же",
                     // A clone like the others: rsx builds this handler before
                     // theirs, so moving the original here left them nothing.
                     onclick: {
@@ -2633,31 +2634,28 @@ fn ImportForm(
                             });
                         }
                     },
-                    icon: rsx! { crate::icons::Copy { size: 15, color: ACCENT } },
+                    icon: rsx! { crate::icons::Copy { size: 14, color: ACCENT } },
                 }
                 // A link that came as a QR code: a screenshot or a photo of it.
+                // A label, so the click opens the file input inside it.
                 label {
-                    class: "act",
+                    class: "quiet-act",
                     title: "Картинка с QR-кодом сервера или подписки: скриншот или фото",
-                    style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;\
-                            border-radius:4px;font-size:14px;white-space:nowrap;flex:none;\
-                            color:var(--color-neutral-200);\
-                            box-shadow:inset 0 0 0 1px rgba(238,130,196,.35)",
                     input {
                         r#type: "file",
                         accept: "image/*",
                         style: "display:none",
                         onchange: read_picture,
                     }
-                    crate::icons::Qr { size: 15, color: ACCENT }
-                    "QR-код"
+                    crate::icons::Qr { size: 14, color: ACCENT }
+                    "QR-код с картинки"
                 }
                 if manual {
-                    Button {
-                        label: "Вручную",
-                        enabled: true,
+                    QuietButton {
+                        label: "заполнить вручную",
+                        title: "Сервер без ссылки: адрес, протокол и ключи по полям",
                         onclick: move |_| open_form(None, bliss_proto::ServerForm::new_server()),
-                        icon: rsx! { crate::icons::Pencil { size: 15, color: ACCENT } },
+                        icon: rsx! { crate::icons::Pencil { size: 14, color: ACCENT } },
                     }
                 }
             }
@@ -2806,24 +2804,52 @@ fn TrafficTab(frame: Frame) -> Element {
 /// alone. The connection screen keeps its traffic and its actions.
 #[component]
 fn Servers(frame: Frame) -> Element {
+    let controller = use_context::<Controller>();
+    let probing = sweeping(&frame);
+    let checks = checking(&frame);
+    let none = frame.servers.is_empty();
     rsx! {
         div {
             style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;\
                     padding:18px 20px 18px 12px",
             div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Серверы" }
-                span {
-                    style: "font-size:13.5px;color:var(--color-neutral-500);white-space:nowrap;flex:none",
-                    "{plural(frame.servers.len() as u64, \"сервер\", \"сервера\", \"серверов\")}"
+                GivesWay {
+                    style: "flex:1;font-size:13.5px;color:var(--color-neutral-500)",
+                    // The hint that sat under the list, when there is room.
+                    parts: vec![
+                        plural(frame.servers.len() as u64, "сервер", "сервера", "серверов"),
+                        "· переключение перезапускает движок".to_owned(),
+                    ],
                 }
-                // Says what the number is before anyone reads it as a promise
-                // the tunnel will be this fast. `.head-hint`: hidden in a
-                // narrow window, where it would be cut mid-word.
-                span {
-                    class: "head-hint",
-                    style: "margin-left:auto;font-size:13px;color:var(--color-neutral-600);\
-                            min-width:0;overflow:hidden;white-space:nowrap",
-                    "отклик — TCP-рукопожатие до сервера, мимо туннеля"
+                // What the screen does to the whole list, where the other
+                // screens keep theirs (`Обновить все` on the subscriptions screen).
+                // What each number means is in the button's tooltip, before
+                // anyone reads it as a promise the tunnel will be this fast.
+                div {
+                    style: "margin-left:auto;flex:none;align-self:center;display:flex;gap:8px",
+                    title: "Проверить отклик: TCP-рукопожатие до сервера, мимо туннеля",
+                    Button {
+                        squeeze: true,
+                        label: if probing { "Проверяю…" } else { "Проверить отклик" },
+                        enabled: !probing && !none,
+                        onclick: {
+                            let controller = controller.clone();
+                            move |_| controller.send(Command::PingAll)
+                        },
+                        icon: rsx! { crate::icons::Pulse { size: 15, color: ACCENT } },
+                    }
+                }
+                div {
+                    style: "flex:none;align-self:center",
+                    title: "Проверить доступ: открыть страницу через каждый сервер — дольше, но точнее",
+                    Button {
+                        squeeze: true,
+                        label: if checks { "Проверяю доступ…" } else { "Проверить доступ" },
+                        enabled: !checks && !none,
+                        onclick: move |_| controller.send(Command::CheckAll),
+                        icon: rsx! { crate::icons::Shield { size: 15, color: ACCENT } },
+                    }
                 }
             }
             div {
@@ -2843,8 +2869,6 @@ fn Servers(frame: Frame) -> Element {
 /// there is nothing to reload — so the row does not pretend to be instant.
 #[component]
 fn ServerList(frame: Frame) -> Element {
-    let controller = use_context::<Controller>();
-    let probing = sweeping(&frame);
     // A delete clicked once, by the row's place in the list; the second deletes.
     let armed = use_signal(|| None::<usize>);
     let sections = server_sections(&frame.servers, &GROUP_OPEN());
@@ -3016,30 +3040,6 @@ fn ServerList(frame: Frame) -> Element {
             }
 
             ImportForm { frame: frame.clone(), placeholder: "vless://, trojan://, ss://… или адрес подписки", manual: true }
-
-            div { style: "display:flex;align-items:center;gap:10px;padding-top:2px",
-                Button {
-                    label: if probing { "Проверяю…" } else { "Проверить все" },
-                    enabled: !probing && !frame.servers.is_empty(),
-                    onclick: {
-                        let controller = controller.clone();
-                        move |_| controller.send(Command::PingAll)
-                    },
-                    icon: rsx! { crate::icons::Pulse { size: 15, color: ACCENT } },
-                }
-                Button {
-                    label: if checking(&frame) { "Проверяю доступ…" } else { "Проверить доступ" },
-                    enabled: !checking(&frame) && !frame.servers.is_empty(),
-                    onclick: {
-                        let controller = controller.clone();
-                        move |_| controller.send(Command::CheckAll)
-                    },
-                    icon: rsx! { crate::icons::Shield { size: 15, color: ACCENT } },
-                }
-                span { style: "font-size:13px;color:var(--color-neutral-600)",
-                    "переключение перезапускает движок"
-                }
-            }
         }
     }
 }
@@ -3277,6 +3277,11 @@ fn Button(
     label: String,
     enabled: bool,
     onclick: EventHandler<MouseEvent>,
+    /// The label gives way in a narrow window (`.squeeze` in app.css) and
+    /// the icon stays: for a screen heading's buttons, which otherwise ran
+    /// under the window's own at 880px.
+    #[props(default)]
+    squeeze: bool,
 ) -> Element {
     let tone = if enabled {
         "color:var(--color-neutral-200);box-shadow:inset 0 0 0 1px rgba(238,130,196,.35)"
@@ -3289,6 +3294,30 @@ fn Button(
             style: "display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:4px;\
                     font-size:14px;white-space:nowrap;flex:none;{tone}",
             onclick: move |e| if enabled { onclick.call(e) },
+            {icon}
+            if squeeze {
+                span { class: "squeeze", "{label}" }
+            } else {
+                "{label}"
+            }
+        }
+    }
+}
+
+/// A second way to do something: accent text with its icon and no frame, so
+/// a row has one bordered button — the thing most people do there — and
+/// the others read as alternatives to it. Six framed buttons of one weight
+/// in two rows under the server list told nobody where to start. Its look
+/// is `.quiet-act` in app.css; the inline style never changes (rule 1).
+#[component]
+fn QuietButton(
+    icon: Element,
+    label: String,
+    #[props(default)] title: String,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+        span { class: "quiet-act", title, onclick: move |e| onclick.call(e),
             {icon}
             "{label}"
         }
@@ -3658,7 +3687,6 @@ fn Routing(frame: Frame) -> Element {
     let controller = use_context::<Controller>();
     let view = &frame.routing;
     let query = use_signal(String::new);
-    let suggested = suggested_action(view.fallback);
     // The editor belongs to this screen; leaving the screen closes it.
     use_drop(|| *DRAFT.write() = None);
 
@@ -3676,14 +3704,6 @@ fn Routing(frame: Frame) -> Element {
                         parts.push(format!("· остальное {}", view.fallback.label()));
                         parts
                     },
-                }
-                div { style: "margin-left:auto;flex:none;align-self:center",
-                    Button {
-                        label: "Добавить правило",
-                        enabled: true,
-                        onclick: move |_| new_rule(suggested, ""),
-                        icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
-                    }
                 }
             }
 
@@ -3745,7 +3765,7 @@ fn Routing(frame: Frame) -> Element {
             Checker {
                 query,
                 result: frame.check.clone(),
-                suggested,
+                suggested: suggested_action(view.fallback),
                 onask: {
                     let controller = controller.clone();
                     move |text: String| controller.send(Command::Check(text))
@@ -3914,16 +3934,17 @@ fn PresetBar(view: crate::engine::RoutingView) -> Element {
                 }
             }
             if naming().is_none() {
-                div { style: "margin-left:auto",
-                    Button {
-                        label: "Сохранить как пресет",
-                        enabled: true,
-                        onclick: move |_| {
-                            text.set(String::new());
-                            naming.set(Some(Naming::New));
-                        },
-                        icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
-                    }
+                // A new preset is a chip among the presets: what it makes goes
+                // there. It was a framed button at the bar's far end, under the
+                // screen's own, their right edges out of line.
+                span {
+                    class: "preset-chip new",
+                    title: "Сохранить положения всех переключателей как новый пресет",
+                    onclick: move |_| {
+                        text.set(String::new());
+                        naming.set(Some(Naming::New));
+                    },
+                    "+ пресет"
                 }
             } else {
                 div { style: "display:flex;align-items:center;gap:4px",
@@ -4040,18 +4061,30 @@ fn RuleList(view: crate::engine::RoutingView, vpn: bool) -> Element {
     // The rule whose delete was clicked once; the second click deletes it.
     let mut armed = use_signal(|| None::<usize>);
     let count = view.rules.len();
+    let fallback = view.fallback;
 
     rsx! {
         div {
             style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:9px;padding:16px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
-            div { style: "display:flex;align-items:baseline;gap:10px",
-                span { style: "font:700 16px/1 var(--font-heading)", "Правила" }
-                span {
-                    style: "font-size:13px;color:var(--color-neutral-600);min-width:0;\
-                            overflow:hidden;white-space:nowrap",
-                    "сверху вниз, срабатывает первое · клик — изменить"
+            // The card's own button, on its heading's line: the heading of the
+            // screen held it, over the preset bar's own button, and the two
+            // stood one over the other with their right edges 116px apart.
+            div { style: "display:flex;align-items:center;gap:10px",
+                span { style: "flex:none;font:700 16px/1 var(--font-heading)", "Правила" }
+                GivesWay {
+                    style: "flex:1;font-size:13px;color:var(--color-neutral-600)",
+                    parts: vec![
+                        "сверху вниз, срабатывает первое".to_owned(),
+                        "· клик — изменить".to_owned(),
+                    ],
+                }
+                Button {
+                    label: "Добавить правило",
+                    enabled: true,
+                    onclick: move |_| new_rule(suggested_action(fallback), ""),
+                    icon: rsx! { crate::icons::Plus { size: 15, color: ACCENT } },
                 }
             }
 
@@ -4063,8 +4096,8 @@ fn RuleList(view: crate::engine::RoutingView, vpn: bool) -> Element {
                         style: "padding:14px 2px;font-size:14px;line-height:1.5;\
                                 color:var(--color-neutral-600)",
                         "Ни одного правила — всё решает строка «Всё остальное». Своё правило \
-                         добавляется кнопкой вверху или правым кликом по соединению в «Логах \
-                         и трафике»."
+                         добавляется кнопкой «Добавить правило» или правым кликом по соединению \
+                         в «Логах и трафике»."
                     }
                 }
                 for (at, rule) in view.rules.iter().enumerate() {
@@ -7723,7 +7756,14 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                     }
                 }
             }
-            div { style: "flex:none;margin-left:auto;display:flex;align-items:center;gap:6px",
+            div { style: "flex:none;margin-left:auto;display:flex;align-items:center;gap:4px",
+                Button {
+                    label: if row.fetching { "Загружаю…" } else { "Обновить" },
+                    enabled: !row.fetching,
+                    onclick: refresh,
+                    icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
+                }
+                span { style: "width:6px" }
                 IconButton {
                     title: "Изменить название или адрес",
                     enabled: true,
@@ -7746,15 +7786,19 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                     },
                     icon: rsx! { crate::icons::Share { size: 15, color: MUTED } },
                 }
-                Button {
-                    label: if row.fetching { "Загружаю…" } else { "Обновить" },
-                    enabled: !row.fetching,
-                    onclick: refresh,
-                    icon: rsx! { crate::icons::Refresh { size: 15, color: ACCENT } },
+                // A bin like every other list's; the first click arms it and
+                // says so beside it, the second deletes.
+                if armed() {
+                    span { style: "font-size:13px;color:#f2a7ad;white-space:nowrap", "точно удалить?" }
                 }
-                Button {
-                    label: if armed() { "Точно удалить?" } else { "Удалить" },
+                IconButton {
+                    title: if armed() {
+                        "Нажмите ещё раз — подписка и её серверы будут удалены"
+                    } else {
+                        "Удалить подписку вместе с её серверами"
+                    },
                     enabled: true,
+                    danger: true,
                     onclick: move |_| {
                         if armed() {
                             armed.set(false);
@@ -7763,7 +7807,7 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                             armed.set(true);
                         }
                     },
-                    icon: rsx! { crate::icons::Trash { size: 15, color: BAD } },
+                    icon: rsx! { crate::icons::Trash { size: 15, color: if armed() { BAD } else { MUTED } } },
                 }
             }
         }
