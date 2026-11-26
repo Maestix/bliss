@@ -246,7 +246,39 @@ cargo build -p bliss         # target/debug/bliss.exe
   `rustup target add x86_64-pc-windows-gnu` and mingw's gcc (`apt-get
   install gcc-mingw-w64-x86-64`, for ring's C), `cargo clippy --target
   x86_64-pc-windows-gnu --all-targets` type-checks every crate, the window
-  included; it links and runs nothing.
+  included; it links and runs nothing. The phone's crate checks the same
+  way with the NDK's clang named for `ring` (`CC_aarch64_linux_android`,
+  `AR_…`, `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`, as
+  `android/build-native.sh` sets them): `cargo clippy -p bliss-android
+  --target aarch64-linux-android --all-targets`.
+- **`cargo audit` (cargo-audit 0.22) is read, not obeyed.** The pass of 26
+  November moved ten crates within their versions (rustls, tokio, etherparse
+  — which reads every packet of the TUN — quinn, url, webpki and others).
+  tokio 1.54 made `AsyncFd::new` deprecated for the I/O-safety advisory, so
+  both TUN devices use `AsyncFd::register` with the `OwnedFd` it owns. What
+  it still reports, and why it stays: zip 6 (every advisory is about
+  `extract`, symlinks, AES or the legacy decoders, and `unpack` reads two
+  names by `enclosed_name`, deflate only, under a cap; zip 9 wants Rust
+  1.89, past `rust-version`); quick-xml 0.30 inside `zbus_xml`, reading the
+  session bus's own introspection; glib 0.18 and the unmaintained crates of
+  GTK 3's and dioxus's trees.
+- **Parsers were fuzzed on stable Rust**, there being no nightly here for
+  cargo-fuzz: a mutation loop (seeds, bit flips, splices, `catch_unwind`
+  per input) run as a throwaway test inside each crate, so private
+  parsers could be reached. Every parser that reads the network or a file
+  took a million inputs or so — SNI and `Host:`, QUIC, the fake-IP DNS,
+  SOCKS5 and HTTP heads, DNS answers, `/proc/net`, every link through
+  `ServerForm` and `bliss_xray::build`, subscriptions, `subscription-userinfo`,
+  rule text, the profile, QR pictures — and the round trips were held to
+  their own output. It found the geo walk's panic (§5), a host that reached
+  xray with a control character or percent-encoded, SOCKS losing `fm` and
+  splitting a user at its colon, and rule text that read back as another
+  rule; each has its test now. The harness was not committed.
+- **Two ignored tests do not pass in a cloud container**, before and after
+  any change: `netns` needs the kernel's `dummy` link type (`ip link add …
+  type dummy`: "Unknown device type"; install `iproute2` first), and the
+  engine test's WireGuard UDP case gets no datagram back. The other 26
+  engine cases and `the_ports_serve_only_bliss` pass there.
 
 **On Linux, in WSL.** The user's WSL Ubuntu 24.04 is the Linux this port was
 built and tested on. Its default Rust (1.86) is too old for the lockfile, so
@@ -530,7 +562,11 @@ These cost the most time on this project. None of them announce themselves.
   stepped over. runetfreedom's geosite is 85 MB, and the phone compiles a
   table on every rule switch, in its engine loop
   (`the_walk_reads_what_the_whole_file_holds`, ignored, needs
-  `BLISS_GEO_DIR`).
+  `BLISS_GEO_DIR`). An entry shorter than the varints that start it ends
+  the walk: the rest of it was `len - head`, which went below zero — a
+  panic in a debug build, a slice past the end in a release one — on a
+  corrupt or doctored file, and the phone reads each fetched file through
+  this walk before taking it (`a_corrupt_file_yields_nothing_rather_than_panicking`).
 - **A cap checked after the allocation is not a cap.** The HTTP head budget goes
   into `take` before reading, because `read_line` allocates the whole line first.
 - **Declared is not implemented.** An error variant with no constructor, a
@@ -734,6 +770,16 @@ These cost the most time on this project. None of them announce themselves.
   neither, so there only the reading itself was seen to work
   (`a_code_is_read_back_off_its_picture`). The form, the card, the QR
   code and an edit were driven in the window under Xvfb on 24 November.
+  **A host is checked wherever the link keeps it** (`Address::from_host`):
+  no control character or space, and a name through IDNA into the ASCII a
+  resolver asks for. VMess's JSON and Shadowsocks' old base64 put a host
+  outside the URL, where nothing looked at it, and the URL parser leaves a
+  host under a scheme it does not know percent-encoded: `пример.рф` reached
+  xray as `%D0%BF…`, which never resolves. The form writes the host the
+  same way, so a saved server reads back unchanged; SOCKS now reads `fm` as
+  every other protocol does and decodes its user and password apart
+  (`a_host_is_checked_and_written_as_the_engine_looks_it_up`,
+  `socks_reads_both_shapes`).
 - **A star is `favorite = true` on a `[[server]]`**, written only when set;
   the list shows starred servers under «Избранное» first and not again in
   their section (`server_sections`), the tray's menus put them first
@@ -866,6 +912,13 @@ These cost the most time on this project. None of them announce themselves.
   `parts.stop().await` finish before `start`, or the new xray finds the bridge
   port taken and fails for a reason unrelated to the server. A rule's switch
   and a preset are rule changes like any other: no restart.
+- **A rule's text reads back as the rule it came from** (`rule_text.rs`).
+  Domains and addresses are written bare in the editor unless bare they
+  read as something else, and then with their prefix: `domain:setup.exe`
+  came back as a program, `10.` (a domain `10`) as a port, and
+  `abcd::/16` as an unknown prefix `abcd:`, refused. A name with `#` or `/`
+  in it is refused rather than cut at it, and `domain:10.0.0.1` is the
+  address (`a_domain_that_looks_like_something_else_keeps_its_prefix`).
 - **A rule can be switched off, and presets put the switches back.** Asked for
   by the user with many rules and several ways of using them, so as not to
   flip each one by hand.
