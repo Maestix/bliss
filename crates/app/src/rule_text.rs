@@ -38,9 +38,21 @@ pub fn to_text(rule: &Rule) -> String {
             .map(|value| format!("{prefix}:{value}"))
             .collect()
     };
-    let mut lines = rule.domain.clone();
+    // Domains and addresses are written bare unless bare they would read as
+    // something else — `10` as a port, `setup.exe` as a program, `abcd::/16`
+    // as an unknown prefix — and the rule change, or fail, at the next save.
+    let bare = |prefix: &str, list: List, values: &[String]| -> Vec<String> {
+        values
+            .iter()
+            .map(|value| match condition(value) {
+                Ok((read_as, read)) if read_as == list && read == *value => value.clone(),
+                _ => format!("{prefix}:{value}"),
+            })
+            .collect()
+    };
+    let mut lines = bare("domain", List::Domain, &rule.domain);
     lines.extend(prefixed("geosite", &rule.geosite));
-    lines.extend(rule.ip.iter().cloned());
+    lines.extend(bare("ip", List::Ip, &rule.ip));
     lines.extend(prefixed("geoip", &rule.geoip));
     lines.extend(prefixed("port", &rule.port));
     lines.extend(prefixed("process", &rule.process));
@@ -105,6 +117,11 @@ pub fn condition(entry: &str) -> Result<(List, String), String> {
         match prefix.trim().to_ascii_lowercase().as_str() {
             "geosite" => return category(value).map(|v| (List::Geosite, v)),
             "geoip" => return category(value).map(|v| (List::Geoip, v)),
+            // An address written as a domain is an address: the router reads
+            // a name spelled as one as the address it is.
+            "domain" | "suffix" if address(value).is_ok() => {
+                return address(value).map(|v| (List::Ip, v));
+            }
             "domain" | "suffix" => return host(value).map(|v| (List::Domain, v)),
             "full" => return host(value).map(|v| (List::Domain, format!("full:{v}"))),
             "keyword" => return keyword(value).map(|v| (List::Domain, format!("keyword:{v}"))),
@@ -126,7 +143,9 @@ pub fn condition(entry: &str) -> Result<(List, String), String> {
             other
                 if !other.is_empty()
                     && other.chars().all(|c| c.is_ascii_alphabetic())
-                    && !value.chars().all(|c| c.is_ascii_digit()) =>
+                    && !value.chars().all(|c| c.is_ascii_digit())
+                    // `abcd::/16` is an IPv6 network, not a prefix `abcd:`.
+                    && address(entry).is_err() =>
             {
                 return Err(format!(
                     "не знаю приставки {other}: — есть domain, full, keyword, geosite, geoip, \
@@ -239,8 +258,12 @@ fn host(value: &str) -> Result<String, String> {
         return Err("не указан домен".to_owned());
     }
     // An international name is compared in the ASCII form programs send.
+    // What a URL reads as the end of its host is refused first: put inside
+    // one, `пример#x` was the name `пример` and the rest went unsaid.
     let value = if value.is_ascii() {
         value.to_ascii_lowercase()
+    } else if value.contains(['/', '\\', '?', '#', '@', ':', '%', '[', ']']) {
+        return Err(NOT_A_DOMAIN.to_owned());
     } else {
         reqwest::Url::parse(&format!("http://{value}/"))
             .ok()
@@ -253,7 +276,8 @@ fn host(value: &str) -> Result<String, String> {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     });
-    if fine {
+    // An address is no domain, however it came to be spelled like one.
+    if fine && value.parse::<IpAddr>().is_err() {
         Ok(value)
     } else {
         Err(NOT_A_DOMAIN.to_owned())
@@ -311,7 +335,8 @@ fn program(value: &str) -> Result<String, String> {
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or_default()
-        .trim();
+        .trim()
+        .trim_matches('"');
     if name.is_empty() {
         return Err("не указана программа".to_owned());
     }
@@ -395,6 +420,29 @@ mod tests {
         );
         let again = parse("", Action::Direct, &to_text(&rule)).expect("reads back");
         assert_eq!(again, rule);
+    }
+
+    /// A rule reads back as it was saved, whatever its domains look like.
+    /// Found by fuzzing on 26 November: `domain:setup.exe` came back as a
+    /// program, `10.` as port 10, and a name with `#` in it lost its tail.
+    #[test]
+    fn a_domain_that_looks_like_something_else_keeps_its_prefix() {
+        let rule = parse("", Action::Direct, "domain:setup.exe\n10.").expect("reads");
+        assert_eq!(rule.domain, ["setup.exe", "10"]);
+        assert!(rule.process.is_empty() && rule.port.is_empty());
+        assert_eq!(to_text(&rule), "domain:setup.exe\ndomain:10");
+        let again = parse("", Action::Direct, &to_text(&rule)).expect("reads back");
+        assert_eq!(again, rule);
+
+        assert!(parse("", Action::Direct, "пример.рф#x").is_err());
+        let address = parse("", Action::Direct, "domain:10.0.0.1").expect("reads");
+        assert_eq!(address.ip, ["10.0.0.1"]);
+        let v6 = parse("", Action::Direct, "abcd::/16").expect("reads");
+        assert_eq!(v6.ip, ["abcd::/16"]);
+        assert_eq!(
+            parse("", Action::Direct, &to_text(&v6)).expect("reads back"),
+            v6
+        );
     }
 
     #[test]
