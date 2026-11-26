@@ -7,7 +7,7 @@ members = ["crates/*"]
 default-members = ["crates/proto", "crates/core", "crates/xray", "crates/tun", "crates/openvpn", "crates/app"]
 
 [workspace.package]
-version = "0.5.17"
+version = "0.5.18"
 edition = "2024"
 # The highest any locked dependency asks for (time, libloading, icu), and what
 # the let-chains in the code need: with an older rustc cargo says so in one
