@@ -372,7 +372,11 @@ fn walk(
             },
             _ => None,
         };
-        let rest = len - head.len() as u64;
+        // The head's varints can run past an entry that says it is shorter
+        // than they are: a corrupt file, which ends the walk like any other.
+        let Some(rest) = len.checked_sub(head.len() as u64) else {
+            return Ok(());
+        };
         match named {
             Some(name) if !want(&name) => {
                 if file.seek_relative(rest as i64).is_err() {
@@ -663,6 +667,11 @@ mod tests {
             ("empty.dat", vec![]),
             // A length that runs off the end of the buffer.
             ("overlong.dat", vec![0x0a, 0x7f, 0x01]),
+            // An entry shorter than the varint that starts it: the rest of
+            // it came out below zero, and the walk panicked (found by
+            // fuzzing on 26 November).
+            ("short.dat", vec![0x0a, 0x00, 0x00, 0x00]),
+            ("shorter.dat", vec![0x0a, 0x01, 0x0a, 0x05, b'R', b'U']),
         ] {
             let path = dir.join(name);
             std::fs::write(&path, &bytes).unwrap();
