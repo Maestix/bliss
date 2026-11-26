@@ -740,7 +740,7 @@ checksum = "6099cdc01846bc367c4e7dd630dc5966dccf36b652fae7a74e17b640411a91b2"
 
 [[package]]
 name = "bliss"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "base64",
  "bliss-core",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-android"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "base64",
  "bliss-core",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-core"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "async-trait",
  "bliss-proto",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-openvpn"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "bliss-core",
  "libc",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-proto"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "base64",
  "color-eyre",
@@ -839,14 +839,14 @@ dependencies = [
 
 [[package]]
 name = "bliss-spike"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "dioxus",
 ]
 
 [[package]]
 name = "bliss-tun"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "async-trait",
  "bliss-core",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-xray"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "base64",
  "bliss-core",
