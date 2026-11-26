@@ -78,7 +78,7 @@ fn json_form(body: &str) -> Result<ServerConfig, LinkError> {
     };
 
     let host = field("add").ok_or(LinkError::MissingHost)?;
-    let address = Address::from_host(&host);
+    let address = Address::from_host(&host)?;
     let port = field("port").ok_or(LinkError::MissingPort)?;
     let port: u16 = port.parse().map_err(|_| LinkError::BadValue {
         param: "port",

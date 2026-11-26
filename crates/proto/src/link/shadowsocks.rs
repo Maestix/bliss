@@ -89,7 +89,7 @@ fn legacy(body: &str) -> Result<ServerConfig, LinkError> {
         expected: "a port number",
         got: port.to_owned(),
     })?;
-    let address = Address::from_host(host);
+    let address = Address::from_host(host)?;
 
     Ok(ServerConfig {
         tag: tag(fragment, &address, port),

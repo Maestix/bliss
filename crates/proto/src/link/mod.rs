@@ -123,7 +123,7 @@ fn user_info(url: &Url) -> Option<String> {
 fn endpoint(url: &Url, default_port: Option<u16>) -> Result<(Address, u16), LinkError> {
     let host = url.host_str().ok_or(LinkError::MissingHost)?;
     let port = url.port().or(default_port).ok_or(LinkError::MissingPort)?;
-    Ok((Address::from_host(host), port))
+    Ok((Address::from_host(host)?, port))
 }
 
 /// The server's name: the link's `#fragment`, or where it points.

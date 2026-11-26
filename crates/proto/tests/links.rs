@@ -526,6 +526,69 @@ fn socks_reads_both_shapes() {
         Some(("user".to_owned(), PASSWORD.to_owned()))
     );
     assert_eq!(login(parse("socks://203.0.113.2:1080")), None);
+    // A user with a colon in it, escaped as the form writes it: split at
+    // that colon once the two halves were decoded together.
+    assert_eq!(
+        login(parse(&format!(
+            "socks5://u%3Au:{PASSWORD}@203.0.113.2:1080"
+        ))),
+        Some(("u:u".to_owned(), PASSWORD.to_owned()))
+    );
+    // `fm` is read under SOCKS as under every other protocol: dropped, it
+    // was lost the first time a server written by hand was saved.
+    let cfg = parse(r#"socks://203.0.113.2:1080?fm=%7B%22tcp%22%3A%5B%5D%7D"#);
+    assert!(cfg.finalmask.is_some());
+}
+
+/// A host is a host wherever the link keeps it. Found by fuzzing on 26
+/// November: a control character inside VMess's JSON or Shadowsocks' old
+/// base64 reached the engine's config, and a name in Cyrillic reached it
+/// percent-encoded, which no resolver knows.
+#[test]
+fn a_host_is_checked_and_written_as_the_engine_looks_it_up() {
+    let json = |add: &str| {
+        serde_json::json!({
+            "v": "2", "ps": "n", "add": add, "port": "443",
+            "id": "11111111-2222-3333-4444-555555555555", "net": "tcp",
+        })
+        .to_string()
+    };
+    assert!(matches!(
+        refusal(&format!(
+            "vmess://{}",
+            STANDARD.encode(json("a\u{5}b.example"))
+        )),
+        LinkError::BadValue {
+            param: "address",
+            ..
+        }
+    ));
+    assert!(matches!(
+        refusal(&format!(
+            "ss://{}#old",
+            STANDARD.encode("aes-128-gcm:pass@a\u{7f}.example:8388")
+        )),
+        LinkError::BadValue {
+            param: "address",
+            ..
+        }
+    ));
+    let idn = "xn--e1afmkfd.xn--p1ai";
+    for link in [
+        "trojan://PPPPPPPP@пример.рф:443".to_owned(),
+        "trojan://PPPPPPPP@%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.%D1%80%D1%84:443".to_owned(),
+        format!("vmess://{}", STANDARD.encode(json("пример.рф"))),
+    ] {
+        assert_eq!(
+            parse(&link).address,
+            Address::Domain(idn.to_owned()),
+            "{link}"
+        );
+    }
+    assert_eq!(
+        parse("trojan://PPPPPPPP@[2001:db8::1]:443").address,
+        Address::Ip("2001:db8::1".parse().unwrap())
+    );
 }
 
 #[test]

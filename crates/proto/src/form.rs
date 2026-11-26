@@ -349,14 +349,12 @@ impl ServerForm {
         if address.is_empty() {
             return Err("укажите адрес сервера".to_owned());
         }
-        if address.contains(['/', '?', '#', '@', ' ']) {
-            return Err("в адресе сервера только имя или IP, без схемы и пути".to_owned());
-        }
-        let host = if address.contains(':') && !address.starts_with('[') {
-            format!("[{address}]")
-        } else {
-            address.to_owned()
-        };
+        // Written as the parser will read it back — an IPv6 address in its
+        // brackets, a name in IDNA's ASCII — so a saved server reads the
+        // same in the form the next time it is opened.
+        let host = Address::from_host(address)
+            .map_err(|_| "в адресе сервера только имя или IP, без схемы и пути".to_owned())?
+            .to_string();
         let port = match self.port.trim() {
             "" if self.protocol == "hysteria2" => 443,
             "" => return Err("укажите порт сервера".to_owned()),

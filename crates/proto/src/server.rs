@@ -511,11 +511,45 @@ impl fmt::Display for Address {
 
 impl Address {
     /// The host part of a URL, with an IPv6 literal's brackets taken off.
-    pub(crate) fn from_host(host: &str) -> Self {
-        match host.trim_start_matches('[').trim_end_matches(']').parse() {
-            Ok(ip) => Self::Ip(ip),
-            Err(_) => Self::Domain(host.to_owned()),
+    ///
+    /// A host is checked here because two kinds of link carry it outside the
+    /// URL — VMess's JSON and Shadowsocks' old base64 shape — where nothing
+    /// else looks at it: a control character went through to the engine's
+    /// config, and the form wrote it back into a link unescaped, so the
+    /// server changed address each time it was edited (found by fuzzing).
+    pub(crate) fn from_host(host: &str) -> Result<Self, crate::LinkError> {
+        let bad = || crate::LinkError::BadValue {
+            param: "address",
+            expected: "a host name or an IP address",
+            got: host.to_owned(),
+        };
+        if !Self::plain_host(host) {
+            return Err(bad());
         }
+        if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse() {
+            return Ok(Self::Ip(ip));
+        }
+        // A name as the engine can look it up. The URL parser leaves the host
+        // of a scheme it does not know percent-encoded, so `пример.рф` reached
+        // xray as `%D0%BF…` and never resolved; decoded and put through IDNA
+        // it is `xn--e1afmkfd.xn--p1ai`, which does.
+        let decoded = percent_encoding::percent_decode_str(host)
+            .decode_utf8()
+            .map_err(|_| bad())?;
+        match url::Host::parse(&decoded).map_err(|_| bad())? {
+            url::Host::Domain(name) => Ok(Self::Domain(name)),
+            url::Host::Ipv4(ip) => Ok(Self::Ip(IpAddr::V4(ip))),
+            url::Host::Ipv6(ip) => Ok(Self::Ip(IpAddr::V6(ip))),
+        }
+    }
+
+    /// A host and nothing else: no control character, no space, nothing a
+    /// URL would read as the start of another of its parts.
+    pub(crate) fn plain_host(host: &str) -> bool {
+        !host.is_empty()
+            && !host
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
     }
 }
 
