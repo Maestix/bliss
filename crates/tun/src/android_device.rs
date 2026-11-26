@@ -36,7 +36,10 @@ impl Packets {
                 return Err(io::Error::last_os_error());
             }
         }
-        Ok(Self(AsyncFd::new(fd)?))
+        // SAFETY: an `OwnedFd` stays open as long as it lives and always
+        // names the same descriptor, and the `AsyncFd` owns it from here.
+        let packets = unsafe { AsyncFd::register(fd) }.map_err(|e| e.into_parts().1)?;
+        Ok(Self(packets))
     }
 }
 

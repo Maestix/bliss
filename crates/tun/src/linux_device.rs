@@ -97,9 +97,13 @@ impl Device {
             )));
         }
 
+        // SAFETY: an `OwnedFd` stays open as long as it lives and always
+        // names the same descriptor, and the `AsyncFd` owns it from here.
+        // (tokio 1.54 made the constructor `unsafe` to say so: RUSTSEC-2026-0386.)
+        let packets = unsafe { AsyncFd::register(file) }.map_err(|e| e.into_parts().1)?;
         Ok(Self {
             index,
-            packets: Some(Packets(AsyncFd::new(file)?)),
+            packets: Some(Packets(packets)),
         })
     }
 
