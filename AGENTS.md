@@ -1545,6 +1545,21 @@ now reads back empty** (`dioxus-interpreter-js` 0.7.10, `setAttributeInner`, cas
     the rule, the target — with a country's note on a second line. It was a
     card 288px wide and the screen's height; the rules have that width now.
 
+33. **Text that cannot fit gives way by whole parts, never mid-word**
+    (`GivesWay`, `.gives-way`). A screen's count beside its heading, the
+    hints beside the search boxes and the main screen's line of details
+    were `overflow:hidden` and cut where the room ended — «остальнои»,
+    «0 соединени», «visior» — seen in a window under Xvfb at 1040 and
+    880px on 26 November. Now each is a list of parts, one line tall, and
+    a part that does not fit wraps onto a second line that is never seen
+    (rule 19's trick). An empty first item lets even the first part go;
+    it holds a zero-width space so the row can align by its baseline, and
+    every part is a line tall, or the hidden line shows. The same pass
+    shortened the proxy choices to «Установить» and «Очистить» (each sits
+    under «Системный прокси»), gave the server list's name 1.6 to the
+    address's 1, let a subscription's buttons drop under its words below
+    300px, and widened the import row to 760px so «Вручную» stays on it.
+
 ## 7. Verifying a UI change: look at the real window
 
 A replica page proves a mechanism, not that the code changed. For any UI bug,

@@ -2103,16 +2103,21 @@ fn StatusCards(frame: Frame) -> Element {
                     }
                     span {
                         // One line: `VLESS · xhttp · reality · firefox` is long,
-                        // and a narrow card clips its tail rather than growing.
-                        style: "font-size:14px;color:var(--color-neutral-500);white-space:nowrap",
+                        // and a narrow card drops its tail a part at a time
+                        // rather than growing (`GivesWay`, whose look this is;
+                        // the uptime is a component, so it is written out).
+                        class: "gives-way",
+                        style: "font-size:14px;color:var(--color-neutral-500)",
+                        span { "\u{200B}" }
                         if on {
                             // Boxed digits, or the tail of this line walks left
                             // and right once a second; see `FIGURE_EM`.
-                            span { "В сети " }
-                            Ticking { text: frame.uptime.clone() }
-                            span { " · {detail}" }
-                        } else {
-                            "{detail}"
+                            span { "В сети " Ticking { text: frame.uptime.clone() } }
+                        }
+                        for (i, part) in detail.split(" · ").filter(|part| !part.is_empty()).enumerate() {
+                            span { key: "{i}",
+                                if on || i > 0 { "· {part}" } else { "{part}" }
+                            }
                         }
                     }
                 }
@@ -2546,7 +2551,9 @@ fn ImportForm(
         }
     };
     let typed = !link().trim().is_empty();
-    let width = if wide { "none" } else { "680px" };
+    // 760: the field's 220px and the four buttons beside it, with «Вручную»
+    // added. At 680 that button alone wrapped onto a second line.
+    let width = if wide { "none" } else { "760px" };
     // Why the last picture gave no link; the engine's answer says the rest.
     let mut from_picture = use_signal(|| None::<String>);
     let read_picture = {
@@ -3464,12 +3471,16 @@ fn Connections(frame: Frame) -> Element {
                     padding:18px 20px 18px 12px",
             div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Логи и трафик" }
-                // Clipped rather than wrapped: the heading and the buttons beside
-                // it keep one line, and this is the part that can give way.
-                // `flex:1`, so the button stays at the right end when the
-                // rates beside it are hidden.
-                span { style: "flex:1;font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
-                    "{plural(frame.active, \"соединение\", \"соединения\", \"соединений\")} сейчас · {frame.opened} за сессию"
+                // The part that gives way, by whole parts: the heading and the
+                // buttons beside it keep one line. `flex:1`, so the button
+                // stays at the right end when the rates beside it are hidden.
+                GivesWay {
+                    style: "flex:1;font-size:13.5px;color:var(--color-neutral-500)",
+                    parts: vec![
+                        plural(frame.active, "соединение", "соединения", "соединений"),
+                        "сейчас".to_owned(),
+                        format!("· {} за сессию", frame.opened),
+                    ],
                 }
                 // `.head-hint`: hidden in a narrow window, where the heading,
                 // the rates and the button no longer fit beside the window's
@@ -3527,16 +3538,15 @@ fn Connections(frame: Frame) -> Element {
                     }
                 }
                 RuleFilter { choices, total: frame.connections.len() }
-                span {
-                    style: "flex:1 1 0;font-size:12.5px;color:var(--color-neutral-600);min-width:0;\
-                            overflow:hidden;white-space:nowrap",
-                    if !note.is_empty() {
-                        "{note}"
+                GivesWay {
+                    style: "flex:1 1 0;font-size:12.5px;color:var(--color-neutral-600)",
+                    parts: vec![if !note.is_empty() {
+                        note.to_string()
                     } else if narrowed {
-                        "показано {rows.len()} из {frame.connections.len()}"
+                        format!("показано {} из {}", rows.len(), frame.connections.len())
                     } else {
-                        "правый клик по строке — правило для её программы или сайта"
-                    }
+                        "правый клик по строке — правило для её программы или сайта".to_owned()
+                    }],
                 }
             }
 
@@ -3659,8 +3669,13 @@ fn Routing(frame: Frame) -> Element {
 
             div { style: "{SCREEN_HEAD}",
                 h4 { style: "margin:0;font-size:21px;white-space:nowrap;flex:none", "Маршрутизация" }
-                span { style: "font-size:13.5px;color:var(--color-neutral-500);min-width:0;overflow:hidden;white-space:nowrap",
-                    "{rule_count(view)} · остальное {view.fallback.label()}"
+                GivesWay {
+                    style: "flex:1;font-size:13.5px;color:var(--color-neutral-500)",
+                    parts: {
+                        let mut parts = rule_count(view);
+                        parts.push(format!("· остальное {}", view.fallback.label()));
+                        parts
+                    },
                 }
                 div { style: "margin-left:auto;flex:none;align-self:center",
                     Button {
@@ -3988,15 +4003,16 @@ fn PresetPills(view: crate::engine::RoutingView) -> Element {
     }
 }
 
-/// `5 правил`, or `5 правил, 2 выключены` when some are off.
-fn rule_count(view: &crate::engine::RoutingView) -> String {
+/// `5 правил`, or `5 правил,` `2 выключены` when some are off: two parts, so
+/// a narrow heading can drop the second (`GivesWay`).
+fn rule_count(view: &crate::engine::RoutingView) -> Vec<String> {
     let total = plural(view.rules.len() as u64, "правило", "правила", "правил");
     match view.rules.iter().filter(|rule| !rule.enabled).count() {
-        0 => total,
-        off => format!(
-            "{total}, {}",
-            plural(off as u64, "выключено", "выключены", "выключено")
-        ),
+        0 => vec![total],
+        off => vec![
+            format!("{total},"),
+            plural(off as u64, "выключено", "выключены", "выключено"),
+        ],
     }
 }
 
@@ -4286,8 +4302,9 @@ fn Checker(
                             "{elide(&answer.target, 40)}"
                         }
                     } else {
-                        span { style: "min-width:0;overflow:hidden;font-size:13px;color:var(--color-neutral-600)",
-                            "куда пойдёт адрес, без подключения"
+                        GivesWay {
+                            style: "flex:1;font-size:13px;color:var(--color-neutral-600)",
+                            parts: vec!["куда пойдёт адрес, без подключения".to_owned()],
                         }
                     }
                 }
@@ -4330,6 +4347,29 @@ fn route_color(closed: bool) -> &'static str {
         "var(--color-neutral-600)"
     } else {
         "var(--color-accent-300)"
+    }
+}
+
+/// A line of text that gives way a part at a time: each part is shown whole
+/// or not at all, the ones that no longer fit wrapping onto a second line
+/// that `.gives-way` keeps out of sight (rule 19's trick). The heading's count,
+/// the hints beside the search boxes and the main screen's line of details
+/// were clipped where the room ended instead, mid-word or mid-letter
+/// ("остальнои", "visior"), which reads as a rendering fault.
+///
+/// The first item is empty, so that even the first part can go: the first
+/// item on a line is never wrapped off it, however wide it is. It holds a
+/// zero-width space, so it has a baseline: a heading row aligns by them, and
+/// an empty one put the line a few pixels above the heading beside it.
+#[component]
+fn GivesWay(parts: Vec<String>, style: String) -> Element {
+    rsx! {
+        span { class: "gives-way", style: "{style}",
+            span { "\u{200B}" }
+            for (i, part) in parts.iter().enumerate() {
+                span { key: "{i}", "{part}" }
+            }
+        }
     }
 }
 
@@ -4979,7 +5019,8 @@ mod tests {
         }
         let c = ServerColumns::new(1000.0, None, None).expect("room");
         assert_eq!(c.kind, SERVER_KIND);
-        assert!((c.name / c.addr - 1.2 / 1.4).abs() < 0.01, "{c:?}");
+        // The name's share, as `SERVER_COLUMNS` gives it before measuring.
+        assert!((c.name / c.addr - 1.6 / 1.0).abs() < 0.01, "{c:?}");
         // Too narrow for a table: the fractions draw it, as before measuring.
         assert_eq!(ServerColumns::new(300.0, None, None), None);
     }
@@ -7208,7 +7249,7 @@ fn RuleFilter(choices: Vec<(String, usize)>, total: usize) -> Element {
 /// `CONNECTION_COLUMNS`. This is the shape before the header has measured the
 /// list; after that `ServerColumns` gives it in pixels.
 const SERVER_COLUMNS: &str =
-    "grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) 136px 78px 92px;gap:12px";
+    "grid-template-columns:minmax(0,1.6fr) minmax(0,1fr) 136px 78px 92px;gap:12px";
 const SERVER_KIND: f64 = 136.0;
 /// Ping, the star, the card and the bin, and the four gaps between the five columns.
 const SERVER_FIXED: f64 = 78.0 + 92.0 + 4.0 * 12.0;
@@ -7245,7 +7286,7 @@ impl ServerColumns {
         let rest = text - kind;
         // The default share is the one the fractions above give.
         let name = name
-            .unwrap_or(rest * 1.2 / 2.6)
+            .unwrap_or(rest * 1.6 / 2.6)
             .clamp(MIN_TEXT_COLUMN, rest - MIN_TEXT_COLUMN)
             .round();
         Some(Self {
@@ -7637,7 +7678,10 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
     rsx! {
         div {
             // The form's padding above it, so their contents start at one edge.
-            style: "flex:none;display:flex;align-items:flex-start;gap:13px;padding:16px;\
+            // Wraps: under 300px for the words, the buttons go under them
+            // (right-aligned, `margin-left:auto`) rather than squeezing the
+            // status into a column of three-word lines.
+            style: "flex:none;display:flex;flex-wrap:wrap;align-items:flex-start;gap:13px;padding:16px;\
                     background-color:var(--color-surface);border-radius:8px;\
                     box-shadow:var(--shadow-sm)",
             onmouseleave: move |_| armed.set(false),
@@ -7646,7 +7690,7 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                         border-radius:8px;background-color:rgba(238,130,196,.10)",
                 crate::icons::Rss { size: 18, color: ACCENT }
             }
-            div { style: "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px",
+            div { style: "flex:1 1 300px;min-width:0;display:flex;flex-direction:column;gap:4px",
                 span { style: "font-size:15px;font-weight:700", "{elide(&row.name, 44)}" }
                 span {
                     style: "font-size:12.5px;color:var(--color-neutral-600);\
@@ -7679,7 +7723,7 @@ fn SubscriptionCard(row: crate::engine::SubscriptionRow) -> Element {
                     }
                 }
             }
-            div { style: "flex:none;display:flex;align-items:center;gap:6px",
+            div { style: "flex:none;margin-left:auto;display:flex;align-items:center;gap:6px",
                 IconButton {
                     title: "Изменить название или адрес",
                     enabled: true,

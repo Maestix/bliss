@@ -236,13 +236,15 @@ pub enum ProxyMode {
 }
 
 impl ProxyMode {
-    /// The label the window shows. Kept here rather than in the UI because the
-    /// tray menu in 1.8 needs the same three words.
+    /// The label the window shows, under a heading «Системный прокси» in
+    /// every place it does (the actions tab, the tray's menu on Windows and
+    /// on Linux), so the words do not say it again: as «Установить системный
+    /// прокси» they took two lines in the actions tab, three side by side.
     pub fn label(self) -> &'static str {
         match self {
             Self::Unchanged => "Не изменять",
-            Self::Set => "Установить системный прокси",
-            Self::Clear => "Очистить системный прокси",
+            Self::Set => "Установить",
+            Self::Clear => "Очистить",
         }
     }
 
