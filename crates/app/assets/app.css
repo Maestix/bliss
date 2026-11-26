@@ -377,6 +377,8 @@ body { font-size: 16px; -webkit-user-select: none; user-select: none; cursor: de
   padding: 7px 10px 3px; font-size: 12px; letter-spacing: .06em;
   color: var(--color-neutral-500); white-space: nowrap; overflow: hidden;
 }
+/* The menu's second title line, under the route it explains. */
+.menu-title.sub { padding-top: 0; letter-spacing: .02em; color: var(--color-neutral-600); }
 .menu-item {
   display: flex; align-items: center; gap: 9px; padding: 6px 10px;
   border-radius: 4px; font-size: 14px; color: var(--color-neutral-200);

@@ -6131,10 +6131,20 @@ fn row_menu(row: &bliss_core::Snapshot, x: f64, y: f64) -> RowMenu {
 }
 
 fn subject_label(subject: &Subject) -> String {
+    // A menu title holds some 26 letters of 12px spaced capitals-free text
+    // in the menu's 250px; the names are cut to fit with their prefix.
     match subject {
-        Subject::Program(name) => format!("программа · {}", elide(name, 22)),
-        Subject::Site(site) => format!("сайт · {}", elide(site, 26)),
-        Subject::Address(ip) => format!("адрес · {}", elide(ip, 26)),
+        Subject::Program(name) => format!("программа · {}", elide(name, 14)),
+        Subject::Site(site) => format!("сайт · {}", elide(site, 19)),
+        Subject::Address(ip) => format!("адрес · {}", elide(ip, 18)),
+    }
+}
+
+/// The menu's second line: which rule sent the connection where it went.
+fn decided_by(rule: &str) -> String {
+    match rule {
+        "по умолчанию" => "ни одно правило не подошло".to_owned(),
+        rule => format!("по правилу «{}»", elide(rule, 16)),
     }
 }
 
@@ -6165,7 +6175,7 @@ fn RowMenuView(menu: RowMenu, mut copied: Signal<String>, vpn: bool) -> Element 
     let (width, height) = viewport();
     let groups = subjects.len() as f64;
     let lines = actions(vpn, Action::Proxy).len() as f64;
-    let tall = 12.0 + 27.0 + groups * (11.0 + 27.0 + lines * 33.0) + 11.0 + 33.0;
+    let tall = 12.0 + 27.0 + 18.0 + groups * (11.0 + 27.0 + lines * 33.0) + 11.0 + 33.0;
     let left = menu.x.min(width - 256.0).max(4.0);
     let top = if menu.y + tall > height - 6.0 {
         (menu.y - tall).max(4.0)
@@ -6186,9 +6196,11 @@ fn RowMenuView(menu: RowMenu, mut copied: Signal<String>, vpn: bool) -> Element 
             },
         }
         div { class: "menu", style: "left:{left}px;top:{top}px",
-            div { class: "menu-title",
-                "сейчас {route_word(menu.route)} · {elide(&menu.rule, 20)}"
-            }
+            // Two lines: the route, then what decided it. On one, «сейчас
+            // через прокси · по умолчанию» ran past the menu's 250px and was
+            // cut mid-word; the user found it so.
+            div { class: "menu-title", "сейчас {route_word(menu.route)}" }
+            div { class: "menu-title sub", "{decided_by(&menu.rule)}" }
             for subject in subjects {
                 div { key: "{subject.value()}",
                     div { class: "menu-sep" }
