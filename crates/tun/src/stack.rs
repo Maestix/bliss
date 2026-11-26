@@ -574,10 +574,11 @@ async fn carry(mut client: IpStackTcpStream, carrying: Arc<Carrying>) -> io::Res
     // A pool address bliss no longer knows the name of — an answer a
     // program kept from before the pool forgot it — is asked for its name,
     // like a bare address; it must never be dialled as itself.
-    let forgotten = carrying.target(client.peer_addr()).is_err();
-    let mut target = carrying
-        .target(client.peer_addr())
-        .unwrap_or(Target::Socket(client.peer_addr()));
+    // Asked once: asked twice, the pool could forget the name between the
+    // two, and the second answer — the address itself — would be dialled.
+    let known = carrying.target(client.peer_addr());
+    let forgotten = known.is_err();
+    let mut target = known.unwrap_or_else(|()| Target::Socket(client.peer_addr()));
     // A bare address where bliss names sites: the program found it some
     // other way (a «Частный DNS», its own DNS over HTTPS, an address it
     // kept), and its first bytes are asked for the name instead.
