@@ -3867,7 +3867,7 @@ mod tests {
         let new_link = engine.profile.servers[0].link.clone();
         assert!(new_link.contains("a.example:8443"), "{new_link}");
         let new_key = crate::protocol::server_key(&new_link);
-        assert_eq!(engine.settings.favorites, [new_key.clone()]);
+        assert_eq!(engine.settings.favorites, std::slice::from_ref(&new_key));
         assert_eq!(
             engine.settings.networks[0].server.as_deref(),
             Some(new_key.as_str())
