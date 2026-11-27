@@ -364,7 +364,12 @@ from (`attach_console` in `main.rs`); `--minimized` alone is the window as
 Windows starts it at sign-in, and gets no console (`wants_console`). Git Bash, and anything
 capturing the output, hands over pipes and works as it always did; cmd and
 PowerShell do not wait for a windows-subsystem program, so their prompt comes
-back before the output does, and `$out = bliss …` captures nothing. In
+back before the output does, and `$out = bliss …` captures nothing. When the
+command ends, bliss puts one Enter into the console it joined
+(`give_the_prompt_back`), so the shell draws a fresh prompt under the output:
+without it the user took `bliss engine install` for hung on 27 November,
+its last line promising a window that would connect, and no prompt after.
+An error is printed by `main` itself for the same reason, before that Enter. In
 PowerShell a pipe makes it wait and capture: `bliss check | Out-String`. The first attempt at losing the console went the
 other way — a console program calling `FreeConsole` — and started from Explorer
 it served traffic with no window at all.

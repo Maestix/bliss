@@ -193,11 +193,21 @@ fn main() -> Result<()> {
         // No subcommand is the product: the window. The CLI is for setting it
         // up and for looking under the hood.
         None => window(parsed.minimized).inspect_err(report_to_user),
-        Some(command) => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .wrap_err("could not start a runtime")?
-            .block_on(cli(command)),
+        Some(command) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .wrap_err("could not start a runtime")?;
+            let done = runtime.block_on(cli(command));
+            drop(runtime);
+            // Reported here, as returning it from main would report it, so
+            // that the prompt comes back after it rather than before.
+            if let Err(e) = &done {
+                eprintln!("Error: {e:?}");
+            }
+            give_the_prompt_back();
+            std::process::exit(i32::from(done.is_err()));
+        }
     }
 }
 
@@ -672,7 +682,8 @@ installed xray-core {installed}
     println!(
         "
 bliss uses it automatically — no engine.xray needed in the profile.
-A bliss window that is open and waiting for an engine connects within seconds."
+Start bliss to connect; a window already open and waiting for an engine
+takes it up within seconds."
     );
     Ok(())
 }
@@ -952,9 +963,11 @@ fn attach_console() {
     // SAFETY: plain Win32 calls with no pointers of ours beyond the constant
     // device names; a handle that fails to open is simply not installed.
     unsafe {
-        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() && AllocConsole().is_err() {
+        let joined = AttachConsole(ATTACH_PARENT_PROCESS).is_ok();
+        if !joined && AllocConsole().is_err() {
             return;
         }
+        JOINED.store(joined, std::sync::atomic::Ordering::Relaxed);
         for (id, device) in [
             (STD_INPUT_HANDLE, w!("CONIN$")),
             (STD_OUTPUT_HANDLE, w!("CONOUT$")),
@@ -980,6 +993,60 @@ fn attach_console() {
 
 #[cfg(not(windows))]
 fn attach_console() {}
+
+/// Whether this run joined the console of the shell it came from (cmd,
+/// PowerShell), rather than a pipe's or one of its own.
+#[cfg(windows)]
+static JOINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hand the shell its prompt back, once everything has been printed.
+///
+/// cmd and PowerShell do not wait for a windows-subsystem program: their
+/// prompt is drawn as bliss starts, the output lands under it, and when
+/// bliss ends nothing draws a prompt again. The user ran `bliss engine
+/// install`, saw the last line and a cursor under it, and took the terminal
+/// for hung — «ни в шелл не выпускает». One Enter put into the console's
+/// input makes the shell draw a fresh prompt, as pressing it would. Only for
+/// a console joined from the shell: a pipe (Git Bash, a capture) needs
+/// nothing, and a console of bliss's own closes with it.
+#[cfg(windows)]
+fn give_the_prompt_back() {
+    use windows::Win32::System::Console::{
+        GetStdHandle, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD,
+        KEY_EVENT_RECORD_0, STD_INPUT_HANDLE, WriteConsoleInputW,
+    };
+
+    if !JOINED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // Enter: VK_RETURN, its scan code, and a carriage return as the character.
+    let key = |down: bool| INPUT_RECORD {
+        EventType: KEY_EVENT as u16,
+        Event: INPUT_RECORD_0 {
+            KeyEvent: KEY_EVENT_RECORD {
+                bKeyDown: down.into(),
+                wRepeatCount: 1,
+                wVirtualKeyCode: 0x0D,
+                wVirtualScanCode: 0x1C,
+                uChar: KEY_EVENT_RECORD_0 { UnicodeChar: 13 },
+                dwControlKeyState: 0,
+            },
+        },
+    };
+    // SAFETY: the input handle is the console's, set by `attach_console`;
+    // the records are plain data and `written` outlives the call.
+    unsafe {
+        if let Ok(input) = GetStdHandle(STD_INPUT_HANDLE) {
+            let mut written = 0;
+            let _ = WriteConsoleInputW(input, &[key(true), key(false)], &mut written);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn give_the_prompt_back() {}
 
 /// Raise the limit on open files to what the system allows. Linux starts a
 /// program at 1 024, and every connection through bliss takes two — the
