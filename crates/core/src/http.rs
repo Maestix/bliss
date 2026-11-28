@@ -231,6 +231,11 @@ pub async fn established<S: AsyncWrite + Unpin>(stream: &mut S) -> std::io::Resu
 }
 
 /// Refuse in a way a browser will show rather than spin on.
+///
+/// The body is Russian more often than not, and so is the system's own text
+/// for an error (Windows words its socket errors in the user's language):
+/// without a charset a browser read it in the locale's legacy code page, and
+/// a friend's first look at a refusal was a line of «РЎРґРµР»Р°РЅР°…».
 pub async fn refuse<S: AsyncWrite + Unpin>(
     stream: &mut S,
     status: &str,
@@ -240,7 +245,8 @@ pub async fn refuse<S: AsyncWrite + Unpin>(
     stream
         .write_all(
             format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )
             .as_bytes(),
@@ -252,6 +258,27 @@ pub async fn refuse<S: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal says its text is UTF-8, or a browser shows Russian as
+    /// mojibake in the locale's code page (seen on a friend's Windows).
+    #[tokio::test]
+    async fn a_refusal_names_its_charset() {
+        let mut out = Vec::new();
+        refuse(&mut out, "502 Bad Gateway", "сеть недоступна")
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        assert!(
+            head.contains("Content-Type: text/plain; charset=utf-8"),
+            "{head}"
+        );
+        assert!(
+            head.contains(&format!("Content-Length: {}", body.len())),
+            "{head}"
+        );
+        assert_eq!(body, "bliss: сеть недоступна\n");
+    }
 
     async fn head(bytes: Vec<u8>) -> Result<Request, HttpError> {
         accept(&mut BufReader::new(std::io::Cursor::new(bytes))).await

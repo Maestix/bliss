@@ -279,7 +279,20 @@ async fn dial_and_relay(
             if socks {
                 socks5::reply(&mut client, socks5::reply_code_for(&e)).await?;
             } else {
-                http::refuse(&mut client, "502 Bad Gateway", &e.to_string()).await?;
+                // Which way and where to, or a refusal names nothing to look
+                // for: «сеть недоступна» alone does not say it was a direct
+                // route to a work address.
+                let way = match decision.route {
+                    Route::Direct => "напрямую",
+                    Route::Vpn => "через VPN",
+                    _ => "через туннель",
+                };
+                http::refuse(
+                    &mut client,
+                    "502 Bad Gateway",
+                    &format!("{target} {way} (правило «{}»): {e}", decision.rule),
+                )
+                .await?;
             }
             return Err(e);
         }
